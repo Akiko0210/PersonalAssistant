@@ -7,6 +7,10 @@ REM ============================================================
 setlocal
 cd /d "%~dp0"
 
+REM Keep this as a regular project-local app: config, logs, sessions, and
+REM indexes all live under .voice-notes-agent beside this launcher.
+set "VOICE_NOTES_HOME=%~dp0.voice-notes-agent"
+
 REM --- 1. Create the virtual environment on first run ---------
 if not exist ".venv\Scripts\python.exe" (
     echo [setup] Creating virtual environment...
@@ -40,16 +44,23 @@ if defined NEED_INSTALL (
     echo done > ".venv\.installed"
 )
 
-REM --- 3. Create config.yaml from the example if missing ------
-if not exist "config.yaml" (
-    echo [setup] Creating config.yaml from config.example.yaml...
-    copy /y "config.example.yaml" "config.yaml" >nul
+REM --- 3. Create the project-local config from the example if missing ---
+set "APP_CONFIG_DIR=%VOICE_NOTES_HOME%"
+set "APP_CONFIG=%APP_CONFIG_DIR%\config.yaml"
+if not exist "%APP_CONFIG_DIR%" (
+    mkdir "%APP_CONFIG_DIR%"
 )
+if not exist "%APP_CONFIG%" (
+    echo [setup] Creating %APP_CONFIG% from config.example.yaml...
+    copy /y "config.example.yaml" "%APP_CONFIG%" >nul
+)
+echo [config] Using %APP_CONFIG%
 
 REM --- 4. Load API keys from .env (KEY=value per line) --------
 if exist ".env" (
     for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
-        set "%%a=%%b"
+        if /i "%%a"=="ANTHROPIC_API_KEY" set "%%a=%%b"
+        if /i "%%a"=="DEEPGRAM_API_KEY" set "%%a=%%b"
     )
 ) else (
     echo [warn] No .env file found. Put your API keys in a .env file:

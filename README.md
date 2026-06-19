@@ -1,6 +1,6 @@
 # Hands-Free Voice Notes Agent
 
-A single, always-available, voice-first personal assistant for Windows. It does two jobs:
+A regular foreground, voice-first personal assistant for Windows. It does two jobs:
 
 1. **Note-taking** — On command it records you for a long, mostly-silent session (hours of
    wall-clock time, but typically only minutes of real speech). Silence is never processed.
@@ -18,7 +18,7 @@ spec. This implementation follows that plan section-by-section.
 
 ## Architecture at a glance
 
-One persistent Python process hosts two mutually-exclusive subsystems plus a shared local store:
+One Python process hosts two mutually-exclusive subsystems plus a shared local store:
 
 ```
  Mic ──▶ Audio Router + Silero VAD ──▶ State Machine (MUTED / LISTENING / CAPTURING)
@@ -43,7 +43,7 @@ the device.
 |--------|----------------|-----------|
 | `config.py` | Load + validate `config.yaml` into typed dataclasses | §14 |
 | `state.py` | Three-state machine + guards + transition events | §4 |
-| `paths.py` | `%APPDATA%/voice-notes-agent` storage layout | §9 |
+| `paths.py` | project-local `.voice-notes-agent` storage layout | §9 |
 | `audio/vad.py` | Silero VAD wrapper + segmenter (pre-roll, hangover, min-len) | §5.2 |
 | `audio/router.py` | Shared mic input stream; hard mute releases the device | §5.7 |
 | `capture/recorder.py` | VAD-gated recorder, incremental crash-safe writes | §5.2 |
@@ -64,10 +64,7 @@ Target platform is Windows (single user). A wired headset is strongly recommende
 risk R-1 in the build plan (Bluetooth drops to narrowband when the mic opens).
 
 ```bash
-python -m venv .venv
-.venv\Scripts\activate            # Windows
-pip install -e .                  # or: pip install -r requirements.txt
-copy config.example.yaml "%APPDATA%\voice-notes-agent\config.yaml"
+run.bat                           # creates .venv and .voice-notes-agent\config.yaml
 ```
 
 Set provider API keys as environment variables (never commit them):
@@ -83,7 +80,7 @@ local cache. Note transcription is CPU-only by design (§C2).
 ## Run
 
 ```bash
-python -m voice_notes_agent          # starts MUTED (privacy by default, §C7)
+run.bat                              # starts MUTED (privacy by default, §C7)
 ```
 
 Then drive it entirely by ear:
@@ -113,5 +110,5 @@ This codebase implements the phased build plan in §12:
 - **Phase 0–2** (capture core, transcription, summary, RAG): implemented and unit-tested.
 - **Phase 3–4** (Pipecat conversation + tool wiring): implemented; requires Pipecat + cloud
   keys to run live.
-- **Phase 5–7** (mute/controls, voice feedback, resilience/autostart): implemented; hotkeys
+- **Phase 5–7** (mute/controls, voice feedback, resilience): implemented; hotkeys
   and hard-mute device release are Windows-targeted.

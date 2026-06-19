@@ -25,6 +25,9 @@ def test_partial_override_keeps_other_defaults(tmp_path):
             providers:
               llm:
                 model: claude-sonnet-4-6
+            conversation:
+              input_device_index: 31
+              output_device_index: 30
             """
         ),
         encoding="utf-8",
@@ -34,6 +37,8 @@ def test_partial_override_keeps_other_defaults(tmp_path):
     assert cfg.vad.hangover_sec == 1.0           # untouched default
     assert cfg.providers.llm.model == "claude-sonnet-4-6"
     assert cfg.providers.stt.vendor == "deepgram"  # untouched nested default
+    assert cfg.conversation.input_device_index == 31
+    assert cfg.conversation.output_device_index == 30
 
 
 def test_unknown_keys_ignored(tmp_path):

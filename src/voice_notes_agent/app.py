@@ -8,8 +8,8 @@ capture and report state.
 State side-effects (registered as machine hooks):
 
   MUTED      enter: release the mic stream (hard mute, FR-M2) + mute earcon (FR-V3)
-  LISTENING  enter: open mic, route to conversation, resume cloud loop, "Listening"
-  CAPTURING  enter: suspend cloud loop (A4), start VAD-gated recorder, "Recording notes"
+  LISTENING  enter: start Pipecat local audio + cloud loop, "Listening"
+  CAPTURING  enter: suspend cloud loop (A4), open local router, start VAD recorder
 
 Guards (§4):
   CAPTURING -> MUTED  : auto-stop + save the active session first (FR-M4, R-8)
@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 
 
 class App:
-    """The persistent background process body (§3, §A1)."""
+    """The foreground app body that owns state, controls, audio, and storage."""
 
     def __init__(
         self,
@@ -215,11 +215,13 @@ class App:
     # -- enter/exit handlers --------------------------------------------------
     def _enter_muted(self, _tr: Transition) -> None:
         self._router.close()  # hard mute: release the mic device (FR-M2)
+        self._conversation.stop()  # Pipecat owns LISTENING audio; stop it on hard mute.
         self._feedback.muted()  # earcon only (FR-V3)
 
     def _enter_listening(self, _tr: Transition) -> None:
-        # Route mic frames to the conversation pipeline; resume the cloud loop.
-        self._router.open(sink=None)
+        # Pipecat's local transport owns mic/speaker I/O in LISTENING. Keep the local
+        # AudioRouter closed so it cannot compete for the headset microphone.
+        self._router.close()
         self._conversation.start()
         self._conversation.resume()
         self._feedback.listening()
@@ -231,14 +233,14 @@ class App:
         self._active_session = session
         recorder = self._build_recorder(session)
         self._recorder = recorder
-        self._router.set_sink(recorder.on_frame)
         recorder.start()
+        self._router.open(sink=recorder.on_frame)
         self._feedback.recording_notes()
 
     def _exit_capturing(self, _tr: Transition) -> None:
         recorder = self._recorder
         self._recorder = None
-        self._router.set_sink(None)
+        self._router.close()
         if recorder is not None:
             self._feedback.stopped_summarizing()
             recorder.stop()  # flush + drain transcription + finalize (NFR-3)

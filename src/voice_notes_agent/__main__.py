@@ -1,8 +1,7 @@
-"""Entry point: ``python -m voice_notes_agent`` (§A1, phase 7 launch-at-login).
+"""Entry point: ``python -m voice_notes_agent``.
 
-Loads config from the data store, configures file + console logging, and runs the agent
-as a persistent background process. ``--install-autostart`` registers the process to
-launch at login on Windows (phase 7).
+Loads project-local config, configures file + console logging, and runs the agent in
+the foreground until the user stops it.
 """
 
 from __future__ import annotations
@@ -33,34 +32,15 @@ def _configure_logging(paths: Paths) -> None:
     root.addHandler(file_handler)
 
 
-def _install_autostart() -> int:  # pragma: no cover - Windows registry
-    """Register launch-at-login via the Windows Run registry key (phase 7)."""
-    if sys.platform != "win32":
-        print("Autostart install is Windows-only.", file=sys.stderr)
-        return 2
-    import winreg
-
-    cmd = f'"{sys.executable}" -m voice_notes_agent'
-    key = winreg.OpenKey(
-        winreg.HKEY_CURRENT_USER,
-        r"Software\Microsoft\Windows\CurrentVersion\Run",
-        0,
-        winreg.KEY_SET_VALUE,
-    )
-    winreg.SetValueEx(key, "VoiceNotesAgent", 0, winreg.REG_SZ, cmd)
-    winreg.CloseKey(key)
-    print("Registered VoiceNotesAgent to launch at login.")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="voice-notes-agent")
-    parser.add_argument("--install-autostart", action="store_true", help="launch at login (Windows)")
-    parser.add_argument("--list-devices", action="store_true", help="print audio devices and exit")
+    parser.add_argument("--list-devices", action="store_true", help="print sounddevice devices and exit")
+    parser.add_argument(
+        "--list-pyaudio-devices",
+        action="store_true",
+        help="print PyAudio devices for Pipecat local audio and exit",
+    )
     args = parser.parse_args(argv)
-
-    if args.install_autostart:
-        return _install_autostart()
 
     paths = Paths.resolve()
     _configure_logging(paths)
@@ -69,6 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         from .audio.devices import list_devices
 
         print(list_devices())
+        return 0
+    if args.list_pyaudio_devices:  # pragma: no cover - hardware dependent
+        from .audio.devices import list_pyaudio_devices
+
+        print(list_pyaudio_devices())
         return 0
 
     cfg = load_config(paths.config_file)

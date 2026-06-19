@@ -75,6 +75,8 @@ class SummaryConfig:
 class ConversationConfig:
     bargein_min_ms: int = 250
     turn_gap_ms: int = 300
+    input_device_index: int | None = None
+    output_device_index: int | None = None
     system_prompt: str = (
         "You are a hands-free, voice-only personal notes assistant. When asked to take "
         "notes, call start_note_session and then stay silent — capture is handled locally "

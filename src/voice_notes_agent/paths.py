@@ -1,6 +1,6 @@
 """Storage layout for the local data store (§9).
 
-    %APPDATA%/voice-notes-agent/
+    .voice-notes-agent/
     ├── sessions/
     │   └── <date>_<time>_<session_id>/
     │       ├── speech.flac        # concatenated speech-only audio (small)
@@ -11,8 +11,7 @@
     ├── config.yaml                # tunables (§14)
     └── logs/
 
-On non-Windows hosts (e.g. a dev machine) we fall back to a platform-appropriate
-application-data directory so the package is testable off-Windows.
+Set VOICE_NOTES_HOME to override the project-local default.
 """
 
 from __future__ import annotations
@@ -22,22 +21,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-APP_DIR_NAME = "voice-notes-agent"
+APP_DIR_NAME = ".voice-notes-agent"
 
 
 def app_data_root() -> Path:
-    """Return the per-user application-data root, creating nothing."""
+    """Return the local app-data root, creating nothing."""
     override = os.environ.get("VOICE_NOTES_HOME")
     if override:
         return Path(override).expanduser()
-
-    if os.name == "nt":
-        base = os.environ.get("APPDATA") or (Path.home() / "AppData" / "Roaming")
-    elif os.sys.platform == "darwin":  # type: ignore[attr-defined]
-        base = Path.home() / "Library" / "Application Support"
-    else:
-        base = os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
-    return Path(base) / APP_DIR_NAME
+    return Path.cwd() / APP_DIR_NAME
 
 
 @dataclass(frozen=True)

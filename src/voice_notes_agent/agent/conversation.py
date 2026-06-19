@@ -161,6 +161,7 @@ class ConversationPipeline:
                 audio_in_enabled=True,
                 audio_out_enabled=True,
                 vad_analyzer=vad,
+                **_local_audio_transport_kwargs(LocalAudioTransportParams, cc),
             )
         )
         stt = DeepgramSTTService(
@@ -259,3 +260,51 @@ def _pipeline_runner_kwargs(runner_cls) -> dict[str, Any]:
         # only works in the main thread, so app-level shutdown owns Ctrl-C instead.
         kwargs["handle_sigint"] = False
     return kwargs
+
+
+def _local_audio_transport_kwargs(params_cls, conversation_cfg) -> dict[str, Any]:
+    """Return Pipecat local-audio kwargs supported by the installed transport params."""
+    configured = {
+        "input_device_index": conversation_cfg.input_device_index,
+        "output_device_index": conversation_cfg.output_device_index,
+    }
+    desired = {key: value for key, value in configured.items() if value is not None}
+
+    supported = _supported_constructor_kwargs(params_cls)
+    device_keys = {"input_device_index", "output_device_index"}
+    if supported is not None and device_keys.isdisjoint(supported):
+        return {}
+
+    if len(desired) < len(device_keys):
+        try:
+            from ..audio.devices import select_pyaudio_device_indexes
+
+            auto_selected = select_pyaudio_device_indexes(
+                input_device_index=conversation_cfg.input_device_index,
+                output_device_index=conversation_cfg.output_device_index,
+            )
+            desired = {**auto_selected, **desired}
+        except Exception:
+            log.exception("could not auto-select PyAudio devices; using Pipecat defaults")
+
+    if not desired:
+        return {}
+
+    if supported is None:
+        return desired
+    return {key: value for key, value in desired.items() if key in supported}
+
+
+def _supported_constructor_kwargs(cls) -> set[str] | None:
+    """Best-effort field discovery for dataclasses, pydantic models, and plain classes."""
+    fields = getattr(cls, "model_fields", None) or getattr(cls, "__fields__", None)
+    if isinstance(fields, dict) and fields:
+        return set(fields)
+
+    try:
+        params = inspect.signature(cls).parameters
+    except (TypeError, ValueError):
+        return None
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        return None
+    return {name for name in params if name != "self"}

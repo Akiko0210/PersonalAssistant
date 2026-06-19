@@ -1,4 +1,4 @@
-# Voice Notes Agent configuration (§14). Copy to %APPDATA%/voice-notes-agent/config.yaml.
+# Voice Notes Agent configuration (§14). run.bat copies this to .voice-notes-agent/config.yaml.
 # All values below are the documented defaults; override only what you need.
 
 # ── Voice activity detection (§5.2, §13 R-2/R-3) ─────────────────────────────
@@ -66,6 +66,10 @@ summary:
 conversation:
   bargein_min_ms: 250       # min speech duration before an interrupt counts (§FR-Q3)
   turn_gap_ms: 300          # target conversational turn gap
+  # PyAudio device indexes for Pipecat LISTENING mode. Leave null to auto-detect.
+  # To inspect choices, run: .venv\Scripts\python.exe -m voice_notes_agent --list-pyaudio-devices
+  input_device_index: null
+  output_device_index: null
   system_prompt: |
     You are a hands-free, voice-only personal notes assistant. When asked to take
     notes, call start_note_session and then stay silent — capture is handled locally
