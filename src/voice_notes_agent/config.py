@@ -101,11 +101,33 @@ class WakeWordsConfig:
 
 
 @dataclass(frozen=True)
+class HeadsetConfig:
+    """Primary hands-free control surface: earphone/headset buttons (§FR-K2).
+
+    Earbud firmware already maps tap gestures to distinct media keys, so we bind
+    those directly — no tap-counting, and it works regardless of screen/focus.
+    Long-press is intentionally unused: most headsets hijack it for the OS voice
+    assistant, so it can't be relied on (§R-5).
+
+    Action names: ``mute_toggle`` (toggle MUTED<->LISTENING), ``true_mute``
+    (hard mute until a manual wake), ``notes_toggle`` (start/stop note capture),
+    or ``none``.
+    """
+
+    enabled: bool = True
+    single_tap: str = "mute_toggle"   # play/pause  -> toggle listening (primary)
+    double_tap: str = "notes_toggle"  # next track  -> start/stop notes
+    triple_tap: str = "true_mute"     # prev track  -> hard mute
+
+
+@dataclass(frozen=True)
 class HotkeysConfig:
+    """Secondary/backup control surface: global keyboard shortcuts."""
+
+    enabled: bool = True
     mute_toggle: str = "ctrl+alt+m"
     notes_toggle: str = "ctrl+alt+n"
     push_to_talk: str = "ctrl+alt+space"
-    media_button_action: str = "mute_toggle"
 
 
 @dataclass(frozen=True)
@@ -126,6 +148,7 @@ class Config:
     conversation: ConversationConfig = field(default_factory=ConversationConfig)
     mute: MuteConfig = field(default_factory=MuteConfig)
     wake_words: WakeWordsConfig = field(default_factory=WakeWordsConfig)
+    headset: HeadsetConfig = field(default_factory=HeadsetConfig)
     hotkeys: HotkeysConfig = field(default_factory=HotkeysConfig)
     feedback: FeedbackConfig = field(default_factory=FeedbackConfig)
 

@@ -1,12 +1,20 @@
-"""Global hotkeys + headset media button (§5.8, §11).
+"""Hands-free controls: headset buttons (primary) + global hotkeys (backup) (§5.8, §11).
 
-Global hotkeys are the reliable control surface (§R-5): each primary action has a
-distinct hotkey that works regardless of window focus (FR-K1). The headset media button
-is bound to the single most-used action — mute toggle by default (FR-K2) — and multi-tap
-gestures are explicitly *not* required for any core action (FR-K4).
+This is a screen-free, hands-free app, so the **earphone/headset button is the primary
+control surface** (FR-K2). Earbud firmware already maps tap gestures to distinct media
+keys, so we bind those directly — no tap-counting needed and it works regardless of
+window focus (FR-K1):
 
-Mute uses short-press vs long-press to pick between wake-word sleep and true mute
-(§11, Open Decision O-2): a short press → wake-word sleep, a long press → true mute.
+    single tap (play/pause)  -> toggle MUTED <-> LISTENING   (the most-used action)
+    double tap (next track)  -> start / stop note capture
+    triple tap (prev track)  -> hard mute (true mute)
+
+Long-press is intentionally unused: most headsets hijack a long hold for the OS voice
+assistant, so it cannot be relied on (§R-5).
+
+Global keyboard hotkeys remain as a **secondary/backup** surface for desk use. The mute
+key still distinguishes short vs long press (short -> wake-word sleep, long -> true mute;
+§11, Open Decision O-2).
 
 The ``keyboard`` library is Windows-focused and imported lazily, so the package imports
 on any OS. Callbacks are plain zero-arg functions wired up by the app.
@@ -15,7 +23,6 @@ on any OS. Callbacks are plain zero-arg functions wired up by the app.
 from __future__ import annotations
 
 import logging
-import threading
 import time
 from dataclasses import dataclass
 from typing import Callable
@@ -35,7 +42,12 @@ class HotkeyActions:
 
 
 class HotkeyManager:
-    """Registers global hotkeys and translates press duration into short/long intents."""
+    """Binds headset media buttons (primary) and keyboard hotkeys (backup)."""
+
+    # Media-key name candidates for the `keyboard` library (varies by build).
+    _PLAY_PAUSE = ("play/pause media", "play/pause")
+    _NEXT = ("next track", "media next")
+    _PREV = ("previous track", "media previous")
 
     def __init__(self, cfg, actions: HotkeyActions) -> None:
         self._cfg = cfg
@@ -47,10 +59,53 @@ class HotkeyManager:
         try:
             import keyboard
         except Exception as exc:
-            log.warning("global hotkeys unavailable (%s); voice/button control still works", exc)
+            log.warning("global key hooks unavailable (%s); voice control still works", exc)
             return
 
+        self._bind_headset(keyboard)   # primary, hands-free
+        self._bind_keyboard(keyboard)  # secondary, backup
+
+        self._registered = True
+        log.info("controls registered (headset primary, keyboard backup)")
+
+    # ── primary: headset media buttons ───────────────────────────────────────
+    def _bind_headset(self, keyboard) -> None:  # pragma: no cover - needs OS
+        hs = getattr(self._cfg, "headset", None)
+        if hs is not None and not hs.enabled:
+            return
+        single = hs.single_tap if hs else "mute_toggle"
+        double = hs.double_tap if hs else "notes_toggle"
+        triple = hs.triple_tap if hs else "true_mute"
+
+        self._bind_first(keyboard, self._PLAY_PAUSE, self._resolve(single), "single-tap")
+        self._bind_first(keyboard, self._NEXT, self._resolve(double), "double-tap")
+        self._bind_first(keyboard, self._PREV, self._resolve(triple), "triple-tap")
+
+    def _bind_first(self, keyboard, names, action: Action | None, label: str) -> None:
+        if action is None:
+            return
+        for key in names:
+            try:
+                keyboard.add_hotkey(key, action)
+                log.info("headset %s -> %s bound", label, key)
+                return
+            except Exception:
+                continue
+        log.warning("could not bind headset %s (no media key available)", label)
+
+    def _resolve(self, name: str) -> Action | None:
+        return {
+            "mute_toggle": self._actions.mute_short,
+            "true_mute": self._actions.mute_long,
+            "notes_toggle": self._actions.notes_toggle,
+            "none": (lambda: None),
+        }.get(name)
+
+    # ── secondary: keyboard hotkeys ──────────────────────────────────────────
+    def _bind_keyboard(self, keyboard) -> None:  # pragma: no cover - needs OS
         hk = self._cfg.hotkeys
+        if getattr(hk, "enabled", True) is False:
+            return
         long_ms = self._cfg.mute.long_press_ms
 
         # Mute key: distinguish short vs long press by tracking key down/up timing.
@@ -71,33 +126,11 @@ class HotkeyManager:
 
         keyboard.on_press_key(_last_key(hk.mute_toggle), _mute_down, suppress=False)
         keyboard.on_release_key(_last_key(hk.mute_toggle), _mute_up, suppress=False)
-
         keyboard.add_hotkey(hk.notes_toggle, self._actions.notes_toggle)
 
         # Push-to-talk: hold to talk.
         keyboard.on_press_key(_last_key(hk.push_to_talk), lambda _e: self._actions.push_to_talk_down())
         keyboard.on_release_key(_last_key(hk.push_to_talk), lambda _e: self._actions.push_to_talk_up())
-
-        # Headset media button -> configured action (default mute toggle, FR-K2).
-        media_action = self._media_action()
-        for key in ("play/pause media", "play/pause"):
-            try:
-                keyboard.add_hotkey(key, media_action)
-                break
-            except Exception:
-                continue
-
-        self._registered = True
-        log.info("global hotkeys registered")
-
-    def _media_action(self) -> Action:
-        name = self._cfg.hotkeys.media_button_action
-        if name == "mute_toggle":
-            # Map the single button press to a short mute toggle.
-            return self._actions.mute_short
-        if name == "notes_toggle":
-            return self._actions.notes_toggle
-        return self._actions.mute_short
 
     def stop(self) -> None:  # pragma: no cover - requires keyboard
         if not self._registered:

@@ -18,8 +18,17 @@ if not exist ".venv\Scripts\python.exe" (
     )
 )
 
-REM --- 2. Install the app the first time (marker file) --------
-if not exist ".venv\.installed" (
+REM --- 2. Install the app (first run, or whenever deps change) -
+REM Reinstall if there is no marker, or if pyproject.toml is newer than it.
+set "NEED_INSTALL="
+if not exist ".venv\.installed" set "NEED_INSTALL=1"
+if not defined NEED_INSTALL (
+    for /f "delims=" %%i in ('dir /b /o-d "pyproject.toml" ".venv\.installed" 2^>nul') do (
+        if not defined _NEWEST set "_NEWEST=%%i"
+    )
+    if /i "%_NEWEST%"=="pyproject.toml" set "NEED_INSTALL=1"
+)
+if defined NEED_INSTALL (
     echo [setup] Installing dependencies. This can take a few minutes...
     ".venv\Scripts\python.exe" -m pip install --upgrade pip
     ".venv\Scripts\python.exe" -m pip install -e ".[conversation,embeddings]"

@@ -28,7 +28,10 @@ dependencies = [
 # The real-time conversation subsystem (phase 3-4). Kept optional so the capture
 # core installs and runs on minimal machines without the heavier voice stack.
 conversation = [
-    "pipecat-ai[deepgram,silero]>=0.0.40",
+    # local  -> PyAudio transport for mic/speaker (LISTENING mode). PyAudio ships
+    #           prebuilt Windows wheels, so no PortAudio toolchain is needed there.
+    # anthropic -> Claude LLM service used in the pipeline.
+    "pipecat-ai[deepgram,silero,anthropic,local]>=0.0.40",
 ]
 # Local embeddings instead of Chroma's bundled default (Open Decision O-1).
 embeddings = [

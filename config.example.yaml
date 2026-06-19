@@ -87,12 +87,23 @@ wake_words:
   stop_capture: stop notes  # local stop word usable while the cloud agent is dormant
   enabled: true
 
-# ── Global hotkeys (§5.8, §11) ───────────────────────────────────────────────
+# ── Controls (§5.8, §11) ─────────────────────────────────────────────────────
+# Headset buttons are the PRIMARY hands-free control (§FR-K2). Earbud firmware
+# maps tap gestures to media keys, so we bind those directly. Long-press is not
+# used (headsets often hijack it for the OS voice assistant).
+headset:
+  enabled: true
+  single_tap: mute_toggle    # play/pause -> toggle MUTED <-> LISTENING (primary)
+  double_tap: notes_toggle   # next track -> start/stop note capture
+  triple_tap: true_mute      # prev track -> hard mute
+  # action options: mute_toggle | true_mute | notes_toggle | none
+
+# Keyboard shortcuts are a SECONDARY/backup control surface for desk use.
 hotkeys:
+  enabled: true
   mute_toggle: ctrl+alt+m
-  notes_toggle: ctrl+alt+n  # start if listening, stop if capturing
+  notes_toggle: ctrl+alt+n   # start if listening, stop if capturing
   push_to_talk: ctrl+alt+space
-  media_button_action: mute_toggle   # headset media key (§FR-K2)
 
 # ── Feedback (§5.9, §10) ─────────────────────────────────────────────────────
 feedback:
