@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voice-notes-agent"
+version = "0.1.0"
+description = "Hands-free, voice-first personal notes assistant (local capture + Claude conversation)"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Voice Notes Agent" }]
+
+# Core dependencies needed for the capture + summary + RAG path (phases 0-2, 5-7).
+dependencies = [
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12",
+    "silero-vad>=5.1",          # tiny CPU VAD (§7)
+    "faster-whisper>=1.0",      # local CPU transcription (§7)
+    "anthropic>=0.40",          # Claude: summary + conversation LLM
+    "chromadb>=0.5",            # local vector store (§7)
+    "keyboard>=0.13.5; sys_platform == 'win32'",  # global hotkeys (§7)
+]
+
+[project.optional-dependencies]
+# The real-time conversation subsystem (phase 3-4). Kept optional so the capture
+# core installs and runs on minimal machines without the heavier voice stack.
+conversation = [
+    "pipecat-ai[deepgram,silero]>=0.0.40",
+]
+# Local embeddings instead of Chroma's bundled default (Open Decision O-1).
+embeddings = [
+    "sentence-transformers>=3.0",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+voice-notes-agent = "voice_notes_agent.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

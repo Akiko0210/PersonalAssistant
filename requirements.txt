@@ -1,0 +1,17 @@
+# Core capture + summary + RAG path (phases 0-2, 5-7). See pyproject.toml for the
+# authoritative dependency list and optional extras.
+pyyaml>=6.0
+numpy>=1.24
+sounddevice>=0.4.6
+soundfile>=0.12
+silero-vad>=5.1
+faster-whisper>=1.0
+anthropic>=0.40
+chromadb>=0.5
+keyboard>=0.13.5; sys_platform == 'win32'
+
+# Real-time conversation subsystem (phase 3-4) — optional, heavier.
+# pipecat-ai[deepgram,silero]>=0.0.40
+
+# Local embeddings (Open Decision O-1) — optional.
+# sentence-transformers>=3.0
