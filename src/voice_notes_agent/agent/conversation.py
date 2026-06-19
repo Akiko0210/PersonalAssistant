@@ -25,6 +25,7 @@ wiring is adjusted to whatever Pipecat version is installed.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import threading
@@ -130,7 +131,7 @@ class ConversationPipeline:
         task = self._build()
         from pipecat.pipeline.runner import PipelineRunner
 
-        self._runner = PipelineRunner()
+        self._runner = PipelineRunner(**_pipeline_runner_kwargs(PipelineRunner))
         await self._runner.run(task)
 
     def _build(self):  # pragma: no cover - requires pipecat + keys
@@ -243,3 +244,18 @@ def _interruption_frame():  # pragma: no cover - requires pipecat
     from pipecat.frames.frames import BotInterruptionFrame
 
     return BotInterruptionFrame()
+
+
+def _pipeline_runner_kwargs(runner_cls) -> dict[str, Any]:
+    """Return runner options that are safe for Pipecat's evolving constructors."""
+    try:
+        params = inspect.signature(runner_cls).parameters
+    except (TypeError, ValueError):
+        return {}
+
+    kwargs: dict[str, Any] = {}
+    if "handle_sigint" in params:
+        # This pipeline runs on a background thread. On Windows, signal.signal()
+        # only works in the main thread, so app-level shutdown owns Ctrl-C instead.
+        kwargs["handle_sigint"] = False
+    return kwargs
