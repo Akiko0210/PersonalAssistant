@@ -209,18 +209,25 @@ def _device_tokens(name: str) -> set[str]:
 
 def _host_api_score(name: str) -> int:
     lowered = name.lower()
-    if "wasapi" in lowered:
+    if "mme" in lowered:
         return 40
-    if "wdm" in lowered or "ks" in lowered:
-        return 20
     if "directsound" in lowered:
+        return 30
+    if "wasapi" in lowered:
+        return 20
+    if "wdm" in lowered or "ks" in lowered:
         return 10
     return 0
 
 
 def _is_generic(name: str) -> bool:
     lowered = name.lower()
-    return "microsoft sound mapper" in lowered or "primary sound" in lowered
+    return (
+        "microsoft sound mapper" in lowered
+        or "primary sound" in lowered
+        or lowered.startswith("input (")
+        or lowered.startswith("output (")
+    )
 
 
 def resolve_device(spec) -> object:

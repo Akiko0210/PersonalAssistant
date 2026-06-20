@@ -291,8 +291,12 @@ def _local_audio_transport_kwargs(params_cls, conversation_cfg) -> dict[str, Any
         return {}
 
     if supported is None:
+        log.info("Pipecat local audio devices: %s", desired)
         return desired
-    return {key: value for key, value in desired.items() if key in supported}
+    filtered = {key: value for key, value in desired.items() if key in supported}
+    if filtered:
+        log.info("Pipecat local audio devices: %s", filtered)
+    return filtered
 
 
 def _supported_constructor_kwargs(cls) -> set[str] | None:

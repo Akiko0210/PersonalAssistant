@@ -5,7 +5,7 @@ from __future__ import annotations
 from voice_notes_agent.audio.devices import PyAudioDeviceInfo, select_pyaudio_device_indexes
 
 
-def test_auto_selects_matching_wasapi_headset_pair():
+def test_auto_selects_ordinary_headset_pair_over_generic_wasapi_endpoints():
     devices = [
         PyAudioDeviceInfo(0, "Microsoft Sound Mapper - Input", 2, 0, "MME"),
         PyAudioDeviceInfo(1, "Headset (EarPods)", 1, 0, "MME"),
@@ -18,8 +18,8 @@ def test_auto_selects_matching_wasapi_headset_pair():
     ]
 
     assert select_pyaudio_device_indexes(devices=devices) == {
-        "input_device_index": 31,
-        "output_device_index": 30,
+        "input_device_index": 1,
+        "output_device_index": 3,
     }
 
 
