@@ -1,19 +1,25 @@
-"""Hands-free controls: headset buttons (primary) + global hotkeys (backup) (§5.8, §11).
+"""Hands-free controls: headset media buttons + global hotkeys (§5.8, §11).
 
-This is a screen-free, hands-free app, so the **earphone/headset button is the primary
-control surface** (FR-K2). Earbud firmware already maps tap gestures to distinct media
-keys, so we bind those directly — no tap-counting needed and it works regardless of
-window focus (FR-K1):
+These are *best-effort* control surfaces. The reliable floor is the terminal-key loop in
+``app.py`` (``m``/``n``/``q``); the bindings here add app-wide control when the OS exposes
+the events.
+
+**Headset media buttons.** Many Bluetooth headsets map tap gestures to distinct media
+keys, so we bind those directly — no tap-counting, works regardless of window focus
+(FR-K1):
 
     single tap (play/pause)  -> toggle MUTED <-> LISTENING   (the most-used action)
     double tap (next track)  -> start / stop note capture
     triple tap (prev track)  -> hard mute (true mute)
 
-Long-press is intentionally unused: most headsets hijack a long hold for the OS voice
-assistant, so it cannot be relied on (§R-5).
+Caveat: many **wired** headsets (e.g. Apple EarPods) do **not** emit media keys on Windows
+at all — their inline button signals over the mic line, which Windows doesn't decode — so
+these bindings simply never fire for them (§R-5). Use the terminal keys / global hotkeys.
+Long-press is also intentionally unused: most headsets hijack a long hold for the OS voice
+assistant.
 
-Global keyboard hotkeys remain as a **secondary/backup** surface for desk use. The mute
-key still distinguishes short vs long press (short -> wake-word sleep, long -> true mute;
+Global keyboard hotkeys are the dependable app-wide surface for desk use. The mute key
+distinguishes short vs long press (short -> wake-word sleep, long -> true mute;
 §11, Open Decision O-2).
 
 The ``keyboard`` library is Windows-focused and imported lazily, so the package imports
@@ -23,7 +29,6 @@ on any OS. Callbacks are plain zero-arg functions wired up by the app.
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass
 from typing import Callable
 
@@ -53,7 +58,6 @@ class HotkeyManager:
         self._cfg = cfg
         self._actions = actions
         self._registered = False
-        self._mute_press_t0: float | None = None
 
     def start(self) -> None:  # pragma: no cover - requires keyboard + OS focus
         try:
@@ -66,7 +70,7 @@ class HotkeyManager:
         self._bind_keyboard(keyboard)  # secondary, backup
 
         self._registered = True
-        log.info("controls registered (headset primary, keyboard backup)")
+        log.info("global hotkeys + headset media-key bindings registered")
 
     # ── primary: headset media buttons ───────────────────────────────────────
     def _bind_headset(self, keyboard) -> None:  # pragma: no cover - needs OS
@@ -106,31 +110,26 @@ class HotkeyManager:
         hk = self._cfg.hotkeys
         if getattr(hk, "enabled", True) is False:
             return
-        long_ms = self._cfg.mute.long_press_ms
 
-        # Mute key: distinguish short vs long press by tracking key down/up timing.
-        def _mute_down(_e=None):
-            if self._mute_press_t0 is None:
-                self._mute_press_t0 = time.monotonic()
-
-        def _mute_up(_e=None):
-            t0 = self._mute_press_t0
-            self._mute_press_t0 = None
-            if t0 is None:
-                return
-            held_ms = (time.monotonic() - t0) * 1000.0
-            if held_ms >= long_ms:
-                self._actions.mute_long()
-            else:
-                self._actions.mute_short()
-
-        keyboard.on_press_key(_last_key(hk.mute_toggle), _mute_down, suppress=False)
-        keyboard.on_release_key(_last_key(hk.mute_toggle), _mute_up, suppress=False)
-        keyboard.add_hotkey(hk.notes_toggle, self._actions.notes_toggle)
-
-        # Push-to-talk: hold to talk.
-        keyboard.on_press_key(_last_key(hk.push_to_talk), lambda _e: self._actions.push_to_talk_down())
-        keyboard.on_release_key(_last_key(hk.push_to_talk), lambda _e: self._actions.push_to_talk_up())
+        # Bind the *whole* chord via add_hotkey. ``keyboard.on_press_key`` only accepts a
+        # single key, so feeding it a chord like "ctrl+alt+m" would actually listen to the
+        # bare last key ("m") — firing on every ordinary keystroke (and double-firing with
+        # the terminal controls, which toggle on bare "m"). add_hotkey honors the full
+        # combination, so it fires only on the real chord. This costs the keyboard
+        # short-vs-long-press distinction (it needs down/up timing); long-press / true mute
+        # remains available on the headset triple-tap.
+        try:
+            keyboard.add_hotkey(hk.mute_toggle, self._actions.mute_short)
+            keyboard.add_hotkey(hk.notes_toggle, self._actions.notes_toggle)
+            keyboard.add_hotkey(hk.push_to_talk, self._actions.push_to_talk_down)
+            log.info(
+                "keyboard hotkeys bound: %s (mute), %s (notes), %s (push-to-talk)",
+                hk.mute_toggle,
+                hk.notes_toggle,
+                hk.push_to_talk,
+            )
+        except Exception:
+            log.warning("could not bind one or more keyboard hotkeys", exc_info=True)
 
     def stop(self) -> None:  # pragma: no cover - requires keyboard
         if not self._registered:
@@ -142,8 +141,3 @@ class HotkeyManager:
         except Exception:
             pass
         self._registered = False
-
-
-def _last_key(combo: str) -> str:
-    """``keyboard.on_press_key`` wants a single key; take the last token of a combo."""
-    return combo.split("+")[-1].strip()

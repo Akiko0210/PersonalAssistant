@@ -60,6 +60,22 @@ def select_pyaudio_device_indexes(
     if not inputs or not outputs:
         return selected
 
+    # Prefer the OS default device the user already selected in Windows sound settings —
+    # the active endpoint is the source of truth. The name-matching/host-API heuristic
+    # below is only a fallback for when no default is flagged. This avoids auto-picking
+    # an inactive, unopenable endpoint (e.g. a paired-but-idle Bluetooth headset exposed
+    # on the exclusive-mode WDM-KS host API), which raises PortAudio -9996/-9999 errors.
+    if "input_device_index" not in selected:
+        default_input = next((d for d in inputs if d.is_default_input), None)
+        if default_input is not None:
+            selected["input_device_index"] = default_input.index
+    if "output_device_index" not in selected:
+        default_output = next((d for d in outputs if d.is_default_output), None)
+        if default_output is not None:
+            selected["output_device_index"] = default_output.index
+    if len(selected) == 2:
+        return selected
+
     configured_input = _find_device(inputs, input_device_index)
     configured_output = _find_device(outputs, output_device_index)
 

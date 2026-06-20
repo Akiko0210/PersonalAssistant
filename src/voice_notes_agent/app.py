@@ -22,6 +22,7 @@ starts MUTED by default (privacy, C7).
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 from datetime import datetime
 from typing import Callable
@@ -124,12 +125,66 @@ class App:
     def run_forever(self) -> None:  # pragma: no cover - blocking loop
         self.start()
         try:
-            stop_event = threading.Event()
-            stop_event.wait()
+            self._console_loop()
         except KeyboardInterrupt:
             pass
         finally:
             self.stop()
+
+    # ── foreground terminal controls ─────────────────────────────────────────
+    def _console_loop(self) -> None:  # pragma: no cover - interactive
+        """Drive the agent from single keypresses in this terminal window.
+
+        This is the reliable, always-works control surface. Global hotkeys and headset
+        media buttons still work when available, but many wired headsets (e.g. Apple
+        EarPods) don't emit media keys on Windows, so the terminal keys are the floor.
+        """
+        try:
+            import msvcrt  # Windows: read one keypress at a time, no Enter needed.
+        except ImportError:
+            msvcrt = None
+
+        self._print_controls()
+        if msvcrt is not None:
+            while True:
+                ch = msvcrt.getwch()
+                if ch in ("q", "\x03", "\x1b"):  # q / Ctrl-C / Esc
+                    break
+                self._handle_console_key(ch)
+        else:  # POSIX / non-Windows fallback: line-buffered input.
+            for line in sys.stdin:
+                ch = line.strip()[:1].lower()
+                if ch == "q":
+                    break
+                if ch:
+                    self._handle_console_key(ch)
+
+    def _handle_console_key(self, ch: str) -> None:  # pragma: no cover - interactive
+        key = ch.lower()
+        if key == "m":
+            self.toggle_mute_short()
+        elif key == "n":
+            self.toggle_notes()
+        elif key == "s":
+            self._feedback.status(
+                f"{self._sm.state.value}"
+                + (f", session {self._active_session.id}" if self._active_session else "")
+            )
+        else:
+            return
+        print(f"[state] {self._sm.state.value}", flush=True)
+
+    def _print_controls(self) -> None:  # pragma: no cover - interactive
+        print(
+            "\n=== Voice Notes Agent - terminal controls ===\n"
+            "  m : toggle Listening / Muted\n"
+            "  n : start / stop note capture\n"
+            "  s : speak current status\n"
+            "  q : quit\n"
+            f"Starting state: {self._sm.state.value}. Keep this window focused.\n"
+            "(Global hotkeys Ctrl+Alt+M / Ctrl+Alt+N also work when available.)\n",
+            flush=True,
+        )
 
     # ── AgentController protocol (used by tools) ─────────────────────────────
     def start_capture(self) -> str:
@@ -198,6 +253,8 @@ class App:
                 name="summarize",
                 daemon=True,
             ).start()
+        else:
+            self._start_conversation_pipeline()
 
     # ── state-machine wiring ─────────────────────────────────────────────────
     def _wire_state_machine(self) -> None:
@@ -218,13 +275,15 @@ class App:
         self._conversation.stop()  # Pipecat owns LISTENING audio; stop it on hard mute.
         self._feedback.muted()  # earcon only (FR-V3)
 
-    def _enter_listening(self, _tr: Transition) -> None:
+    def _enter_listening(self, tr: Transition) -> None:
         # Pipecat's local transport owns mic/speaker I/O in LISTENING. Keep the local
         # AudioRouter closed so it cannot compete for the headset microphone.
         self._router.close()
-        self._conversation.start()
-        self._conversation.resume()
-        self._feedback.listening()
+        if tr.src is State.CAPTURING:
+            # Don't start the conversation pipeline yet — _summarize_and_readback
+            # needs exclusive audio output first. It starts the pipeline when done.
+            return
+        self._start_conversation_pipeline()
 
     def _enter_capturing(self, _tr: Transition) -> None:
         # Suspend the cloud loop; the recorder takes the mic locally (A4, C4).
@@ -321,10 +380,21 @@ class App:
         except Exception as exc:  # FR-V5: announce errors audibly
             log.exception("summarization failed")
             self._feedback.error("I couldn't reach the summarizer.")
+            try:
+                self._index.index_session(
+                    session_id=session.id,
+                    started=session.started.isoformat(),
+                    transcript=session.transcript_text(),
+                    summary="",
+                )
+            except Exception:
+                log.exception("failed to index session after summarization error")
         finally:
             self._feedback.stop_working_cue()
             if self._active_session is session:
                 self._active_session = None
+            if self._sm.state is State.LISTENING:
+                self._start_conversation_pipeline()
 
     # ── crash recovery (R-8) ─────────────────────────────────────────────────
     def _recover_unfinalized(self) -> None:
@@ -347,6 +417,12 @@ class App:
                 )
             except Exception:
                 log.exception("failed to index recovered session %s", info.session_id)
+
+    def _start_conversation_pipeline(self) -> None:
+        """Start the conversation pipeline and announce LISTENING."""
+        self._feedback.listening()
+        self._conversation.start()
+        self._conversation.resume()
 
     # ── hooks ────────────────────────────────────────────────────────────────
     def _on_tool_called(self, name: str) -> None:

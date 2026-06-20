@@ -1,0 +1,117 @@
+# Voice Notes Agent configuration (§14). run.bat copies this to .voice-notes-agent/config.yaml.
+# All values below are the documented defaults; override only what you need.
+
+# ── Voice activity detection (§5.2, §13 R-2/R-3) ─────────────────────────────
+vad:
+  threshold: 0.5            # Silero speech-probability threshold (0-1)
+  pre_roll_sec: 0.5         # buffer prepended to each segment so onsets aren't clipped
+  hangover_sec: 1.0         # trailing silence that closes a segment
+  tail_pad_sec: 0.2         # extra audio kept after the segment to avoid clipping words
+  min_segment_sec: 0.4      # segments shorter than this are discarded as noise
+  energy_floor: 0.0         # optional RMS gate below which audio is ignored (0 = off)
+
+# ── Audio I/O (§7) ───────────────────────────────────────────────────────────
+audio:
+  sample_rate: 16000        # 16 kHz mono — what Whisper and Silero expect
+  input_device: null        # null = system default; or an int index / name substring
+  output_device: null       # for earcons + TTS playback
+  block_ms: 32              # mic callback block size (must yield 512-sample frames @16k)
+
+# ── Local transcription (§5.3, §7) ───────────────────────────────────────────
+whisper:
+  model: large-v3-turbo     # faster-whisper model; fallback below if too slow (§FR-T5)
+  fallback_model: medium
+  compute_type: int8        # CPU-friendly quantization
+  language: en              # null = auto-detect
+  beam_size: 1
+  # Anti-hallucination measures (§FR-T3, R-2)
+  condition_on_previous_text: false
+  no_speech_threshold: 0.6
+  log_prob_threshold: -1.0
+
+# ── Cloud providers (§7, Open Decision O-3) ──────────────────────────────────
+providers:
+  llm:
+    vendor: anthropic
+    model: claude-opus-4-8  # chat + summary; function calling for tools (§8)
+  stt:
+    vendor: deepgram        # low-latency streaming STT for Q&A (§5.6)
+    model: nova-2
+  tts:
+    vendor: deepgram        # streaming TTS for responses + feedback speech (§5.9)
+    voice: aura-asteria-en
+  embeddings:
+    vendor: local           # 'local' (default, O-1) or 'cloud'
+    model: all-MiniLM-L6-v2 # sentence-transformers model when vendor=local
+
+# ── Summarization (§5.4) ─────────────────────────────────────────────────────
+summary:
+  spoken_max_sentences: 3   # concise spoken summary = headline + action items
+  min_speech_sec: 5.0       # below this, skip the full summary (§FR-S5)
+  full_template: |
+    # {title}
+
+    **Headline:** {headline}
+
+    ## Key points
+    {key_points}
+
+    ## Action items
+    {action_items}
+
+    ## Open questions
+    {questions}
+
+# ── Conversation / barge-in (§5.6, §NFR-1) ───────────────────────────────────
+conversation:
+  bargein_min_ms: 250       # min speech duration before an interrupt counts (§FR-Q3)
+  turn_gap_ms: 300          # target conversational turn gap
+  # PyAudio device indexes for Pipecat LISTENING mode. Leave null to auto-detect.
+  # To inspect choices, run: .venv\Scripts\python.exe -m voice_notes_agent --list-pyaudio-devices
+  input_device_index: null
+  output_device_index: null
+  system_prompt: |
+    You are a hands-free, voice-only personal notes assistant. When asked to take
+    notes, call start_note_session and then stay silent — capture is handled locally
+    until stopped. When a session ends, call summarize_session and read back the
+    spoken summary. To answer questions about past notes, call search_notes. Keep
+    spoken responses concise; offer to read more detail on request.
+
+# ── Mute / listening control (§5.7, Open Decision O-2) ───────────────────────
+mute:
+  start_muted: true         # privacy by default (§C7) — never change to false lightly
+  default_model: both       # 'true_mute', 'wake_word_sleep', or 'both' (short/long press)
+  wake_word: jarvis         # local wake word to leave wake-word sleep (§FR-M3)
+  short_press: wake_word_sleep
+  long_press: true_mute
+  long_press_ms: 600        # press duration that counts as "long"
+
+# ── Wake words (§7, §11) ─────────────────────────────────────────────────────
+wake_words:
+  stop_capture: stop notes  # local stop word usable while the cloud agent is dormant
+  enabled: true
+
+# ── Controls (§5.8, §11) ─────────────────────────────────────────────────────
+# Headset buttons are the PRIMARY hands-free control (§FR-K2). Earbud firmware
+# maps tap gestures to media keys, so we bind those directly. Long-press is not
+# used (headsets often hijack it for the OS voice assistant).
+headset:
+  enabled: true
+  single_tap: mute_toggle    # play/pause -> toggle MUTED <-> LISTENING (primary)
+  double_tap: notes_toggle   # next track -> start/stop note capture
+  triple_tap: true_mute      # prev track -> hard mute
+  # action options: mute_toggle | true_mute | notes_toggle | none
+
+# Keyboard shortcuts are a SECONDARY/backup control surface for desk use.
+hotkeys:
+  enabled: true
+  mute_toggle: ctrl+alt+m
+  notes_toggle: ctrl+alt+n   # start if listening, stop if capturing
+  push_to_talk: ctrl+alt+space
+
+# ── Feedback (§5.9, §10) ─────────────────────────────────────────────────────
+feedback:
+  earcons: true
+  spoken_confirmations: true
+  working_cue_interval_sec: 6   # subtle periodic tick during long operations (§FR-V4)
+  volume: 0.5

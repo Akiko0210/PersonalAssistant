@@ -32,6 +32,23 @@ def _configure_logging(paths: Paths) -> None:
     root.addHandler(file_handler)
 
 
+def _quiet_pipecat_logging() -> None:
+    """Trim Pipecat's loguru output to warnings.
+
+    Pipecat logs through loguru, which is independent of the stdlib logging configured
+    above. Left at its default DEBUG it floods the terminal and — on Windows console code
+    pages that can't encode its banner glyphs — raises "Logging error in Loguru Handler".
+    Reconfiguring to WARNING keeps the terminal readable and surfaces only real problems.
+    No-op if loguru isn't installed.
+    """
+    try:
+        from loguru import logger
+    except Exception:
+        return
+    logger.remove()
+    logger.add(sys.stderr, level="WARNING", backtrace=False, diagnose=False)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="voice-notes-agent")
     parser.add_argument("--list-devices", action="store_true", help="print sounddevice devices and exit")
@@ -44,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
 
     paths = Paths.resolve()
     _configure_logging(paths)
+    _quiet_pipecat_logging()
 
     if args.list_devices:  # pragma: no cover - hardware dependent
         from .audio.devices import list_devices

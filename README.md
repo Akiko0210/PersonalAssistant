@@ -83,13 +83,33 @@ local cache. Note transcription is CPU-only by design (§C2).
 run.bat                              # starts MUTED (privacy by default, §C7)
 ```
 
-Then drive it entirely by ear:
+**Controls.** The agent starts muted. Three control surfaces drive it, in order of
+reliability:
 
-- Hotkey / headset button to un-mute → **"Listening"**
+1. **Terminal keys** (always works) — with the `run.bat` window focused:
+   - `m` — toggle **Listening / Muted**
+   - `n` — start / stop note capture
+   - `s` — speak current status
+   - `q` — quit
+2. **Global hotkeys** (work app-wide when the `keyboard` hook is available): `Ctrl+Alt+M`
+   (mute toggle), `Ctrl+Alt+N` (notes), `Ctrl+Alt+Space` (push-to-talk).
+3. **Headset media button** — only works if the headset actually emits media keys
+   (play/pause/next). Many **wired** headsets, including Apple EarPods, do **not** send
+   media keys on Windows, so their inline button does nothing here — use the terminal
+   keys or global hotkeys instead. Bluetooth headsets usually do emit media keys.
+
+Then drive it by ear:
+
+- Press `m` (or the mute hotkey) to un-mute → **"Listening"**
 - Say *"take notes"* → **"Recording notes"** (capture begins, cloud loop suspended)
 - Talk for as long as you like; only speech is recorded and transcribed
-- Say *"stop notes"* (or press the stop hotkey) → **"Stopped. Summarizing."** → spoken summary
+- Say *"stop notes"* (or press `n`) → **"Stopped. Summarizing."** → spoken summary
 - Ask *"what did I note about the budget?"* → answered via RAG over your notes
+
+Audio in/out uses your **Windows default** recording and playback devices. Set them in
+Windows Sound settings before launch, or pin explicit PyAudio indices via
+`conversation.input_device_index` / `output_device_index` in `config.yaml` (run
+`python -m voice_notes_agent --list-pyaudio-devices` to see the indices).
 
 Every state change and result is conveyed by audio (earcons + speech); the screen is never
 required (§C5).

@@ -40,6 +40,10 @@ log = logging.getLogger(__name__)
 # through the controller, so no direct coupling is needed here.
 ToolDispatch = Callable[[str, dict[str, Any]], dict[str, Any]]
 
+# Tools whose side effect is to change the agent's top-level mode, which suspends/tears
+# down this conversation pipeline. They must not run on the pipeline's own thread.
+_MODE_SWITCHING_TOOLS = frozenset({"start_note_session", "stop_note_session"})
+
 
 class ConversationPipeline:
     """Owns the Pipecat pipeline and its asyncio loop on a dedicated thread."""
@@ -65,30 +69,43 @@ class ConversationPipeline:
         log.info("conversation pipeline starting")
 
     def stop(self) -> None:
-        """Tear down the pipeline (leaving LISTENING)."""
+        """Tear down the pipeline (leaving LISTENING).
+
+        Wait for the in-loop shutdown to finish before joining so the thread can drain its
+        pending tasks (websocket closes) instead of having them destroyed mid-flight,
+        which otherwise prints an asyncio traceback on every mute.
+        """
         loop = self._loop
         if loop is not None:
-            asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
-        if self._thread is not None:
-            self._thread.join(timeout=5.0)
-            self._thread = None
+            fut = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
+            try:
+                fut.result(timeout=5.0)
+            except Exception:
+                pass
+        thread = self._thread
+        # A thread can't join itself. handle_tool_call dispatches mode switches off the
+        # pipeline thread to avoid this, but guard anyway so stop() can never raise.
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=8.0)
+        self._thread = None
         log.info("conversation pipeline stopped")
 
     def suspend(self) -> None:
-        """Pause cloud STT/LLM/TTS while capture runs (A4). Mic is freed for local use."""
+        """Stop cloud STT/LLM/TTS while capture runs (A4, C4).
+
+        Pipecat's PipelineTask has no pause primitive, and merely interrupting would
+        leave the cloud STT mic stream open — streaming the user's note audio to the
+        cloud, which the architecture forbids. So we tear the pipeline down entirely and
+        rebuild it on resume; this also releases the mic for the local recorder.
+        """
         self._suspended = True
-        self.cancel_in_flight()
-        loop = self._loop
-        if loop is not None:  # pragma: no cover - requires pipecat
-            asyncio.run_coroutine_threadsafe(self._pause_io(), loop)
+        self.stop()
         log.info("conversation pipeline suspended (capture active)")
 
     def resume(self) -> None:
-        """Resume the cloud loop after capture ends (back to LISTENING)."""
+        """Rebuild the cloud loop after capture ends (back to LISTENING)."""
         self._suspended = False
-        loop = self._loop
-        if loop is not None:  # pragma: no cover - requires pipecat
-            asyncio.run_coroutine_threadsafe(self._resume_io(), loop)
+        self.start()
         log.info("conversation pipeline resumed")
 
     def cancel_in_flight(self) -> None:
@@ -103,12 +120,27 @@ class ConversationPipeline:
 
         We track the tool_use_id; if the same call is delivered again after a barge-in,
         we return the cached result instead of re-running the side effect.
+
+        Mode-switching tools (``start_note_session`` / ``stop_note_session``) tear down
+        *this* pipeline as part of entering capture. This handler runs on the pipeline's
+        own event-loop thread, and tearing down that thread from within would deadlock
+        ("cannot join current thread"). So those tools are dispatched on a background
+        thread and acknowledged immediately; the LLM is told to stay silent afterwards.
         """
         if tool_use_id in self._pending_tool_results:
             return self._pending_tool_results[tool_use_id]
         if self._on_tool_called is not None:
             self._on_tool_called(name)
-        result = self._tools.dispatch(name, arguments)
+        if name in _MODE_SWITCHING_TOOLS:
+            threading.Thread(
+                target=self._tools.dispatch,
+                args=(name, arguments),
+                name=f"tool-{name}",
+                daemon=True,
+            ).start()
+            result: dict = {"status": "ok", "note": f"{name} dispatched"}
+        else:
+            result = self._tools.dispatch(name, arguments)
         self._pending_tool_results[tool_use_id] = result
         # Cap memory; only the most recent handful matter for the dedupe window.
         if len(self._pending_tool_results) > 32:
@@ -124,8 +156,28 @@ class ConversationPipeline:
         except Exception:
             log.exception("conversation pipeline crashed")
         finally:
+            self._drain_pending_tasks(self._loop)
             self._loop.close()
             self._loop = None
+
+    @staticmethod
+    def _drain_pending_tasks(loop) -> None:  # pragma: no cover - requires pipecat
+        """Cancel and await leftover tasks (e.g. websocket closes) before the loop closes.
+
+        Without this they're garbage-collected after the loop is gone, which asyncio
+        reports as "Task was destroyed but it is pending" with a traceback on every mute.
+        """
+        try:
+            pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
+        except RuntimeError:
+            return
+        for task in pending:
+            task.cancel()
+        if pending:
+            try:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            except Exception:
+                pass
 
     async def _run(self) -> None:  # pragma: no cover - requires pipecat + keys
         task = self._build()
@@ -140,6 +192,10 @@ class ConversationPipeline:
         from pipecat.audio.vad.vad_analyzer import VADParams
         from pipecat.pipeline.pipeline import Pipeline
         from pipecat.pipeline.task import PipelineParams, PipelineTask
+        from pipecat.processors.aggregators.llm_context import LLMContext
+        from pipecat.processors.aggregators.llm_response_universal import (
+            LLMContextAggregatorPair,
+        )
         from pipecat.services.anthropic.llm import AnthropicLLMService
         from pipecat.services.deepgram.stt import DeepgramSTTService
         from pipecat.services.deepgram.tts import DeepgramTTSService
@@ -164,27 +220,43 @@ class ConversationPipeline:
                 **_local_audio_transport_kwargs(LocalAudioTransportParams, cc),
             )
         )
+        # Use the non-deprecated `.Settings` API so model/voice selection doesn't print
+        # DeprecationWarnings to the console on every launch.
         stt = DeepgramSTTService(
             api_key=os.environ["DEEPGRAM_API_KEY"],
-            model=self._cfg.providers.stt.model,
+            settings=DeepgramSTTService.Settings(
+                model=self._cfg.providers.stt.model,
+                language=self._cfg.whisper.language or "en",
+            ),
         )
         tts = DeepgramTTSService(
             api_key=os.environ["DEEPGRAM_API_KEY"],
-            voice=self._cfg.providers.tts.voice,
+            settings=DeepgramTTSService.Settings(voice=self._cfg.providers.tts.voice),
         )
         llm = AnthropicLLMService(
             api_key=os.environ["ANTHROPIC_API_KEY"],
-            model=self._cfg.providers.llm.model,
-            system_prompt=cc.system_prompt,
+            settings=AnthropicLLMService.Settings(model=self._cfg.providers.llm.model),
         )
         self._register_tools(llm)
+
+        # The LLM needs a context (system prompt + §8 tools) and aggregators that feed
+        # user transcriptions into it and collect assistant replies. Without the user
+        # aggregator the LLM never receives a turn, so the agent stays silent — which is
+        # exactly the "enters listening but never responds" symptom.
+        context = LLMContext(
+            messages=[{"role": "system", "content": cc.system_prompt}],
+            tools=_tools_schema(),
+        )
+        aggregators = LLMContextAggregatorPair(context)
 
         pipeline = Pipeline([
             transport.input(),
             stt,
+            aggregators.user(),
             llm,
             tts,
             transport.output(),
+            aggregators.assistant(),
         ])
         self._task = PipelineTask(
             pipeline,
@@ -219,20 +291,6 @@ class ConversationPipeline:
             except Exception:
                 log.debug("interrupt frame not available in this pipecat version")
 
-    async def _pause_io(self):  # pragma: no cover - requires pipecat
-        if self._task is not None:
-            try:
-                await self._task.pause()  # newer pipecat
-            except AttributeError:
-                await self._interrupt()
-
-    async def _resume_io(self):  # pragma: no cover - requires pipecat
-        if self._task is not None:
-            try:
-                await self._task.resume()
-            except AttributeError:
-                pass
-
     async def _shutdown(self):  # pragma: no cover - requires pipecat
         if self._task is not None:
             try:
@@ -245,6 +303,25 @@ def _interruption_frame():  # pragma: no cover - requires pipecat
     from pipecat.frames.frames import BotInterruptionFrame
 
     return BotInterruptionFrame()
+
+
+def _tools_schema():  # pragma: no cover - requires pipecat
+    """Convert the §8 :data:`TOOL_SPECS` into a Pipecat ToolsSchema for the LLM context."""
+    from pipecat.adapters.schemas.function_schema import FunctionSchema
+    from pipecat.adapters.schemas.tools_schema import ToolsSchema
+
+    functions = []
+    for spec in TOOL_SPECS:
+        schema = spec.get("input_schema", {})
+        functions.append(
+            FunctionSchema(
+                name=spec["name"],
+                description=spec["description"],
+                properties=schema.get("properties", {}),
+                required=schema.get("required", []),
+            )
+        )
+    return ToolsSchema(standard_tools=functions)
 
 
 def _pipeline_runner_kwargs(runner_cls) -> dict[str, Any]:
