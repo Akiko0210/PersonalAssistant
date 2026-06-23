@@ -22,15 +22,21 @@ class NoteStore:
     def __init__(self):
         cfg.ensure_dirs()
         self.index = self._load_index()
+        self._col = None
+        log.info("note store ready (%d notes on disk)", len(self.index))
 
-        self._ef = embedding_functions.SentenceTransformerEmbeddingFunction(
+    def _ensure_chroma(self):
+        if self._col is not None:
+            return
+        log.info("loading embedding model + chroma (first use)...")
+        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
             model_name=cfg.EMBED_MODEL
         )
-        self._client = chromadb.PersistentClient(path=str(cfg.CHROMA_DIR))
-        self._col = self._client.get_or_create_collection(
-            name="notes", embedding_function=self._ef
+        client = chromadb.PersistentClient(path=str(cfg.CHROMA_DIR))
+        self._col = client.get_or_create_collection(
+            name="notes", embedding_function=ef
         )
-        log.info("note store ready (%d notes indexed)", len(self.index))
+        log.info("chroma ready")
 
     # --- index helpers -------------------------------------------------------
     def _load_index(self):
@@ -83,6 +89,7 @@ class NoteStore:
         self.index[note_id] = {"title": title, "date": date}
         self._save_index()
 
+        self._ensure_chroma()
         self._col.upsert(
             ids=[note_id],
             documents=[full_markdown],
@@ -96,6 +103,7 @@ class NoteStore:
         n = n or cfg.SEARCH_RESULTS
         if not self.index:
             return "No notes have been saved yet."
+        self._ensure_chroma()
         res = self._col.query(query_texts=[query], n_results=min(n, len(self.index)))
         ids = res.get("ids", [[]])[0]
         docs = res.get("documents", [[]])[0]

@@ -70,14 +70,6 @@ CONVO_SYSTEM = (
     "something, etc.), use the provided tools to look it up rather than guessing."
 )
 
-# --- Hotkeys (pynput GlobalHotKeys syntax) -----------------------------------
-# Modifier combos so ordinary typing never triggers a mode change. To use the
-# bare key 'm' to stop (as originally requested), change HOTKEY_STOP_NOTE to 'm'
-# (and the others similarly) — but bare letters will fire whenever you type them
-# anywhere, so combos are recommended.
-HOTKEY_TOGGLE_NOTE = "<media_play_pause>"  # headset button toggles notetaking on/off
-HOTKEY_TOGGLE_MUTE = "<ctrl>+<alt>+k"
-HOTKEY_QUIT = "<ctrl>+<alt>+q"
 
 
 def ensure_dirs():

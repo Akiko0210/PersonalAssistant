@@ -49,21 +49,25 @@ python voice_agent.py            # start the agent (conversation mode)
 python voice_agent.py --selftest # check mic, STT, TTS, Claude, and note search
 ```
 
-## Hotkeys
+## Controls
 
-Global hotkeys (work even when another window is focused):
+All controls work globally (even when another window is focused).
 
-| Action                       | Hotkey         |
-| ---------------------------- | -------------- |
-| Start notetaking             | `Ctrl+Alt+N`   |
-| Stop notetaking + summarise  | `Ctrl+Alt+M`   |
-| Toggle mute (stop listening) | `Ctrl+Alt+K`   |
-| Quit                         | `Ctrl+Alt+Q`   |
+### Headset button (play/pause)
 
-These are modifier combos so that ordinary typing never triggers a mode change.
-To use the bare key `m` to stop (and so on), change the `HOTKEY_*` values in
-`config.py` — e.g. `HOTKEY_STOP_NOTE = "m"`. Note that a bare letter will fire
-whenever you press it in any application, which is why combos are the default.
+| Action                       | Gesture               |
+| ---------------------------- | --------------------- |
+| Toggle mute (stop listening) | Single click          |
+| Toggle notetaking            | Double click          |
+| Quit                         | Triple click          |
+
+The headset button listens for `media_play_pause` events. Multi-click
+detection uses a 450 ms window — clicks within that window count together.
+
+### Barge-in (interrupt the agent)
+
+While the agent is speaking a reply, just start talking — it will stop and
+listen. Say "continue", "go on", or "keep going" to resume where it left off.
 
 ## Where things are saved
 
@@ -79,8 +83,8 @@ logs/              dated session logs of everything that happened
 All settings live in `config.py`:
 
 - `WHISPER_MODEL` — `base.en` (faster) ↔ `small.en` (default) ↔ `medium.en` (more accurate).
-- `CONVO_MODEL` / `SUMMARY_MODEL` — Claude models (conversation defaults to Sonnet for
-  low latency; summaries use Opus for quality).
+- `CONVO_MODEL` / `SUMMARY_MODEL` — Claude models (conversation defaults to Haiku for
+  low latency; summaries use Sonnet for quality).
 - `CONVO_ENDPOINT_MS` / `NOTE_ENDPOINT_MS` — how much trailing silence ends an utterance.
 - `VAD_AGGRESSIVENESS` — 0–3; raise it if background noise is being picked up as speech.
 - `TTS_RATE` / `TTS_VOICE` — speech speed and voice selection.

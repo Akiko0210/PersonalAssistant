@@ -43,12 +43,15 @@ def setup_logging():
 class Agent:
     def __init__(self):
         self.log = logging.getLogger("agent")
+        t0 = time.monotonic()
         self.audio = AudioEngine()
-        self.stt = Transcriber()
         self.tts = Speaker()
         self.store = NoteStore()
         self.llm = Claude(self.store)
-        self.status = "listening"
+        self.log.info("loading speech model...")
+        self.stt = Transcriber()
+        self.log.info("startup took %.1fs", time.monotonic() - t0)
+        self.status = "conversation_mode"
 
         self.cmds: "queue.Queue[str]" = queue.Queue()
         self.interrupt = threading.Event()
@@ -82,11 +85,14 @@ class Agent:
         return signals
 
     def _toggle_note(self):
-        if self.status == "listening":
+        if self.status == "conversation_mode":
             self.status = "note_taking"
+            if self.audio.muted.is_set():
+                self.audio.muted.clear()
+                self.log.info("auto-unmuted for notetaking")
             self._push("start_note")
         else:
-            self.status = "listening"
+            self.status = "conversation_mode"
             self._push("stop_note")
 
 
@@ -149,15 +155,6 @@ class Agent:
 
         self._listener = keyboard.Listener(on_press=on_press)
         self._listener.start()
-    # def start_hotkeys(self):
-    #     from pynput import keyboard
-    #     self._listener = keyboard.GlobalHotKeys({
-    #         cfg.HOTKEY_TOGGLE_NOTE: self._toggle_note,
-    #         # cfg.HOTKEY_STOP_NOTE: lambda: self._push("stop_note"),
-    #         cfg.HOTKEY_TOGGLE_MUTE: lambda: self._push("toggle_mute"),
-    #         cfg.HOTKEY_QUIT: lambda: self._push("quit"),
-    #     })
-    #     self._listener.start()
 
     # --- modes ---------------------------------------------------------------
     def run_conversation_turn(self):
@@ -301,9 +298,7 @@ class Agent:
         self.audio.start()
         self.start_hotkeys()
         self.log.info(
-            "Ready. Hotkeys: toggle-note=%s  mute=%s  quit=%s",
-            cfg.HOTKEY_TOGGLE_NOTE,
-            cfg.HOTKEY_TOGGLE_MUTE, cfg.HOTKEY_QUIT,
+            "Ready. Headset button: 1-click=mute  2-click=note  3-click=quit"
         )
         self.tts.speak("Voice agent ready. Conversation mode.")
         try:
