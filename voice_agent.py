@@ -96,65 +96,20 @@ class Agent:
             self._push("stop_note")
 
 
-    def _media_click(self):
-        import threading
-        import time
-
-        now = time.monotonic()
-
-        # Ignore accidental duplicate events from one physical press
-        last = getattr(self, "_last_media_click", 0)
-        if now - last < 0.08:
-            return
-
-        self._last_media_click = now
-
-        if not hasattr(self, "_media_click_lock"):
-            self._media_click_lock = threading.Lock()
-            self._media_click_count = 0
-            self._media_click_timer = None
-
-        with self._media_click_lock:
-            self._media_click_count += 1
-
-            if self._media_click_timer:
-                self._media_click_timer.cancel()
-
-            self._media_click_timer = threading.Timer(
-                0.45,
-                self._finish_media_clicks,
-            )
-            self._media_click_timer.daemon = True
-            self._media_click_timer.start()
-
-
-    def _finish_media_clicks(self):
-        with self._media_click_lock:
-            count = self._media_click_count
-            self._media_click_count = 0
-            self._media_click_timer = None
-
-        if count == 1:
-            self.log.info("media hotkey: single click -> toggle mute")
-            self._push("toggle_mute")
-
-        elif count == 2:
-            self.log.info("media hotkey: double click -> toggle note-taking")
-            self._toggle_note()
-
-        else:
-            self.log.info("media hotkey: triple click -> quit")
-            self._push("quit")
-
-    def start_hotkeys(self):
-        from pynput import keyboard
-
-        def on_press(key):
-            if key == keyboard.Key.media_play_pause:
-                self._media_click()
-
-        self._listener = keyboard.Listener(on_press=on_press)
-        self._listener.start()
+    def start_controls(self):
+        """Bluetooth/headset media buttons via Windows SMTC (PC-free):
+          play/pause (single press)  -> toggle notetaking
+          next       (double press)  -> toggle mute
+          previous   (triple press)  -> quit
+        """
+        from media_control import MediaButtonListener
+        self._media = MediaButtonListener(
+            on_play_pause=self._toggle_note,
+            on_next=lambda: self._push("toggle_mute"),
+            on_previous=lambda: self._push("quit"),
+            session_title="Voice Agent",
+        )
+        self._media.start()
 
     # --- modes ---------------------------------------------------------------
     def run_conversation_turn(self):
@@ -296,9 +251,9 @@ class Agent:
     # --- main loop -----------------------------------------------------------
     def run(self):
         self.audio.start()
-        self.start_hotkeys()
+        self.start_controls()
         self.log.info(
-            "Ready. Headset button: 1-click=mute  2-click=note  3-click=quit"
+            "Ready. Headset: play/pause=notetaking  next=mute  previous=quit"
         )
         self.tts.speak("Voice agent ready. Conversation mode.")
         try:
@@ -307,6 +262,8 @@ class Agent:
         except KeyboardInterrupt:
             pass
         finally:
+            if getattr(self, "_media", None):
+                self._media.stop()
             self.audio.stop()
             self.log.info("shut down")
 
