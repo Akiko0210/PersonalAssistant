@@ -14,6 +14,68 @@ Everything runs locally except Claude (the brains + summaries): transcription
 sentence-transformers) are all on-device. No UI — just your voice and hotkeys —
 but everything is logged to `logs/`.
 
+## Architecture
+
+```
+                        ┌─────────────────────┐
+                        │   voice_agent.py     │
+                        │   (orchestrator)     │
+                        └──┬──┬──┬──┬──┬──────┘
+                           │  │  │  │  │
+            ┌──────────────┘  │  │  │  └──────────────┐
+            │        ┌────────┘  │  └────────┐        │
+            ▼        ▼           ▼           ▼        ▼
+      ┌──────────┐ ┌─────┐ ┌─────────┐ ┌─────┐ ┌───────────────┐
+      │ audio.py │ │stt.py│ │ tts.py  │ │llm.py│ │media_control.py│
+      │ mic +    │ │Whisper│ │Windows  │ │Claude│ │  SMTC buttons  │
+      │ VAD      │ │  STT  │ │SAPI TTS│ │ API  │ │  (Bluetooth)   │
+      └────┬─────┘ └───┬───┘ └────┬───┘ └──┬──┘ └───────────────┘
+           │           │          │         │
+           │           │          │         ▼
+           │           │          │    ┌──────────┐
+           │           │          │    │ notes.py │
+           │           │          │    │ storage  │
+           │           │          │    │ + search │
+           │           │          │    └──┬───┬───┘
+           │           │          │       │   │
+           ▼           ▼          ▼       ▼   ▼
+      ┌─────────┐ ┌──────────┐ ┌────┐ ┌──────────┐ ┌──────────┐
+      │sounddevice│ │faster-   │ │SAPI│ │ ChromaDB │ │Anthropic │
+      │+ webrtcvad│ │whisper   │ │    │ │(vectors) │ │  Claude   │
+      └──────────┘ └──────────┘ └────┘ └──────────┘ └──────────┘
+
+        config.py ── shared settings, used by all modules above
+```
+
+### Data flow
+
+```
+              Conversation mode                    Notetaking mode
+              ─────────────────                    ───────────────
+
+  Mic ──► audio.py ──► stt.py ──► llm.py      Mic ──► audio.py ──► stt.py
+          (VAD +        (Whisper    (Claude          (VAD gated,    (transcribe
+          endpoint)     transcribe)  + tools)         long silence   segments)
+                            │           │             tolerant)         │
+                            │           ▼                              ▼
+                            │     tts.py (speak)              notes.py (save)
+                            │     with barge-in                    │
+                            │           │                          ▼
+                            │           ▼                    llm.py (summarize)
+                            │      Speaker ──► You                 │
+                            │                                      ▼
+                            └──────────────────────────►  notes.py (index)
+                             (tool calls: search,                  │
+                              list, read notes)                    ▼
+                                                            tts.py (read
+                                                             summary aloud)
+
+  Headset controls (media_control.py via SMTC):
+    Single press ─► toggle notetaking
+    Double press ─► toggle mute
+    Triple press ─► quit
+```
+
 ## Setup
 
 1. Install Python dependencies:
@@ -51,18 +113,17 @@ python voice_agent.py --selftest # check mic, STT, TTS, Claude, and note search
 
 ## Controls
 
-All controls work globally (even when another window is focused).
+All controls work wirelessly from your Bluetooth headset (AirPods, etc.) via
+Windows SMTC — no keyboard needed, works from across the room.
 
-### Headset button (play/pause)
+| Action            | AirPods gesture             | SMTC event |
+| ----------------- | --------------------------- | ---------- |
+| Toggle notetaking | Single press (squeeze stem) | Play/Pause |
+| Toggle mute       | Double press                | Next       |
+| Quit              | Triple press                | Previous   |
 
-| Action                       | Gesture               |
-| ---------------------------- | --------------------- |
-| Toggle mute (stop listening) | Single click          |
-| Toggle notetaking            | Double click          |
-| Quit                         | Triple click          |
-
-The headset button listens for `media_play_pause` events. Multi-click
-detection uses a 450 ms window — clicks within that window count together.
+See [MEDIA_CONTROL.md](MEDIA_CONTROL.md) for a deep dive on how this works
+and why earlier keyboard-based approaches failed with Bluetooth headsets.
 
 ### Barge-in (interrupt the agent)
 
