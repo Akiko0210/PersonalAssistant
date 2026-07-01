@@ -71,12 +71,29 @@ listen. Say "continue", "go on", or "keep going" to resume where it left off.
 
 ## Where things are saved
 
+Notes are sorted into category folders. Each finished note lives in its category
+folder as two files: the AI summary (`<id>.md`, with title/date/category
+frontmatter) and the raw transcript (`<id>.transcript.md`).
+
 ```
-data/transcripts/  raw transcripts (written live during a session)
-data/summaries/    AI summaries with title/date frontmatter
-data/chroma/       semantic search index
-logs/              dated session logs of everything that happened
+data/Trading/        notes filed under "Trading"  (<id>.md + <id>.transcript.md)
+data/TherapyBooks/   notes filed under "Therapy book"
+data/General/        everything else
+data/pending/        transient: live transcript while a session is recording
+data/chroma/         semantic search index
+data/index.json      ordered record of every note (title, date, category)
+logs/                dated session logs of everything that happened
 ```
+
+When a note-taking session ends, the agent suggests the best-fitting category and
+talks it through with you — you can just agree, name a different folder, or ask
+questions first ("what folders do I have?", "how many notes are in General?")
+before deciding. It files the note only once you commit. Queries ("what's my last
+note", "what did I think about X") search across **all** categories.
+
+Categories are defined in `config.py` under `NOTE_CATEGORIES` — each entry has a
+folder name and a description of what belongs there. Add a category by adding an
+entry there.
 
 ## Tuning
 

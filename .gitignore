@@ -3,3 +3,8 @@ data/
 logs/
 __pycache__/
 *.pyc
+
+# Large audio assets — kept out of git (they live in Dropbox). The idle/summary
+# cue is optional; the app runs silently if the file is absent.
+assets/*.wav
+assets/*.mp3

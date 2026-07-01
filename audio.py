@@ -27,6 +27,9 @@ class AudioEngine:
         self.vad = webrtcvad.Vad(cfg.VAD_AGGRESSIVENESS)
         self.muted = threading.Event()
         self._stream = None
+        # Frames handed back via pushback() — read before the live queue so audio
+        # consumed during barge-in detection isn't lost from the next utterance.
+        self._pushback: "collections.deque[bytes]" = collections.deque()
 
     # --- stream lifecycle ----------------------------------------------------
     def _callback(self, indata, frames, time_info, status):
@@ -53,11 +56,25 @@ class AudioEngine:
 
     def flush(self):
         """Drop any buffered frames (e.g. echo of our own TTS)."""
+        self._pushback.clear()
         try:
             while True:
                 self.q.get_nowait()
         except queue.Empty:
             pass
+
+    def pushback(self, frames):
+        """Re-queue already-read frames so the next reader sees them first, in
+        order. Used to recover the audio consumed while detecting a barge-in, so
+        the user's opening words aren't dropped from the captured utterance."""
+        self._pushback.extendleft(reversed(list(frames)))
+
+    def _next_frame(self, timeout):
+        """Next frame, preferring pushed-back audio over the live queue. Raises
+        queue.Empty if nothing arrives within `timeout`."""
+        if self._pushback:
+            return self._pushback.popleft()
+        return self.q.get(timeout=timeout)
 
     # --- capture helpers -----------------------------------------------------
     @staticmethod
@@ -83,7 +100,7 @@ class AudioEngine:
                 return self._to_array(voiced) if (triggered and voiced) else None
 
             try:
-                frame = self.q.get(timeout=0.1)
+                frame = self._next_frame(0.1)
             except queue.Empty:
                 continue
 
@@ -115,20 +132,23 @@ class AudioEngine:
                 if (time.monotonic() - start) > cfg.MAX_UTTERANCE_S:
                     return self._to_array(voiced)
 
-    def poll_speech(self, timeout=0.1):
+    def poll_speech(self, timeout=0.1, return_frame=False):
         """Pull one frame and classify it. Returns (is_speech, rms) where is_speech
         is the VAD verdict and rms is the frame loudness (int16 RMS), or None if no
-        frame arrived within `timeout`. While muted, is_speech is forced False.
-        Used to watch for barge-in while the agent is talking."""
+        frame arrived within `timeout`. With return_frame=True the raw frame bytes
+        are appended as a third element, so a barge-in watcher can retain the audio
+        it consumes. While muted, is_speech is forced False. Used to watch for
+        barge-in while the agent is talking."""
         try:
-            frame = self.q.get(timeout=timeout)
+            frame = self._next_frame(timeout)
         except queue.Empty:
             return None
         samples = np.frombuffer(frame, dtype=np.int16)
         rms = float(np.sqrt(np.mean(np.square(samples.astype(np.float64))))) if samples.size else 0.0
-        if self.muted.is_set():
-            return (False, rms)
-        return (self.vad.is_speech(frame, cfg.SAMPLE_RATE), rms)
+        is_speech = False if self.muted.is_set() else self.vad.is_speech(frame, cfg.SAMPLE_RATE)
+        if return_frame:
+            return (is_speech, rms, frame)
+        return (is_speech, rms)
 
     def record_seconds(self, seconds):
         """Capture a fixed window of audio (used by --selftest)."""
