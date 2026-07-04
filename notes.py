@@ -219,6 +219,128 @@ class NoteStore:
         ]
         return "You can file notes into these folders. " + " ".join(lines)
 
+    def create_folder(self, name: str, description: str = None) -> str:
+        """Create a new note folder from a spoken name. Rejects a name that already
+        maps to an existing folder so we don't create confusing near-duplicates."""
+        name = (name or "").strip()
+        if not name:
+            return "What would you like to call the new folder?"
+        existing = self._match_category(name)
+        if existing is not None:
+            return f"You already have a folder called {cfg.NOTE_CATEGORIES[existing]['display']}."
+        slug = cfg.add_category(name, description)
+        log.info("created folder %s (%s)", slug, cfg.NOTE_CATEGORIES[slug]["display"])
+        return f"Created a new folder called {cfg.NOTE_CATEGORIES[slug]['display']}."
+
+    def rename_folder(self, current: str, new_name: str) -> str:
+        """Rename an existing folder. Existing notes stay filed under it (the slug
+        is preserved); only the display name and its on-disk directory change."""
+        slug = self._match_category(current)
+        if slug is None:
+            known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+            return f"I couldn't find a folder called '{current}'. Your folders are: {known}."
+        new_name = (new_name or "").strip()
+        if not new_name:
+            return "What should I rename it to?"
+        clash = self._match_category(new_name)
+        if clash is not None and clash != slug:
+            return f"There's already a folder called {cfg.NOTE_CATEGORIES[clash]['display']}."
+        old_display = cfg.NOTE_CATEGORIES[slug]["display"]
+        cfg.rename_category(slug, new_name)
+        new_display = cfg.NOTE_CATEGORIES[slug]["display"]
+        log.info("renamed folder %s: %s -> %s", slug, old_display, new_display)
+        return f"Renamed {old_display} to {new_display}."
+
+    # --- moving notes / deleting folders -------------------------------------
+    def _move_note_files(self, note_id: str, from_slug: str, to_slug: str):
+        """Relocate a note's summary and transcript files between category dirs."""
+        src, dst = cfg.category_dir(from_slug), cfg.category_dir(to_slug)
+        dst.mkdir(parents=True, exist_ok=True)
+        for suffix in (".md", ".transcript.md"):
+            p = src / f"{note_id}{suffix}"
+            if p.exists():
+                try:
+                    p.replace(dst / f"{note_id}{suffix}")
+                except OSError as e:
+                    log.warning("move %s: %s", p, e)
+
+    def _reassign(self, note_id: str, to_slug: str):
+        """Move one note (files + index + Chroma metadata) into another category."""
+        info = self.index[note_id]
+        self._move_note_files(note_id, info.get("category", cfg.DEFAULT_CATEGORY), to_slug)
+        info["category"] = to_slug
+        # Chroma's category metadata isn't used for retrieval, only kept in sync.
+        # Skip the (heavy) first-use model load just for this cosmetic field —
+        # update only when Chroma is already loaded this session.
+        if self._col is not None:
+            try:
+                self._col.update(
+                    ids=[note_id],
+                    metadatas=[{"title": info.get("title", ""),
+                                "date": info.get("date", ""),
+                                "category": to_slug}],
+                )
+            except Exception as e:  # never let a metadata hiccup fail the move
+                log.warning("chroma metadata update for %s: %s", note_id, e)
+
+    def move_note(self, note_id: str, to_folder: str) -> str:
+        """Move a single saved note into another folder. `note_id` is the id shown
+        in brackets by search_notes / list_recent_notes."""
+        note_id = (note_id or "").strip()
+        info = self.index.get(note_id)
+        if not info:
+            return f"I couldn't find a note with id {note_id}."
+        to_slug = self._match_category(to_folder)
+        if to_slug is None:
+            known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+            return f"I don't have a folder called '{to_folder}'. Your folders are: {known}."
+        if info.get("category", cfg.DEFAULT_CATEGORY) == to_slug:
+            return f"That note is already in {cfg.NOTE_CATEGORIES[to_slug]['display']}."
+        title = info.get("title", note_id)
+        self._reassign(note_id, to_slug)
+        self._save_index()
+        log.info("moved note %s -> %s", note_id, to_slug)
+        return f"Moved '{title}' to {cfg.NOTE_CATEGORIES[to_slug]['display']}."
+
+    def delete_folder(self, name: str, move_notes_to: str = None) -> str:
+        """Delete a folder. Any notes in it are relocated first (never destroyed) —
+        to `move_notes_to` if given, otherwise to the default General folder. The
+        default folder itself can't be deleted."""
+        slug = self._match_category(name)
+        if slug is None:
+            known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+            return f"I couldn't find a folder called '{name}'. Your folders are: {known}."
+        if slug == cfg.DEFAULT_CATEGORY:
+            disp = cfg.NOTE_CATEGORIES[slug]["display"]
+            return f"I can't delete the {disp} folder — it's the default that catches everything else."
+        if move_notes_to:
+            dest = self._match_category(move_notes_to)
+            if dest is None:
+                known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+                return (f"I don't have a folder called '{move_notes_to}' to move the notes into. "
+                        f"Your folders are: {known}.")
+            if dest == slug:
+                return "That's the folder you're deleting — tell me a different one for the notes."
+        else:
+            dest = cfg.DEFAULT_CATEGORY
+
+        note_ids = [nid for nid, info in self.index.items()
+                    if info.get("category", cfg.DEFAULT_CATEGORY) == slug]
+        for nid in note_ids:
+            self._reassign(nid, dest)
+        if note_ids:
+            self._save_index()
+
+        disp = cfg.NOTE_CATEGORIES[slug]["display"]
+        cfg.delete_category(slug)
+        log.info("deleted folder %s (moved %d note(s) to %s)", slug, len(note_ids), dest)
+        if note_ids:
+            n = len(note_ids)
+            dest_disp = cfg.NOTE_CATEGORIES[dest]["display"]
+            return (f"Deleted the {disp} folder and moved its {n} "
+                    f"note{'' if n == 1 else 's'} to {dest_disp}.")
+        return f"Deleted the {disp} folder."
+
     def count_notes(self, folder: str = None) -> str:
         counts = collections.Counter(
             (info.get("category") or cfg.DEFAULT_CATEGORY) for info in self.index.values()

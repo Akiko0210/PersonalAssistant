@@ -91,9 +91,21 @@ questions first ("what folders do I have?", "how many notes are in General?")
 before deciding. It files the note only once you commit. Queries ("what's my last
 note", "what did I think about X") search across **all** categories.
 
-Categories are defined in `config.py` under `NOTE_CATEGORIES` — each entry has a
-folder name and a description of what belongs there. Add a category by adding an
-entry there.
+The built-in categories are defined in `config.py` under `NOTE_CATEGORIES` — each
+entry has a folder name and a description of what belongs there. You can also
+manage folders **by voice** in conversation mode:
+
+- **Create** — "create a folder called Recipes".
+- **Rename** — "rename Ideas to Brainstorms". Existing notes stay filed under it
+  (the slug is preserved) and the folder is moved on disk.
+- **Delete** — "delete the Recipes folder". Notes are never lost: they move to
+  General by default, or to a folder you name ("delete Recipes and move its notes
+  to Ideas"). The General folder can't be deleted.
+- **Move a note** — "move my last note to Ideas", "put the grocery note in
+  Recipes". The agent looks the note up, then moves its files.
+
+Voice-created and renamed folders are persisted to `data/categories.json` and
+overlaid on the defaults at startup.
 
 ## Tuning
 

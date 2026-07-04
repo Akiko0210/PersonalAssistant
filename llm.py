@@ -119,6 +119,78 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "create_folder",
+        "description": (
+            "Create a new note folder/category. Use when the user asks to make, "
+            "add, or create a folder (e.g. 'create a folder called Recipes'). Pass "
+            "the spoken name; optionally a short description of what belongs in it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name for the new folder, e.g. 'Recipes'"},
+                "description": {
+                    "type": "string",
+                    "description": "Optional: what kind of notes belong in this folder.",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "rename_folder",
+        "description": (
+            "Rename an existing note folder/category. Use when the user asks to "
+            "rename or change a folder's name (e.g. 'rename Ideas to Brainstorms'). "
+            "Notes already filed there are kept. Pass the current name and the new name."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "current": {"type": "string", "description": "The current folder name, e.g. 'Ideas'"},
+                "new_name": {"type": "string", "description": "The new name, e.g. 'Brainstorms'"},
+            },
+            "required": ["current", "new_name"],
+        },
+    },
+    {
+        "name": "delete_folder",
+        "description": (
+            "Delete a note folder/category. Use when the user asks to delete or "
+            "remove a folder. Notes in it are never lost — they're moved to General "
+            "by default, or to 'move_notes_to' if the user names a destination. The "
+            "General folder itself can't be deleted."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The folder to delete, e.g. 'Recipes'"},
+                "move_notes_to": {
+                    "type": "string",
+                    "description": "Optional folder to move any notes into before deleting (defaults to General).",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "move_note",
+        "description": (
+            "Move a single saved note into a different folder. First find the note's "
+            "id with search_notes or list_recent_notes (they show it in [brackets]), "
+            "then call this with that id and the destination folder. Use for 'move my "
+            "last note to Ideas' or 'put the grocery note in Recipes'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "note_id": {"type": "string", "description": "The note id, e.g. note_2026-06-22_141500"},
+                "to_folder": {"type": "string", "description": "Destination folder name, e.g. 'Ideas'"},
+            },
+            "required": ["note_id", "to_folder"],
+        },
+    },
+    {
         "name": "count_notes",
         "description": (
             "Count saved notes, optionally within one category folder. Use for "
@@ -205,6 +277,14 @@ class Claude:
                 return datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
             if name == "list_folders":
                 return self.store.list_folders()
+            if name == "create_folder":
+                return self.store.create_folder(args["name"], args.get("description"))
+            if name == "rename_folder":
+                return self.store.rename_folder(args["current"], args["new_name"])
+            if name == "delete_folder":
+                return self.store.delete_folder(args["name"], args.get("move_notes_to"))
+            if name == "move_note":
+                return self.store.move_note(args["note_id"], args["to_folder"])
             if name == "count_notes":
                 return self.store.count_notes(args.get("folder"))
         except Exception as e:  # surface tool errors back to the model
