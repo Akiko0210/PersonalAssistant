@@ -35,10 +35,10 @@ NOTE_CATEGORIES = {
         "folder": "TherapyBooks",
         "description": "Any physical therapy or neurology book notes.",
     },
-    "todo": {
-        "display": "Todo",
-        "folder": "Todo",
-        "description": "My todo notes."
+    "to-do": {
+        "display": "To-do",
+        "folder": "To-do",
+        "description": "My to-do notes."
     },
     "ideas": {
         "display": "Ideas",
