@@ -1,6 +1,7 @@
 .env
 data/
 logs/
+knowledge/
 __pycache__/
 *.pyc
 

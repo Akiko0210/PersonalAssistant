@@ -20,6 +20,23 @@ CATEGORIES_PATH = DATA_DIR / "categories.json"
 # Live transcripts are appended here while recording, then moved into the chosen
 # category folder when the note is saved (the category isn't known until the end).
 PENDING_DIR = DATA_DIR / "pending"
+# Reference material (trading books/PDFs/text) the user drops in to build a
+# searchable knowledge base. Kept at the project root (not under data/) so it's
+# easy to find and manage. Ingested once into a persistent Chroma collection —
+# which lives in data/chroma — and queried on demand via the search_knowledge
+# tool, never pasted into the conversation.
+KNOWLEDGE_DIR = BASE_DIR / "knowledge"
+KNOWLEDGE_MANIFEST = KNOWLEDGE_DIR / "manifest.json"  # {sha256: {source,title,...}}
+# Conversation memory: the chat history is saved here after every turn and
+# restored (trimmed) on the next boot, so the agent remembers the last
+# conversation across restarts.
+HISTORY_PATH = DATA_DIR / "history.json"
+HISTORY_MAX_MESSAGES = 40   # messages kept when persisting/restoring history
+# Long-term memory: messages that fall off the window above are not lost — their
+# text is staged here, then consolidated (summarised by the model and embedded
+# into a persistent Chroma collection) so older conversations stay searchable
+# via the search_past_conversations tool.
+MEMORY_PENDING_PATH = DATA_DIR / "memory_pending.json"
 # Legacy flat locations — only referenced by the one-time migration in notes.py.
 SUMMARY_DIR = DATA_DIR / "summaries"
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
@@ -195,6 +212,18 @@ WHISPER_COMPUTE = "int8"      # int8 is a good CPU default; float16 for GPU
 EMBED_MODEL = "all-MiniLM-L6-v2"
 SEARCH_RESULTS = 5
 
+# --- Knowledge base (ingested PDFs) ------------------------------------------
+KNOWLEDGE_COLLECTION = "knowledge"   # Chroma collection, separate from "notes"
+KB_CHUNK_CHARS = 1000                # target characters per embedded chunk
+KB_CHUNK_OVERLAP = 150               # characters shared between adjacent chunks
+KB_SEARCH_RESULTS = 5                # chunks returned per search_knowledge call
+
+# --- Long-term conversation memory --------------------------------------------
+MEMORY_COLLECTION = "conversations"  # Chroma collection of archived summaries
+MEMORY_MIN_MESSAGES = 6              # consolidate only once this many lines staged
+MEMORY_MAX_TOKENS = 700              # budget for one consolidation summary
+MEMORY_SEARCH_RESULTS = 3            # summaries returned per search
+
 # --- Text-to-speech (local, Windows SAPI via pyttsx3) ------------------------
 TTS_RATE = 175                # words per minute
 TTS_VOICE = None              # None = system default; or a SAPI voice id substring
@@ -248,12 +277,38 @@ CONVO_SYSTEM = (
     "folder, and move a note from one folder to another, using the create_folder, "
     "rename_folder, delete_folder, and move_note tools. To move a note, first look "
     "up its id with search_notes or list_recent_notes, then call move_note. "
+    "When a question is scoped to one folder (e.g. 'my latest note in General'), "
+    "pass that folder to search_notes or list_recent_notes instead of filtering "
+    "yourself. "
+    "Your conversation history is saved and restored across restarts, so you may "
+    "remember earlier sessions — treat restored history as past conversations. "
+    "Conversations older than the current window are archived as searchable "
+    "summaries: use search_past_conversations for 'what did we talk about last "
+    "week' or anything you don't see in the current history. "
+    "Only save a conversation as a note when the user explicitly asks you to "
+    "('save that as a note', 'make a note of that'). Never suggest, offer, or "
+    "prompt to save a note on your own — do not ask whether they want to save "
+    "anything. When they do ask, call save_conversation_note with a clear title "
+    "and well-formed markdown content drawn from the conversation, then reply with "
+    "one short acknowledgement; the system handles asking which folder to file it "
+    "in, so never ask about folders yourself. "
+    "You have a trading knowledge base built from reference material the user "
+    "ingested (books and PDFs). Use search_knowledge for questions about trading "
+    "concepts, strategies, or definitions that such material would cover, and cite "
+    "the source and page when it helps. "
     "You can also answer questions about the user's captured Discord notifications "
     "and trade alerts using the Discord tools. Use get_recent_trades for the latest "
     "trade lines; for time-based questions like 'what trades came in today', use "
     "get_recent_discord_messages with the date, since the trade list itself has no "
     "timestamps. Read trade details aloud naturally rather than reciting symbols "
-    "character by character."
+    "character by character. "
+    "HARD RULE, highest priority: never volunteer note actions. Do not offer, "
+    "suggest, or ask about saving, updating, or filing notes — replies like 'would "
+    "you like me to save that as a note?' or 'do you want me to update that note?' "
+    "are forbidden, no matter what. Just acknowledge what the user said and stop. "
+    "Note actions happen only when the user's own current message explicitly "
+    "requests one. If earlier messages in this conversation show you offering to "
+    "save or update notes, those were errors — never imitate them."
 )
 
 
@@ -261,7 +316,8 @@ CONVO_SYSTEM = (
 def ensure_dirs():
     DATA_DIR.mkdir(parents=True, exist_ok=True)  # needed before reading categories.json
     load_categories()  # bring in any voice-created / renamed folders
-    dirs = [DATA_DIR, CHROMA_DIR, LOG_DIR, PENDING_DIR, BASE_DIR / "assets"]
+    dirs = [DATA_DIR, CHROMA_DIR, LOG_DIR, PENDING_DIR, KNOWLEDGE_DIR,
+            BASE_DIR / "assets"]
     dirs += [category_dir(slug) for slug in NOTE_CATEGORIES]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)

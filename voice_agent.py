@@ -25,6 +25,7 @@ from audio import AudioEngine
 from stt import Transcriber
 from tts import Speaker
 from notes import NoteStore
+from knowledge import KnowledgeStore
 from llm import Claude
 from sound import IdleSound
 
@@ -49,8 +50,20 @@ class Agent:
         self.audio = AudioEngine()
         self.tts = Speaker()
         self.store = NoteStore()
+        # Absorb any newly added trading PDFs before we start listening. This is an
+        # idempotent scan: unchanged files are skipped by content hash without
+        # loading the embedding model, so it's near-instant unless there's a genuinely
+        # new book (which is embedded once, here, blocking startup that one time).
+        self.kb = KnowledgeStore()
+        self.log.info("scanning knowledge base...")
+        self.log.info(self.kb.ingest_folder())
         self.idle = IdleSound()  # "thinking" cue, looped during model calls
-        self.llm = Claude(self.store, self.idle)
+        self.llm = Claude(self.store, self.idle, self.kb)
+        # Fold any conversation text that aged out of the rolling window into
+        # long-term memory. No-op on most boots; one quick model call otherwise.
+        archived = self.llm.consolidate_memory()
+        if archived:
+            self.log.info(archived)
         self.log.info("loading speech model...")
         self.stt = Transcriber()
         self.log.info("startup took %.1fs", time.monotonic() - t0)
@@ -200,6 +213,15 @@ class Agent:
         reply = self.llm.converse(text)
         self.log.info("agent: %s", reply)
         interrupted = self.say(reply, save_resume=True)
+
+        # The user asked to save something from the conversation as a note: the
+        # model prepared it via save_conversation_note; now run the same folder
+        # dialogue + save flow a finished note-taking session gets.
+        pending = self.llm.take_pending_note()
+        if pending:
+            self._save_pending_note(pending)
+            return
+
         if not interrupted:
             self.audio.flush()
 
@@ -364,6 +386,26 @@ class Agent:
         if not interrupted:
             self.audio.flush()
 
+    def _save_pending_note(self, pending: dict):
+        """Save a note the model prepared from the conversation (via the
+        save_conversation_note tool): confirm the folder through the usual spoken
+        dialogue, then file it exactly like a recorded note."""
+        title = pending["title"]
+        content = pending["content"]
+        spoken = pending.get("spoken") or f"I've saved a note called {title}."
+        suggested = self.store._match_category(pending.get("category")) or cfg.DEFAULT_CATEGORY
+
+        note_id = self.store.new_session()
+        # The "transcript" of a conversation note is the note body itself, so the
+        # note keeps the same two-file layout as recorded notes.
+        self.store.append_transcript(note_id, f"(Saved from conversation)\n\n{content}")
+        category = self._confirm_category(suggested, title, content[:300])
+        self.store.save_summary(note_id, title, content, category)
+        self.log.info("saved conversation note '%s' -> %s", title, category)
+        interrupted = self.say(f"Notes saved. {spoken}")
+        if not interrupted:
+            self.audio.flush()
+
     # --- categorisation (spoken conversation) --------------------------------
     def _confirm_category(self, suggested: str, title: str, summary: str) -> str:
         """Decide the note's folder via a short back-and-forth: the agent proposes a
@@ -478,6 +520,12 @@ def main():
                         help="Run component smoke tests and exit")
     parser.add_argument("--miccheck", action="store_true",
                         help="Print mic loudness to tune barge-in thresholds, then exit")
+    parser.add_argument("--ingest", action="store_true",
+                        help="Ingest PDFs/text from the knowledge/ folder into the knowledge base, then exit")
+    parser.add_argument("--kb-list", action="store_true",
+                        help="List ingested knowledge sources, then exit")
+    parser.add_argument("--resync", action="store_true",
+                        help="Repair note folder/frontmatter/Chroma inconsistencies, then exit")
     args = parser.parse_args()
 
     setup_logging()
@@ -485,6 +533,12 @@ def main():
         selftest()
     elif args.miccheck:
         miccheck()
+    elif args.ingest:
+        print(KnowledgeStore().ingest_folder())
+    elif args.kb_list:
+        print(KnowledgeStore().list_sources())
+    elif args.resync:
+        print(NoteStore().resync())
     else:
         Agent().run()
 

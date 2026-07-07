@@ -1,5 +1,6 @@
 """Claude integration: conversation (with note-access tools) and summarisation."""
 
+import json
 import logging
 from datetime import datetime
 
@@ -7,6 +8,8 @@ import anthropic
 
 import config as cfg
 from discord_data import DiscordData
+from knowledge import KnowledgeStore
+from memory import ConversationMemory
 
 log = logging.getLogger("llm")
 
@@ -14,13 +17,19 @@ TOOLS = [
     {
         "name": "search_notes",
         "description": (
-            "Semantic search across all saved notes. Use for questions like "
-            "'what did I say about X' or to find notes on a topic."
+            "Semantic search across saved notes. Use for questions like 'what did "
+            "I say about X' or to find notes on a topic. Pass folder to limit the "
+            "search to one folder (e.g. 'what did I note about spreads in my "
+            "Trading folder'); omit it to search everywhere."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "What to search for"}
+                "query": {"type": "string", "description": "What to search for"},
+                "folder": {
+                    "type": "string",
+                    "description": "Optional: only search this folder, e.g. 'Trading'.",
+                },
             },
             "required": ["query"],
         },
@@ -29,12 +38,18 @@ TOOLS = [
         "name": "list_recent_notes",
         "description": (
             "List the most recent notes, newest first. Use for 'what's my latest "
-            "note' or 'what have I recorded recently'."
+            "note' or 'what have I recorded recently'. Pass folder to scope it "
+            "(e.g. 'what's the latest note in my General folder'); omit it for "
+            "all folders."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "n": {"type": "integer", "description": "How many to list (default 5)"}
+                "n": {"type": "integer", "description": "How many to list (default 5)"},
+                "folder": {
+                    "type": "string",
+                    "description": "Optional: only list notes from this folder, e.g. 'General'.",
+                },
             },
         },
     },
@@ -119,6 +134,38 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "search_past_conversations",
+        "description": (
+            "Search archived summaries of older conversations — ones that have "
+            "aged out of the current chat window. Use for 'what did we talk about "
+            "last week/month', 'didn't we discuss X before', or any question about "
+            "a past conversation you don't see in the current history."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Topic to look for in past conversations"}
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_knowledge",
+        "description": (
+            "Search the user's ingested trading reference material (PDFs and text "
+            "files) for relevant passages. Use for questions about trading concepts, "
+            "strategies, definitions, or 'what does my trading book say about X'. "
+            "Returns excerpts with their source (and page, for PDFs) so you can cite them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to look up in the trading material"}
+            },
+            "required": ["query"],
+        },
+    },
+    {
         "name": "create_folder",
         "description": (
             "Create a new note folder/category. Use when the user asks to make, "
@@ -151,6 +198,37 @@ TOOLS = [
                 "new_name": {"type": "string", "description": "The new name, e.g. 'Brainstorms'"},
             },
             "required": ["current", "new_name"],
+        },
+    },
+    {
+        "name": "save_conversation_note",
+        "description": (
+            "Save something from this conversation as a note. ONLY call this when "
+            "the user explicitly asks (e.g. 'save that as a note', 'make a note of "
+            "that'); never call it proactively or suggest saving on your own. Write "
+            "the note content yourself from the conversation — clean markdown with a "
+            "Summary section and Key Points. After calling this, reply with one "
+            "short acknowledgement only; the system will ask the user which "
+            "folder to file it in, so never ask about folders yourself."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short descriptive title, max ~8 words"},
+                "content": {
+                    "type": "string",
+                    "description": "The full note body in markdown, drawn from the conversation.",
+                },
+                "spoken_summary": {
+                    "type": "string",
+                    "description": "1-2 plain sentences recapping the note, to be read aloud after saving.",
+                },
+                "category": {
+                    "type": "string",
+                    "description": "Optional: the folder slug that seems the best fit.",
+                },
+            },
+            "required": ["title", "content"],
         },
     },
     {
@@ -246,11 +324,23 @@ class _NullIdle:
 
 
 class Claude:
-    def __init__(self, store, idle=None):
+    def __init__(self, store, idle=None, kb=None):
         self.client = anthropic.Anthropic()
         self.store = store
         self.discord = DiscordData()
-        self.history = []
+        # The agent shares its single KnowledgeStore (same one used for boot-time
+        # ingestion) so the embedding model loads at most once per process; selftest
+        # passes none, so fall back to a fresh instance.
+        self.kb = kb if kb is not None else KnowledgeStore()
+        # Long-term memory must exist before the history loads: anything the
+        # rolling window drops is staged into it rather than lost.
+        self.memory = ConversationMemory()
+        # Conversation memory: restore the last conversation (trimmed) so the agent
+        # remembers it across restarts; saved back to disk after every turn.
+        self.history = self._load_history()
+        # Set by the save_conversation_note tool; the agent picks it up after the
+        # reply and runs the folder dialogue + save (see voice_agent).
+        self.pending_note = None
         # Looped while we wait on the model, so the user hears the agent thinking.
         self.idle = idle if idle is not None else _NullIdle()
 
@@ -258,9 +348,11 @@ class Claude:
     def _dispatch(self, name, args):
         try:
             if name == "search_notes":
-                return self.store.search_notes(args["query"])
+                return self.store.search_notes(args["query"], folder=args.get("folder"))
             if name == "list_recent_notes":
-                return self.store.list_recent_notes(int(args.get("n", 5)))
+                return self.store.list_recent_notes(
+                    int(args.get("n", 5)), folder=args.get("folder")
+                )
             if name == "read_note":
                 return self.store.read_note(args["note_id"])
             if name == "get_recent_discord_messages":
@@ -277,6 +369,10 @@ class Claude:
                 return datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
             if name == "list_folders":
                 return self.store.list_folders()
+            if name == "search_knowledge":
+                return self.kb.search(args["query"])
+            if name == "search_past_conversations":
+                return self.memory.search(args["query"])
             if name == "create_folder":
                 return self.store.create_folder(args["name"], args.get("description"))
             if name == "rename_folder":
@@ -287,11 +383,96 @@ class Claude:
                 return self.store.move_note(args["note_id"], args["to_folder"])
             if name == "count_notes":
                 return self.store.count_notes(args.get("folder"))
+            if name == "save_conversation_note":
+                title = (args.get("title") or "").strip() or "Conversation note"
+                content = (args.get("content") or "").strip()
+                if not content:
+                    return "No content provided — include the note body in 'content'."
+                self.pending_note = {
+                    "title": title,
+                    "content": content,
+                    "spoken": (args.get("spoken_summary") or "").strip(),
+                    "category": args.get("category"),
+                }
+                return ("Note prepared. Acknowledge briefly; the system will now ask "
+                        "the user which folder to file it in.")
         except Exception as e:  # surface tool errors back to the model
             return f"Tool error: {e}"
         return f"Unknown tool: {name}"
 
+    def take_pending_note(self):
+        """Hand the pending conversation note (if any) to the agent, clearing it."""
+        pending, self.pending_note = self.pending_note, None
+        return pending
+
+    def consolidate_memory(self):
+        """Fold staged (aged-out) conversation text into long-term memory. Run at
+        boot; a no-op unless enough has accumulated. Failures keep the staging
+        file intact, so nothing is lost when offline."""
+        try:
+            return self.memory.consolidate(self.client)
+        except Exception as e:
+            log.warning("memory consolidation failed (will retry next boot): %s", e)
+            return None
+
+    # --- persistent conversation memory ---------------------------------------
+    @staticmethod
+    def _dump_block(block):
+        """Content blocks from the SDK are pydantic models; store them as plain
+        dicts so the history is JSON-serializable (the API accepts dicts back)."""
+        return block if isinstance(block, dict) else block.model_dump(exclude_none=True)
+
+    @staticmethod
+    def _trim_history(history):
+        """Cap the history and make sure it starts on a plain user message — a
+        trim boundary must never orphan a tool_result from its tool_use, or the
+        API rejects the conversation."""
+        h = list(history[-cfg.HISTORY_MAX_MESSAGES:])
+        while h and not (h[0].get("role") == "user" and isinstance(h[0].get("content"), str)):
+            h.pop(0)
+        return h
+
+    def _trim_and_archive(self, history):
+        """Trim to the rolling window, staging whatever falls off into long-term
+        memory instead of discarding it. The kept part is always a contiguous
+        suffix, so the dropped prefix is everything before it."""
+        kept = self._trim_history(history)
+        dropped = history[:len(history) - len(kept)]
+        if dropped:
+            try:
+                self.memory.record_dropped(dropped)
+            except Exception as e:  # staging must never break the conversation
+                log.warning("could not stage dropped history: %s", e)
+        return kept
+
+    def _load_history(self):
+        try:
+            if cfg.HISTORY_PATH.exists():
+                h = json.loads(cfg.HISTORY_PATH.read_text(encoding="utf-8"))
+                if isinstance(h, list) and h:
+                    h = self._trim_and_archive(h)
+                    log.info("restored %d message(s) of conversation history", len(h))
+                    return h
+        except (OSError, ValueError) as e:
+            log.warning("could not load conversation history: %s", e)
+        return []
+
+    def _save_history(self):
+        # Saved untrimmed: trimming happens on load / at each turn, where the
+        # dropped part is staged into long-term memory. Trimming here instead
+        # would silently discard the overflow on quit.
+        try:
+            cfg.HISTORY_PATH.write_text(
+                json.dumps(self.history, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except (OSError, TypeError) as e:
+            log.warning("could not save conversation history: %s", e)
+
     def converse(self, user_text: str) -> str:
+        # Trim in memory too, so a long-running session doesn't grow unbounded;
+        # whatever falls off is staged into long-term memory, not lost.
+        self.history = self._trim_and_archive(self.history)
         self.history.append({"role": "user", "content": user_text})
         self.idle.start()  # thinking — keep it looping across the whole tool loop
         try:
@@ -304,7 +485,10 @@ class Claude:
                     thinking={"type": "disabled"},
                     messages=self.history,
                 )
-                self.history.append({"role": "assistant", "content": resp.content})
+                self.history.append(
+                    {"role": "assistant",
+                     "content": [self._dump_block(b) for b in resp.content]}
+                )
 
                 if resp.stop_reason == "tool_use":
                     results = []
@@ -323,6 +507,7 @@ class Claude:
                 return "".join(b.text for b in resp.content if b.type == "text").strip()
         finally:
             self.idle.stop()
+            self._save_history()  # every turn — survives crashes and quits alike
 
     # --- summarisation -------------------------------------------------------
     @staticmethod
@@ -418,7 +603,9 @@ class Claude:
                 "required": ["folder"],
             },
         }
-        tools = TOOLS + [choose_tool]
+        # save_conversation_note is excluded here: we're already filing a note,
+        # so triggering another pending note mid-dialogue would be circular.
+        tools = [t for t in TOOLS if t["name"] != "save_conversation_note"] + [choose_tool]
         history = [{"role": "user",
                     "content": "I just finished recording a note. Where should it go?"}]
         try:

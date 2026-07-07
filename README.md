@@ -69,6 +69,27 @@ detection uses a 450 ms window — clicks within that window count together.
 While the agent is speaking a reply, just start talking — it will stop and
 listen. Say "continue", "go on", or "keep going" to resume where it left off.
 
+## Conversation memory
+
+The conversation is saved to `data/history.json` after every turn and restored
+on the next start, so the agent remembers your last conversation across
+restarts. The live window keeps the most recent exchanges
+(`HISTORY_MAX_MESSAGES` in `config.py`).
+
+Older conversation isn't lost when it ages out of that window: its text is
+staged to `data/memory_pending.json`, and at boot the agent consolidates the
+staged text — one quick model call summarises it into a dense memory record
+embedded in a persistent `conversations` collection in Chroma. Ask "what did we
+talk about last week?" or "didn't we discuss X before?" and the agent searches
+those archived summaries (`search_past_conversations`). Consolidation only runs
+when enough has accumulated, and if it fails (e.g. offline) the staged text is
+kept and retried next boot.
+
+You can also turn part of a conversation into a note without switching to
+note-taking mode: ask something ("what did we talk about trading?"), then say
+"save that as a note". The agent writes the note from the conversation and runs
+the usual folder dialogue to ask where to file it.
+
 ## Where things are saved
 
 Notes are sorted into category folders. Each finished note lives in its category
@@ -80,8 +101,9 @@ data/Trading/        notes filed under "Trading"  (<id>.md + <id>.transcript.md)
 data/TherapyBooks/   notes filed under "Therapy book"
 data/General/        everything else
 data/pending/        transient: live transcript while a session is recording
-data/chroma/         semantic search index
+data/chroma/         semantic search index (note + knowledge collections)
 data/index.json      ordered record of every note (title, date, category)
+knowledge/           reference PDFs/text you ingest + manifest.json (see below)
 logs/                dated session logs of everything that happened
 ```
 
@@ -89,7 +111,9 @@ When a note-taking session ends, the agent suggests the best-fitting category an
 talks it through with you — you can just agree, name a different folder, or ask
 questions first ("what folders do I have?", "how many notes are in General?")
 before deciding. It files the note only once you commit. Queries ("what's my last
-note", "what did I think about X") search across **all** categories.
+note", "what did I think about X") search across **all** categories by default,
+and can be scoped to one folder by naming it ("what's the latest note in my
+General folder", "search my Trading notes for spreads").
 
 The built-in categories are defined in `config.py` under `NOTE_CATEGORIES` — each
 entry has a folder name and a description of what belongs there. You can also
@@ -106,6 +130,28 @@ manage folders **by voice** in conversation mode:
 
 Voice-created and renamed folders are persisted to `data/categories.json` and
 overlaid on the defaults at startup.
+
+## Trading knowledge base (PDF)
+
+You can give the agent reference material to draw on — e.g. a trading book — so it
+can answer questions from it without you pasting anything into the conversation.
+
+1. Drop one or more `.pdf`, `.txt`, or `.md` files into the `knowledge/` folder
+   (at the project root, next to `run.bat`).
+2. Run `run.bat --ingest` (or just start the agent — it auto-scans on boot).
+
+Each file is chunked and embedded **once** into a persistent `knowledge` collection
+in `data/chroma`. Ingestion is idempotent: files are identified by content hash and
+recorded in `knowledge/manifest.json`, so re-scanning an unchanged folder is
+near-instant and never re-embeds. On boot the agent runs the same scan
+automatically — nothing new means no delay; a genuinely new book is embedded once
+before the agent starts listening.
+
+After that, ask trading questions in conversation ("what does my trading book say
+about iron condors?"). The agent uses the `search_knowledge` tool on demand and
+cites the source (and page, for PDFs). `run.bat --kb-list` shows what's been
+ingested. The
+content stays local and, like the rest of `data/`, is gitignored.
 
 ## Tuning
 

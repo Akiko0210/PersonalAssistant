@@ -9,6 +9,7 @@ indexed into a persistent Chroma collection for semantic search. A small
 import collections
 import json
 import logging
+import re
 from datetime import datetime
 
 import chromadb
@@ -156,29 +157,68 @@ class NoteStore:
         return path
 
     # --- retrieval (used as Claude tools) ------------------------------------
-    def search_notes(self, query: str, n: int = None) -> str:
+    def _resolve_scope(self, folder):
+        """Resolve an optional spoken folder name into a slug for scoped queries.
+        Returns (slug, error_message) — slug None means unscoped; error set means
+        the name didn't match any folder."""
+        if not folder:
+            return None, None
+        slug = self._match_category(folder)
+        if slug is None:
+            known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+            return None, f"I don't have a folder matching '{folder}'. Folders are: {known}."
+        return slug, None
+
+    def _note_category(self, note_id: str) -> str:
+        return (self.index.get(note_id) or {}).get("category") or cfg.DEFAULT_CATEGORY
+
+    def search_notes(self, query: str, n: int = None, folder: str = None) -> str:
         n = n or cfg.SEARCH_RESULTS
         if not self.index:
             return "No notes have been saved yet."
+        slug, err = self._resolve_scope(folder)
+        if err:
+            return err
         self._ensure_chroma()
-        res = self._col.query(query_texts=[query], n_results=min(n, len(self.index)))
+        # When scoped, over-fetch and filter by the index — the index is the
+        # authoritative record of each note's category (Chroma metadata could lag
+        # for notes moved before metadata syncing was fixed).
+        fetch = len(self.index) if slug else min(n, len(self.index))
+        res = self._col.query(query_texts=[query], n_results=fetch)
         ids = res.get("ids", [[]])[0]
         docs = res.get("documents", [[]])[0]
         metas = res.get("metadatas", [[]])[0]
-        if not ids:
-            return "No matching notes found."
         out = []
         for nid, doc, meta in zip(ids, docs, metas):
+            if slug and self._note_category(nid) != slug:
+                continue
             title = (meta or {}).get("title", nid)
             date = (meta or {}).get("date", "")
             snippet = " ".join(doc.split())[:400]
             out.append(f"[{nid}] {title} ({date}) — {self._category_label(nid)}\n{snippet}")
+            if len(out) >= n:
+                break
+        if not out:
+            if slug:
+                disp = cfg.NOTE_CATEGORIES[slug]["display"]
+                return f"No matching notes found in {disp}."
+            return "No matching notes found."
         return "\n\n".join(out)
 
-    def list_recent_notes(self, n: int = 5) -> str:
+    def list_recent_notes(self, n: int = 5, folder: str = None) -> str:
         if not self.index:
             return "No notes have been saved yet."
-        recent = sorted(self.index.items(), key=lambda kv: kv[0], reverse=True)[:n]
+        slug, err = self._resolve_scope(folder)
+        if err:
+            return err
+        items = self.index.items()
+        if slug:
+            items = [(nid, info) for nid, info in items
+                     if self._note_category(nid) == slug]
+            if not items:
+                disp = cfg.NOTE_CATEGORIES[slug]["display"]
+                return f"There are no notes in {disp} yet."
+        recent = sorted(items, key=lambda kv: kv[0], reverse=True)[:n]
         return "\n".join(
             f"[{nid}] {info['title']} ({info['date']}) — {self._category_label(nid)}"
             for nid, info in recent
@@ -264,24 +304,40 @@ class NoteStore:
                 except OSError as e:
                     log.warning("move %s: %s", p, e)
 
+    def _rewrite_category(self, note_id: str, slug: str):
+        """Rewrite the summary file's frontmatter so its `category:` line matches
+        the folder it now lives in — the file itself must never disagree with the
+        index, or anything reading the note directly sees a stale category."""
+        path = cfg.category_dir(slug) / f"{note_id}.md"
+        if not path.exists():
+            return
+        try:
+            text = path.read_text(encoding="utf-8")
+            new, n = re.subn(r"(?m)^category:\s*.*$", f"category: {slug}", text, count=1)
+            if n:
+                path.write_text(new, encoding="utf-8")
+        except OSError as e:
+            log.warning("frontmatter update for %s: %s", note_id, e)
+
     def _reassign(self, note_id: str, to_slug: str):
-        """Move one note (files + index + Chroma metadata) into another category."""
+        """Move one note into another category, keeping every copy of its category
+        consistent: files on disk, frontmatter, index, and Chroma metadata."""
         info = self.index[note_id]
         self._move_note_files(note_id, info.get("category", cfg.DEFAULT_CATEGORY), to_slug)
         info["category"] = to_slug
-        # Chroma's category metadata isn't used for retrieval, only kept in sync.
-        # Skip the (heavy) first-use model load just for this cosmetic field —
-        # update only when Chroma is already loaded this session.
-        if self._col is not None:
-            try:
-                self._col.update(
-                    ids=[note_id],
-                    metadatas=[{"title": info.get("title", ""),
-                                "date": info.get("date", ""),
-                                "category": to_slug}],
-                )
-            except Exception as e:  # never let a metadata hiccup fail the move
-                log.warning("chroma metadata update for %s: %s", note_id, e)
+        self._rewrite_category(note_id, to_slug)
+        # Always sync Chroma too (loading it if needed): folder-scoped queries and
+        # search results read this metadata, so it must not lag behind the index.
+        self._ensure_chroma()
+        try:
+            self._col.update(
+                ids=[note_id],
+                metadatas=[{"title": info.get("title", ""),
+                            "date": info.get("date", ""),
+                            "category": to_slug}],
+            )
+        except Exception as e:  # never let a metadata hiccup fail the move
+            log.warning("chroma metadata update for %s: %s", note_id, e)
 
     def move_note(self, note_id: str, to_folder: str) -> str:
         """Move a single saved note into another folder. `note_id` is the id shown
@@ -301,6 +357,78 @@ class NoteStore:
         self._save_index()
         log.info("moved note %s -> %s", note_id, to_slug)
         return f"Moved '{title}' to {cfg.NOTE_CATEGORIES[to_slug]['display']}."
+
+    def resync(self) -> str:
+        """One-pass consistency repair: make every note's index entry, on-disk
+        location, frontmatter, and Chroma metadata agree. The index is
+        authoritative when its slug exists; when it doesn't (e.g. a slug that was
+        renamed in config), the note adopts the folder its file actually lives in.
+        Safe to run repeatedly."""
+        self._ensure_chroma()
+        index_fixed = moved = fm_fixed = chroma_fixed = 0
+        problems = []
+
+        for nid, info in self.index.items():
+            slug = info.get("category")
+            disk_slug = next(
+                (s for s, m in cfg.NOTE_CATEGORIES.items()
+                 if (cfg.DATA_DIR / m["folder"] / f"{nid}.md").exists()),
+                None,
+            )
+            if slug not in cfg.NOTE_CATEGORIES:
+                if disk_slug is None:
+                    problems.append(f"{nid}: unknown category '{slug}' and no file found")
+                    continue
+                log.info("resync %s: dead slug '%s' -> '%s' (from disk)", nid, slug, disk_slug)
+                info["category"] = slug = disk_slug
+                index_fixed += 1
+            elif disk_slug is None:
+                problems.append(f"{nid}: summary file missing from every folder")
+                continue
+            elif disk_slug != slug:
+                log.info("resync %s: file in '%s' but index says '%s' — moving file",
+                         nid, disk_slug, slug)
+                self._move_note_files(nid, disk_slug, slug)
+                moved += 1
+
+            # Frontmatter: rewrite only when it actually disagrees.
+            path = cfg.category_dir(slug) / f"{nid}.md"
+            try:
+                text = path.read_text(encoding="utf-8")
+                m = re.search(r"(?m)^category:\s*(.+)$", text)
+                if m and m.group(1).strip() != slug:
+                    log.info("resync %s: frontmatter '%s' -> '%s'",
+                             nid, m.group(1).strip(), slug)
+                    self._rewrite_category(nid, slug)
+                    fm_fixed += 1
+            except OSError as e:
+                problems.append(f"{nid}: could not read summary: {e}")
+
+            # Chroma metadata.
+            try:
+                got = self._col.get(ids=[nid])
+                if not got["ids"]:
+                    problems.append(f"{nid}: not embedded in Chroma")
+                elif (got["metadatas"][0] or {}).get("category") != slug:
+                    log.info("resync %s: chroma '%s' -> '%s'", nid,
+                             (got["metadatas"][0] or {}).get("category"), slug)
+                    self._col.update(
+                        ids=[nid],
+                        metadatas=[{"title": info.get("title", ""),
+                                    "date": info.get("date", ""),
+                                    "category": slug}],
+                    )
+                    chroma_fixed += 1
+            except Exception as e:
+                problems.append(f"{nid}: chroma update failed: {e}")
+
+        self._save_index()
+        report = (f"Resync done: {index_fixed} index slug(s) fixed, {moved} file(s) "
+                  f"moved, {fm_fixed} frontmatter(s) rewritten, {chroma_fixed} "
+                  f"chroma record(s) updated.")
+        if problems:
+            report += "\nUnresolved:\n" + "\n".join(f"  - {p}" for p in problems)
+        return report
 
     def delete_folder(self, name: str, move_notes_to: str = None) -> str:
         """Delete a folder. Any notes in it are relocated first (never destroyed) —
