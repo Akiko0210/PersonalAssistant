@@ -15,6 +15,7 @@ from datetime import datetime
 import chromadb
 from chromadb.utils import embedding_functions
 
+import categories
 import config as cfg
 
 log = logging.getLogger("notes")
@@ -36,7 +37,7 @@ class NoteStore:
         legacy = [nid for nid, info in self.index.items() if "category" not in info]
         if not legacy:
             return
-        dest = cfg.category_dir(cfg.DEFAULT_CATEGORY)
+        dest = categories.category_dir(categories.DEFAULT_CATEGORY)
         dest.mkdir(parents=True, exist_ok=True)
         for nid in legacy:
             old_summary = cfg.SUMMARY_DIR / f"{nid}.md"
@@ -51,9 +52,9 @@ class NoteStore:
                     old_tx.replace(dest / f"{nid}.transcript.md")
                 except OSError as e:
                     log.warning("migrate: transcript %s: %s", nid, e)
-            self.index[nid]["category"] = cfg.DEFAULT_CATEGORY
+            self.index[nid]["category"] = categories.DEFAULT_CATEGORY
         self._save_index()
-        log.info("migrated %d legacy note(s) into %s", len(legacy), cfg.DEFAULT_CATEGORY)
+        log.info("migrated %d legacy note(s) into %s", len(legacy), categories.DEFAULT_CATEGORY)
         for d in (cfg.SUMMARY_DIR, cfg.TRANSCRIPT_DIR):  # drop now-empty legacy dirs
             try:
                 if d.exists() and not any(d.iterdir()):
@@ -106,7 +107,7 @@ class NoteStore:
         cat = (self.index.get(note_id) or {}).get("category")
         candidates = []
         if cat:
-            candidates.append(cfg.category_dir(cat) / f"{note_id}.transcript.md")
+            candidates.append(categories.category_dir(cat) / f"{note_id}.transcript.md")
         candidates.append(cfg.PENDING_DIR / f"{note_id}.md")
         path = next((p for p in candidates if p.exists()), None)
         if path is None:
@@ -124,9 +125,9 @@ class NoteStore:
 
     # --- summaries -----------------------------------------------------------
     def save_summary(self, note_id: str, title: str, full_markdown: str, category: str = None):
-        category = category if category in cfg.NOTE_CATEGORIES else cfg.DEFAULT_CATEGORY
+        category = category if category in categories.NOTE_CATEGORIES else categories.DEFAULT_CATEGORY
         date = datetime.now().isoformat(timespec="seconds")
-        cdir = cfg.category_dir(category)
+        cdir = categories.category_dir(category)
         cdir.mkdir(parents=True, exist_ok=True)
         path = cdir / f"{note_id}.md"
         frontmatter = (
@@ -165,12 +166,12 @@ class NoteStore:
             return None, None
         slug = self._match_category(folder)
         if slug is None:
-            known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+            known = ", ".join(m["display"] for m in categories.NOTE_CATEGORIES.values())
             return None, f"I don't have a folder matching '{folder}'. Folders are: {known}."
         return slug, None
 
     def _note_category(self, note_id: str) -> str:
-        return (self.index.get(note_id) or {}).get("category") or cfg.DEFAULT_CATEGORY
+        return (self.index.get(note_id) or {}).get("category") or categories.DEFAULT_CATEGORY
 
     def search_notes(self, query: str, n: int = None, folder: str = None) -> str:
         n = n or cfg.SEARCH_RESULTS
@@ -200,7 +201,7 @@ class NoteStore:
                 break
         if not out:
             if slug:
-                disp = cfg.NOTE_CATEGORIES[slug]["display"]
+                disp = categories.NOTE_CATEGORIES[slug]["display"]
                 return f"No matching notes found in {disp}."
             return "No matching notes found."
         return "\n\n".join(out)
@@ -216,7 +217,7 @@ class NoteStore:
             items = [(nid, info) for nid, info in items
                      if self._note_category(nid) == slug]
             if not items:
-                disp = cfg.NOTE_CATEGORIES[slug]["display"]
+                disp = categories.NOTE_CATEGORIES[slug]["display"]
                 return f"There are no notes in {disp} yet."
         recent = sorted(items, key=lambda kv: kv[0], reverse=True)[:n]
         return "\n".join(
@@ -225,16 +226,16 @@ class NoteStore:
         )
 
     def read_note(self, note_id: str) -> str:
-        cat = (self.index.get(note_id) or {}).get("category", cfg.DEFAULT_CATEGORY)
-        path = cfg.category_dir(cat) / f"{note_id}.md"
+        cat = (self.index.get(note_id) or {}).get("category", categories.DEFAULT_CATEGORY)
+        path = categories.category_dir(cat) / f"{note_id}.md"
         if path.exists():
             return path.read_text(encoding="utf-8")
         transcript = self.read_transcript(note_id)
         return transcript or f"No note found with id {note_id}."
 
     def _category_label(self, note_id: str) -> str:
-        cat = (self.index.get(note_id) or {}).get("category", cfg.DEFAULT_CATEGORY)
-        return cfg.NOTE_CATEGORIES.get(cat, {}).get("display", cat)
+        cat = (self.index.get(note_id) or {}).get("category", categories.DEFAULT_CATEGORY)
+        return categories.NOTE_CATEGORIES.get(cat, {}).get("display", cat)
 
     @staticmethod
     def _match_category(name: str):
@@ -243,10 +244,10 @@ class NoteStore:
         name = (name or "").strip().lower()
         if not name:
             return None
-        for slug, meta in cfg.NOTE_CATEGORIES.items():
+        for slug, meta in categories.NOTE_CATEGORIES.items():
             if name in (slug.lower(), meta["display"].lower(), meta["folder"].lower()):
                 return slug
-        for slug, meta in cfg.NOTE_CATEGORIES.items():
+        for slug, meta in categories.NOTE_CATEGORIES.items():
             label = meta["display"].lower()
             if name in slug.lower() or name in label or label in name:
                 return slug
@@ -255,7 +256,7 @@ class NoteStore:
     def list_folders(self) -> str:
         lines = [
             f"{meta['display']}: {meta['description']}"
-            for meta in cfg.NOTE_CATEGORIES.values()
+            for meta in categories.NOTE_CATEGORIES.values()
         ]
         return "You can file notes into these folders. " + " ".join(lines)
 
@@ -267,34 +268,34 @@ class NoteStore:
             return "What would you like to call the new folder?"
         existing = self._match_category(name)
         if existing is not None:
-            return f"You already have a folder called {cfg.NOTE_CATEGORIES[existing]['display']}."
-        slug = cfg.add_category(name, description)
-        log.info("created folder %s (%s)", slug, cfg.NOTE_CATEGORIES[slug]["display"])
-        return f"Created a new folder called {cfg.NOTE_CATEGORIES[slug]['display']}."
+            return f"You already have a folder called {categories.NOTE_CATEGORIES[existing]['display']}."
+        slug = categories.add_category(name, description)
+        log.info("created folder %s (%s)", slug, categories.NOTE_CATEGORIES[slug]["display"])
+        return f"Created a new folder called {categories.NOTE_CATEGORIES[slug]['display']}."
 
     def rename_folder(self, current: str, new_name: str) -> str:
         """Rename an existing folder. Existing notes stay filed under it (the slug
         is preserved); only the display name and its on-disk directory change."""
         slug = self._match_category(current)
         if slug is None:
-            known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+            known = ", ".join(m["display"] for m in categories.NOTE_CATEGORIES.values())
             return f"I couldn't find a folder called '{current}'. Your folders are: {known}."
         new_name = (new_name or "").strip()
         if not new_name:
             return "What should I rename it to?"
         clash = self._match_category(new_name)
         if clash is not None and clash != slug:
-            return f"There's already a folder called {cfg.NOTE_CATEGORIES[clash]['display']}."
-        old_display = cfg.NOTE_CATEGORIES[slug]["display"]
-        cfg.rename_category(slug, new_name)
-        new_display = cfg.NOTE_CATEGORIES[slug]["display"]
+            return f"There's already a folder called {categories.NOTE_CATEGORIES[clash]['display']}."
+        old_display = categories.NOTE_CATEGORIES[slug]["display"]
+        categories.rename_category(slug, new_name)
+        new_display = categories.NOTE_CATEGORIES[slug]["display"]
         log.info("renamed folder %s: %s -> %s", slug, old_display, new_display)
         return f"Renamed {old_display} to {new_display}."
 
     # --- moving notes / deleting folders -------------------------------------
     def _move_note_files(self, note_id: str, from_slug: str, to_slug: str):
         """Relocate a note's summary and transcript files between category dirs."""
-        src, dst = cfg.category_dir(from_slug), cfg.category_dir(to_slug)
+        src, dst = categories.category_dir(from_slug), categories.category_dir(to_slug)
         dst.mkdir(parents=True, exist_ok=True)
         for suffix in (".md", ".transcript.md"):
             p = src / f"{note_id}{suffix}"
@@ -308,7 +309,7 @@ class NoteStore:
         """Rewrite the summary file's frontmatter so its `category:` line matches
         the folder it now lives in — the file itself must never disagree with the
         index, or anything reading the note directly sees a stale category."""
-        path = cfg.category_dir(slug) / f"{note_id}.md"
+        path = categories.category_dir(slug) / f"{note_id}.md"
         if not path.exists():
             return
         try:
@@ -323,7 +324,7 @@ class NoteStore:
         """Move one note into another category, keeping every copy of its category
         consistent: files on disk, frontmatter, index, and Chroma metadata."""
         info = self.index[note_id]
-        self._move_note_files(note_id, info.get("category", cfg.DEFAULT_CATEGORY), to_slug)
+        self._move_note_files(note_id, info.get("category", categories.DEFAULT_CATEGORY), to_slug)
         info["category"] = to_slug
         self._rewrite_category(note_id, to_slug)
         # Always sync Chroma too (loading it if needed): folder-scoped queries and
@@ -348,15 +349,15 @@ class NoteStore:
             return f"I couldn't find a note with id {note_id}."
         to_slug = self._match_category(to_folder)
         if to_slug is None:
-            known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+            known = ", ".join(m["display"] for m in categories.NOTE_CATEGORIES.values())
             return f"I don't have a folder called '{to_folder}'. Your folders are: {known}."
-        if info.get("category", cfg.DEFAULT_CATEGORY) == to_slug:
-            return f"That note is already in {cfg.NOTE_CATEGORIES[to_slug]['display']}."
+        if info.get("category", categories.DEFAULT_CATEGORY) == to_slug:
+            return f"That note is already in {categories.NOTE_CATEGORIES[to_slug]['display']}."
         title = info.get("title", note_id)
         self._reassign(note_id, to_slug)
         self._save_index()
         log.info("moved note %s -> %s", note_id, to_slug)
-        return f"Moved '{title}' to {cfg.NOTE_CATEGORIES[to_slug]['display']}."
+        return f"Moved '{title}' to {categories.NOTE_CATEGORIES[to_slug]['display']}."
 
     def resync(self) -> str:
         """One-pass consistency repair: make every note's index entry, on-disk
@@ -371,11 +372,11 @@ class NoteStore:
         for nid, info in self.index.items():
             slug = info.get("category")
             disk_slug = next(
-                (s for s, m in cfg.NOTE_CATEGORIES.items()
+                (s for s, m in categories.NOTE_CATEGORIES.items()
                  if (cfg.DATA_DIR / m["folder"] / f"{nid}.md").exists()),
                 None,
             )
-            if slug not in cfg.NOTE_CATEGORIES:
+            if slug not in categories.NOTE_CATEGORIES:
                 if disk_slug is None:
                     problems.append(f"{nid}: unknown category '{slug}' and no file found")
                     continue
@@ -392,7 +393,7 @@ class NoteStore:
                 moved += 1
 
             # Frontmatter: rewrite only when it actually disagrees.
-            path = cfg.category_dir(slug) / f"{nid}.md"
+            path = categories.category_dir(slug) / f"{nid}.md"
             try:
                 text = path.read_text(encoding="utf-8")
                 m = re.search(r"(?m)^category:\s*(.+)$", text)
@@ -436,42 +437,42 @@ class NoteStore:
         default folder itself can't be deleted."""
         slug = self._match_category(name)
         if slug is None:
-            known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+            known = ", ".join(m["display"] for m in categories.NOTE_CATEGORIES.values())
             return f"I couldn't find a folder called '{name}'. Your folders are: {known}."
-        if slug == cfg.DEFAULT_CATEGORY:
-            disp = cfg.NOTE_CATEGORIES[slug]["display"]
+        if slug == categories.DEFAULT_CATEGORY:
+            disp = categories.NOTE_CATEGORIES[slug]["display"]
             return f"I can't delete the {disp} folder — it's the default that catches everything else."
         if move_notes_to:
             dest = self._match_category(move_notes_to)
             if dest is None:
-                known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+                known = ", ".join(m["display"] for m in categories.NOTE_CATEGORIES.values())
                 return (f"I don't have a folder called '{move_notes_to}' to move the notes into. "
                         f"Your folders are: {known}.")
             if dest == slug:
                 return "That's the folder you're deleting — tell me a different one for the notes."
         else:
-            dest = cfg.DEFAULT_CATEGORY
+            dest = categories.DEFAULT_CATEGORY
 
         note_ids = [nid for nid, info in self.index.items()
-                    if info.get("category", cfg.DEFAULT_CATEGORY) == slug]
+                    if info.get("category", categories.DEFAULT_CATEGORY) == slug]
         for nid in note_ids:
             self._reassign(nid, dest)
         if note_ids:
             self._save_index()
 
-        disp = cfg.NOTE_CATEGORIES[slug]["display"]
-        cfg.delete_category(slug)
+        disp = categories.NOTE_CATEGORIES[slug]["display"]
+        categories.delete_category(slug)
         log.info("deleted folder %s (moved %d note(s) to %s)", slug, len(note_ids), dest)
         if note_ids:
             n = len(note_ids)
-            dest_disp = cfg.NOTE_CATEGORIES[dest]["display"]
+            dest_disp = categories.NOTE_CATEGORIES[dest]["display"]
             return (f"Deleted the {disp} folder and moved its {n} "
                     f"note{'' if n == 1 else 's'} to {dest_disp}.")
         return f"Deleted the {disp} folder."
 
     def count_notes(self, folder: str = None) -> str:
         counts = collections.Counter(
-            (info.get("category") or cfg.DEFAULT_CATEGORY) for info in self.index.values()
+            (info.get("category") or categories.DEFAULT_CATEGORY) for info in self.index.values()
         )
         if not folder:
             total = sum(counts.values())
@@ -479,13 +480,13 @@ class NoteStore:
                 return "You have no notes yet."
             parts = [
                 f"{counts.get(slug, 0)} in {meta['display']}"
-                for slug, meta in cfg.NOTE_CATEGORIES.items()
+                for slug, meta in categories.NOTE_CATEGORIES.items()
             ]
             return f"You have {total} notes total: " + ", ".join(parts) + "."
         slug = self._match_category(folder)
         if slug is None:
-            known = ", ".join(m["display"] for m in cfg.NOTE_CATEGORIES.values())
+            known = ", ".join(m["display"] for m in categories.NOTE_CATEGORIES.values())
             return f"I don't have a folder matching '{folder}'. Folders are: {known}."
         n = counts.get(slug, 0)
-        display = cfg.NOTE_CATEGORIES[slug]["display"]
+        display = categories.NOTE_CATEGORIES[slug]["display"]
         return f"You have {n} note{'' if n == 1 else 's'} in {display}."

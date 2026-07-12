@@ -5,6 +5,7 @@ from datetime import datetime
 
 import anthropic
 
+import categories
 import config as cfg
 import history as hist
 from discord_data import DiscordData
@@ -512,7 +513,7 @@ class Claude:
     def _category_guidance() -> str:
         return "\n".join(
             f"- {slug}: {meta['description']}"
-            for slug, meta in cfg.NOTE_CATEGORIES.items()
+            for slug, meta in categories.NOTE_CATEGORIES.items()
         )
 
     def summarize(self, transcript: str):
@@ -534,7 +535,7 @@ class Claude:
     def _parse_summary(text: str):
         title = "Untitled note"
         spoken = ""
-        category = cfg.DEFAULT_CATEGORY
+        category = categories.DEFAULT_CATEGORY
         full = text
         if "---" in text:
             head, full = text.split("---", 1)
@@ -548,7 +549,7 @@ class Claude:
                 spoken = line.split(":", 1)[1].strip()
             elif line.upper().startswith("CATEGORY:"):
                 slug = line.split(":", 1)[1].strip().lower()
-                if slug in cfg.NOTE_CATEGORIES:
+                if slug in categories.NOTE_CATEGORIES:
                     category = slug
         if not spoken:
             spoken = "I've saved your note."
@@ -564,7 +565,7 @@ class Claude:
         user's transcribed reply ("" if silent). Returns the chosen category slug."""
         folders = "\n".join(
             f"- {slug} ({m['display']}): {m['description']}"
-            for slug, m in cfg.NOTE_CATEGORIES.items()
+            for slug, m in categories.NOTE_CATEGORIES.items()
         )
         system = (
             "You are helping the user decide which folder to file a note they just "
@@ -581,7 +582,7 @@ class Claude:
             "call).\n\n"
             f"Note title: {title}\n"
             f"Note summary: {summary}\n"
-            f"Suggested folder: {suggested} ({cfg.NOTE_CATEGORIES[suggested]['display']}).\n\n"
+            f"Suggested folder: {suggested} ({categories.NOTE_CATEGORIES[suggested]['display']}).\n\n"
             f"Available folders:\n{folders}"
         )
         choose_tool = {
@@ -634,7 +635,7 @@ class Claude:
                             results.append({"type": "tool_result", "tool_use_id": block.id,
                                             "content": self._dispatch(block.name, block.input)})
                     if chosen is not None:
-                        if chosen in cfg.NOTE_CATEGORIES:
+                        if chosen in categories.NOTE_CATEGORIES:
                             return chosen
                         return self.store._match_category(chosen) or suggested
                     history.append({"role": "user", "content": results})

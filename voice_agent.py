@@ -20,6 +20,7 @@ try:
 except ImportError:
     pass  # python-dotenv not installed yet; env vars still work
 
+import categories
 import config as cfg
 from audio import AudioEngine
 from barge_in import BargeInDetector
@@ -456,7 +457,7 @@ class Agent:
         title = pending["title"]
         content = pending["content"]
         spoken = pending.get("spoken") or f"I've saved a note called {title}."
-        suggested = self.store._match_category(pending.get("category")) or cfg.DEFAULT_CATEGORY
+        suggested = self.store._match_category(pending.get("category")) or categories.DEFAULT_CATEGORY
 
         note_id = self.store.new_session()
         # The "transcript" of a conversation note is the note body itself, so the
@@ -478,7 +479,7 @@ class Agent:
         # is fully interruptible, so this stays a short blocking line rather than
         # barge-in (whose retained audio the recap's flush would discard anyway).
         final = self.llm.choose_folder_via_dialogue(title, summary, suggested, self._ask)
-        self.say(f"Putting it into {cfg.NOTE_CATEGORIES[final]['display']}.",
+        self.say(f"Putting it into {categories.NOTE_CATEGORIES[final]['display']}.",
                  voice=False, commands=False)
         return final
 
