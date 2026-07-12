@@ -1,0 +1,70 @@
+"""Tool registry: one place where a tool's schema and handler live together.
+
+Adding a capability used to mean editing three places (the TOOLS list, the
+_dispatch if-chain, and remembering the wiring); now it's one decorated
+function in a module under tools/:
+
+    @tool({"name": "...", "description": "...", "input_schema": {...}})
+    def my_tool(ctx, args):
+        return "spoken-friendly result string"
+
+Handlers receive the shared ToolContext (the app's stores) and the raw args
+dict from the model, and return a string for the tool_result. Schemas are
+kept as explicit dicts — they are prompt engineering, not boilerplate, so
+they stay reviewable next to their handler.
+"""
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ToolContext:
+    """Everything a tool handler may need. Owned by the Claude wrapper; one
+    instance lives for the whole session."""
+    store: object = None      # NoteStore
+    discord: object = None    # DiscordData
+    kb: object = None         # KnowledgeStore
+    memory: object = None     # ConversationMemory
+    # Set by save_conversation_note; the agent picks it up after the reply and
+    # runs the folder dialogue + save (see voice_agent._save_pending_note).
+    pending_note: dict = field(default=None)
+
+
+_REGISTRY = {}  # name -> (schema, handler); insertion-ordered
+
+
+def tool(schema):
+    """Register a tool. `schema` is the full Anthropic tool dict (name,
+    description, input_schema); the decorated function is its handler."""
+    def deco(fn):
+        _REGISTRY[schema["name"]] = (schema, fn)
+        return fn
+    return deco
+
+
+def api_tools(exclude=()):
+    """The `tools=` list for a messages.create call, optionally excluding
+    tools that don't fit the current dialogue."""
+    return [schema for name, (schema, _) in _REGISTRY.items() if name not in exclude]
+
+
+def dispatch(ctx, name, args):
+    """Run one tool call. Errors come back as strings so the model can react
+    (and the conversation loop never dies on a tool bug)."""
+    entry = _REGISTRY.get(name)
+    if entry is None:
+        return f"Unknown tool: {name}"
+    _, handler = entry
+    try:
+        return handler(ctx, args or {})
+    except Exception as e:  # surface tool errors back to the model
+        return f"Tool error: {e}"
+
+
+# Importing the tool modules populates the registry. Order sets the order the
+# schemas are presented to the model.
+from tools import note_tools      # noqa: E402,F401
+from tools import discord_tools   # noqa: E402,F401
+from tools import time_tools      # noqa: E402,F401
+from tools import memory_tools    # noqa: E402,F401
+from tools import knowledge_tools # noqa: E402,F401

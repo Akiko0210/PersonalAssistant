@@ -1,7 +1,6 @@
 """Claude integration: conversation (with note-access tools) and summarisation."""
 
 import logging
-from datetime import datetime
 
 import anthropic
 
@@ -11,282 +10,10 @@ import history as hist
 from discord_data import DiscordData
 from knowledge import KnowledgeStore
 from memory import ConversationMemory
+from tools import ToolContext, api_tools, dispatch
 
 log = logging.getLogger("llm")
 
-TOOLS = [
-    {
-        "name": "search_notes",
-        "description": (
-            "Semantic search across saved notes. Use for questions like 'what did "
-            "I say about X' or to find notes on a topic. Pass folder to limit the "
-            "search to one folder (e.g. 'what did I note about spreads in my "
-            "Trading folder'); omit it to search everywhere."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "What to search for"},
-                "folder": {
-                    "type": "string",
-                    "description": "Optional: only search this folder, e.g. 'Trading'.",
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "list_recent_notes",
-        "description": (
-            "List the most recent notes, newest first. Use for 'what's my latest "
-            "note' or 'what have I recorded recently'. Pass folder to scope it "
-            "(e.g. 'what's the latest note in my General folder'); omit it for "
-            "all folders."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "n": {"type": "integer", "description": "How many to list (default 5)"},
-                "folder": {
-                    "type": "string",
-                    "description": "Optional: only list notes from this folder, e.g. 'General'.",
-                },
-            },
-        },
-    },
-    {
-        "name": "read_note",
-        "description": "Read the full saved summary for a note id (e.g. note_2026-06-22_141500).",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "note_id": {"type": "string", "description": "The note id to read"}
-            },
-            "required": ["note_id"],
-        },
-    },
-    {
-        "name": "get_recent_discord_messages",
-        "description": (
-            "List recent Discord notifications the user has captured (newest at the "
-            "end). Use for 'what came in today', 'latest Discord messages', or any "
-            "time-based question. trades.txt has no timestamps, so use this with a "
-            "date to answer 'what trades came in today'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "n": {"type": "integer", "description": "How many to list (default 10)"},
-                "date": {
-                    "type": "string",
-                    "description": "Optional day filter: 'today', 'yesterday', or YYYY-MM-DD",
-                },
-            },
-        },
-    },
-    {
-        "name": "search_discord_messages",
-        "description": (
-            "Search captured Discord notifications by keyword/topic and/or sender. "
-            "Use for 'what was said about SPX', 'any iron condors', or "
-            "'what did Dan Sheridan say'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Keyword or topic to search for"},
-                "sender": {
-                    "type": "string",
-                    "description": "Optional: only messages from this sender (substring match)",
-                },
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "get_recent_trades",
-        "description": (
-            "List the most recent trade-ready lines captured from Discord trade "
-            "alerts. Use for 'what are the latest trades' or 'recent Discord trades'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "n": {"type": "integer", "description": "How many to list (default 10)"}
-            },
-        },
-    },
-    {
-        "name": "get_current_time",
-        "description": (
-            "Get the current date, time, and day of the week. Use whenever the user "
-            "asks what time or day it is, or when you need today's date to reason "
-            "about recency (e.g. 'today', 'this week', 'how long ago')."
-        ),
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "list_folders",
-        "description": (
-            "List the note folders/categories available to file notes into, with a "
-            "short description of what belongs in each. Use for 'what folders do I "
-            "have', 'where can I put my notes', or 'what categories are there'."
-        ),
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "search_past_conversations",
-        "description": (
-            "Search archived summaries of older conversations — ones that have "
-            "aged out of the current chat window. Use for 'what did we talk about "
-            "last week/month', 'didn't we discuss X before', or any question about "
-            "a past conversation you don't see in the current history."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Topic to look for in past conversations"}
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "search_knowledge",
-        "description": (
-            "Search the user's ingested trading reference material (PDFs and text "
-            "files) for relevant passages. Use for questions about trading concepts, "
-            "strategies, definitions, or 'what does my trading book say about X'. "
-            "Returns excerpts with their source (and page, for PDFs) so you can cite them."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "What to look up in the trading material"}
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "create_folder",
-        "description": (
-            "Create a new note folder/category. Use when the user asks to make, "
-            "add, or create a folder (e.g. 'create a folder called Recipes'). Pass "
-            "the spoken name; optionally a short description of what belongs in it."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Name for the new folder, e.g. 'Recipes'"},
-                "description": {
-                    "type": "string",
-                    "description": "Optional: what kind of notes belong in this folder.",
-                },
-            },
-            "required": ["name"],
-        },
-    },
-    {
-        "name": "rename_folder",
-        "description": (
-            "Rename an existing note folder/category. Use when the user asks to "
-            "rename or change a folder's name (e.g. 'rename Ideas to Brainstorms'). "
-            "Notes already filed there are kept. Pass the current name and the new name."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "current": {"type": "string", "description": "The current folder name, e.g. 'Ideas'"},
-                "new_name": {"type": "string", "description": "The new name, e.g. 'Brainstorms'"},
-            },
-            "required": ["current", "new_name"],
-        },
-    },
-    {
-        "name": "save_conversation_note",
-        "description": (
-            "Save something from this conversation as a note. ONLY call this when "
-            "the user explicitly asks (e.g. 'save that as a note', 'make a note of "
-            "that'); never call it proactively or suggest saving on your own. Write "
-            "the note content yourself from the conversation — clean markdown with a "
-            "Summary section and Key Points. After calling this, reply with one "
-            "short acknowledgement only; the system will ask the user which "
-            "folder to file it in, so never ask about folders yourself."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string", "description": "Short descriptive title, max ~8 words"},
-                "content": {
-                    "type": "string",
-                    "description": "The full note body in markdown, drawn from the conversation.",
-                },
-                "spoken_summary": {
-                    "type": "string",
-                    "description": "1-2 plain sentences recapping the note, to be read aloud after saving.",
-                },
-                "category": {
-                    "type": "string",
-                    "description": "Optional: the folder slug that seems the best fit.",
-                },
-            },
-            "required": ["title", "content"],
-        },
-    },
-    {
-        "name": "delete_folder",
-        "description": (
-            "Delete a note folder/category. Use when the user asks to delete or "
-            "remove a folder. Notes in it are never lost — they're moved to General "
-            "by default, or to 'move_notes_to' if the user names a destination. The "
-            "General folder itself can't be deleted."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "The folder to delete, e.g. 'Recipes'"},
-                "move_notes_to": {
-                    "type": "string",
-                    "description": "Optional folder to move any notes into before deleting (defaults to General).",
-                },
-            },
-            "required": ["name"],
-        },
-    },
-    {
-        "name": "move_note",
-        "description": (
-            "Move a single saved note into a different folder. First find the note's "
-            "id with search_notes or list_recent_notes (they show it in [brackets]), "
-            "then call this with that id and the destination folder. Use for 'move my "
-            "last note to Ideas' or 'put the grocery note in Recipes'."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "note_id": {"type": "string", "description": "The note id, e.g. note_2026-06-22_141500"},
-                "to_folder": {"type": "string", "description": "Destination folder name, e.g. 'Ideas'"},
-            },
-            "required": ["note_id", "to_folder"],
-        },
-    },
-    {
-        "name": "count_notes",
-        "description": (
-            "Count saved notes, optionally within one category folder. Use for "
-            "'how many notes do I have' or 'how many notes are in my trading folder'. "
-            "Omit folder for a total with a per-category breakdown."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "folder": {
-                    "type": "string",
-                    "description": "Category/folder name, e.g. 'Trading'. Omit to count all.",
-                }
-            },
-        },
-    },
-]
 
 SUMMARY_PROMPT = """You are summarising a spoken notetaking session. The text below is an \
 automatic transcript and may contain disfluencies or recognition errors — clean it up \
@@ -336,70 +63,25 @@ class Claude:
         # Long-term memory must exist before the history loads: anything the
         # rolling window drops is staged into it rather than lost.
         self.memory = ConversationMemory()
+        # Everything tool handlers may touch (see tools/); also carries the
+        # pending conversation note that save_conversation_note prepares.
+        self._ctx = ToolContext(store=self.store, discord=self.discord,
+                                kb=self.kb, memory=self.memory)
         # Conversation memory: restore the last conversation (trimmed) so the agent
         # remembers it across restarts; saved back to disk after every turn.
         self.history = self._load_history()
-        # Set by the save_conversation_note tool; the agent picks it up after the
-        # reply and runs the folder dialogue + save (see voice_agent).
-        self.pending_note = None
         # Looped while we wait on the model, so the user hears the agent thinking.
         self.idle = idle if idle is not None else _NullIdle()
 
-    # --- conversation --------------------------------------------------------
-    def _dispatch(self, name, args):
-        try:
-            if name == "search_notes":
-                return self.store.search_notes(args["query"], folder=args.get("folder"))
-            if name == "list_recent_notes":
-                return self.store.list_recent_notes(
-                    int(args.get("n", 5)), folder=args.get("folder")
-                )
-            if name == "read_note":
-                return self.store.read_note(args["note_id"])
-            if name == "get_recent_discord_messages":
-                return self.discord.recent_messages(
-                    int(args.get("n", 10)), args.get("date")
-                )
-            if name == "search_discord_messages":
-                return self.discord.search_messages(
-                    args["query"], args.get("sender")
-                )
-            if name == "get_recent_trades":
-                return self.discord.recent_trades(int(args.get("n", 10)))
-            if name == "get_current_time":
-                return datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
-            if name == "list_folders":
-                return self.store.list_folders()
-            if name == "search_knowledge":
-                return self.kb.search(args["query"])
-            if name == "search_past_conversations":
-                return self.memory.search(args["query"])
-            if name == "create_folder":
-                return self.store.create_folder(args["name"], args.get("description"))
-            if name == "rename_folder":
-                return self.store.rename_folder(args["current"], args["new_name"])
-            if name == "delete_folder":
-                return self.store.delete_folder(args["name"], args.get("move_notes_to"))
-            if name == "move_note":
-                return self.store.move_note(args["note_id"], args["to_folder"])
-            if name == "count_notes":
-                return self.store.count_notes(args.get("folder"))
-            if name == "save_conversation_note":
-                title = (args.get("title") or "").strip() or "Conversation note"
-                content = (args.get("content") or "").strip()
-                if not content:
-                    return "No content provided — include the note body in 'content'."
-                self.pending_note = {
-                    "title": title,
-                    "content": content,
-                    "spoken": (args.get("spoken_summary") or "").strip(),
-                    "category": args.get("category"),
-                }
-                return ("Note prepared. Acknowledge briefly; the system will now ask "
-                        "the user which folder to file it in.")
-        except Exception as e:  # surface tool errors back to the model
-            return f"Tool error: {e}"
-        return f"Unknown tool: {name}"
+    # Set by the save_conversation_note tool; the agent picks it up after the
+    # reply and runs the folder dialogue + save (see voice_agent).
+    @property
+    def pending_note(self):
+        return self._ctx.pending_note
+
+    @pending_note.setter
+    def pending_note(self, value):
+        self._ctx.pending_note = value
 
     def discard_last_turn(self):
         """Erase the most recent exchange — the last plain-text user message and
@@ -480,7 +162,7 @@ class Claude:
                     model=cfg.CONVO_MODEL,
                     max_tokens=cfg.CONVO_MAX_TOKENS,
                     system=cfg.CONVO_SYSTEM,
-                    tools=TOOLS,
+                    tools=api_tools(),
                     thinking={"type": "disabled"},
                     messages=self.history,
                 )
@@ -494,7 +176,7 @@ class Claude:
                     for block in resp.content:
                         if block.type == "tool_use":
                             log.info("tool_use %s %s", block.name, block.input)
-                            out = self._dispatch(block.name, block.input)
+                            out = dispatch(self._ctx, block.name, block.input)
                             results.append({
                                 "type": "tool_result",
                                 "tool_use_id": block.id,
@@ -604,7 +286,7 @@ class Claude:
         }
         # save_conversation_note is excluded here: we're already filing a note,
         # so triggering another pending note mid-dialogue would be circular.
-        tools = [t for t in TOOLS if t["name"] != "save_conversation_note"] + [choose_tool]
+        tools = api_tools(exclude={"save_conversation_note"}) + [choose_tool]
         history = [{"role": "user",
                     "content": "I just finished recording a note. Where should it go?"}]
         try:
@@ -633,7 +315,7 @@ class Claude:
                         else:
                             log.info("tool_use %s %s", block.name, block.input)
                             results.append({"type": "tool_result", "tool_use_id": block.id,
-                                            "content": self._dispatch(block.name, block.input)})
+                                            "content": dispatch(self._ctx, block.name, block.input)})
                     if chosen is not None:
                         if chosen in categories.NOTE_CATEGORIES:
                             return chosen
