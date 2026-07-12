@@ -145,10 +145,29 @@ BARGE_IN_ENERGY_RATIO = 3.0   # ...and must exceed this multiple of the echo bas
 BARGE_IN_CALIB_MS = 350       # initial window used to measure the echo baseline
 
 # --- Claude ------------------------------------------------------------------
-CONVO_MODEL = "claude-haiku-4-5"   # low latency for back-and-forth
+# Conversation models the user can switch between by voice (see the
+# set_conversation_model tool). Spoken name -> API id; the active choice lives
+# on the running agent (ToolContext.convo_model), so it resets to the default
+# on restart rather than silently leaving you on an expensive model.
+CONVO_MODELS = {
+    "haiku": "claude-haiku-4-5",   # fastest, lowest latency — the default
+    "sonnet": "claude-sonnet-5",   # stronger reasoning, a bit slower
+    "opus": "claude-opus-4-8",     # most capable, slowest and priciest
+}
+CONVO_MODEL_LABELS = {
+    "claude-haiku-4-5": "Haiku 4.5",
+    "claude-sonnet-5": "Sonnet 5",
+    "claude-opus-4-8": "Opus 4.8",
+}
+CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)
 SUMMARY_MODEL = "claude-sonnet-4-6"   # higher quality for note summaries
 CONVO_MAX_TOKENS = 1024
 SUMMARY_MAX_TOKENS = 2000
+
+
+def convo_model_label(model_id: str) -> str:
+    """Friendly spoken name for a conversation model id."""
+    return CONVO_MODEL_LABELS.get(model_id, model_id)
 
 CONVO_SYSTEM = (
     "You are a voice assistant. The user talks to you through a microphone and "

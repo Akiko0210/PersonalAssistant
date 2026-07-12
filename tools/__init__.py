@@ -28,6 +28,9 @@ class ToolContext:
     # Set by save_conversation_note; the agent picks it up after the reply and
     # runs the folder dialogue + save (see voice_agent._save_pending_note).
     pending_note: dict = field(default=None)
+    # Active conversation model id; set by set_conversation_model and read by
+    # Claude.converse each call, so the user can switch models by voice.
+    convo_model: str = None
 
 
 _REGISTRY = {}  # name -> (schema, handler); insertion-ordered
@@ -68,3 +71,4 @@ from tools import discord_tools   # noqa: E402,F401
 from tools import time_tools      # noqa: E402,F401
 from tools import memory_tools    # noqa: E402,F401
 from tools import knowledge_tools # noqa: E402,F401
+from tools import model_tools     # noqa: E402,F401

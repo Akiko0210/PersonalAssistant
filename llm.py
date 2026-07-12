@@ -64,9 +64,11 @@ class Claude:
         # rolling window drops is staged into it rather than lost.
         self.memory = ConversationMemory()
         # Everything tool handlers may touch (see tools/); also carries the
-        # pending conversation note that save_conversation_note prepares.
+        # pending conversation note and the active conversation model (which the
+        # set_conversation_model tool can switch mid-session).
         self._ctx = ToolContext(store=self.store, discord=self.discord,
-                                kb=self.kb, memory=self.memory)
+                                kb=self.kb, memory=self.memory,
+                                convo_model=cfg.CONVO_MODEL)
         # Conversation memory: restore the last conversation (trimmed) so the agent
         # remembers it across restarts; saved back to disk after every turn.
         self.history = self._load_history()
@@ -158,10 +160,19 @@ class Claude:
         self.idle.start()  # thinking — keep it looping across the whole tool loop
         try:
             while True:
+                # Read the model fresh each pass: if set_conversation_model runs
+                # during this turn's tool loop, the follow-up call (and every
+                # later turn) uses the newly chosen model.
+                model = self._ctx.convo_model or cfg.CONVO_MODEL
+                system = cfg.CONVO_SYSTEM + (
+                    f"\n\nYou are currently answering as {cfg.convo_model_label(model)}. "
+                    "If the user asks to change models, or for a smarter or faster "
+                    "one, use the set_conversation_model tool."
+                )
                 resp = self.client.messages.create(
-                    model=cfg.CONVO_MODEL,
+                    model=model,
                     max_tokens=cfg.CONVO_MAX_TOKENS,
-                    system=cfg.CONVO_SYSTEM,
+                    system=system,
                     tools=api_tools(),
                     thinking={"type": "disabled"},
                     messages=self.history,
@@ -284,16 +295,19 @@ class Claude:
                 "required": ["folder"],
             },
         }
-        # save_conversation_note is excluded here: we're already filing a note,
-        # so triggering another pending note mid-dialogue would be circular.
-        tools = api_tools(exclude={"save_conversation_note"}) + [choose_tool]
+        # save_conversation_note is excluded (we're already filing a note, so a
+        # second pending note mid-dialogue would be circular); so is
+        # set_conversation_model — switching models is out of scope for the
+        # focused "where does this go" exchange.
+        tools = api_tools(exclude={"save_conversation_note",
+                                   "set_conversation_model"}) + [choose_tool]
         history = [{"role": "user",
                     "content": "I just finished recording a note. Where should it go?"}]
         try:
             for _ in range(max_turns):
                 self.idle.start()  # thinking; stopped below before we speak/listen
                 resp = self.client.messages.create(
-                    model=cfg.CONVO_MODEL,
+                    model=self._ctx.convo_model or cfg.CONVO_MODEL,
                     max_tokens=cfg.CONVO_MAX_TOKENS,
                     system=system,
                     tools=tools,
