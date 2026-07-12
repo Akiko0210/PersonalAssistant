@@ -23,6 +23,7 @@ except ImportError:
 import config as cfg
 from audio import AudioEngine
 from barge_in import BargeInDetector
+from gestures import ClickGestureDecoder
 from stt import Transcriber
 from tts import Speaker
 from notes import NoteStore
@@ -78,6 +79,11 @@ class Agent:
         # previous one (see MEDIA_CONTROL.md), so the 2nd/3rd clicks of a
         # gesture would be swallowed if speech played on through the window.
         self.hush = threading.Event()
+        # Raw button presses (from either listener channel) are decoded into
+        # single/double/triple gestures here; see gestures.py.
+        self._gesture = ClickGestureDecoder(
+            on_gesture=self._on_media_gesture, on_press=self._on_media_press
+        )
         self.running = True
         self._interrupted_reply = None   # full text of the last interrupted reply
         self._interrupted_remaining = None  # unsaid portion after barge-in
@@ -119,29 +125,14 @@ class Agent:
             self._push("stop_note")
 
 
-    def _media_click(self):
-        import threading
-        import time
-
-        now = time.monotonic()
-
-        # One physical press can surface twice — as a duplicate event, or once
-        # per listening channel (keyboard hook AND SMTC) — so anything inside
-        # the dedupe window counts once. Real double-clicks arrive further
-        # apart than this.
-        last = getattr(self, "_last_media_click", 0)
-        if now - last < cfg.MEDIA_CLICK_DEDUPE_S:
-            return
-
-        self._last_media_click = now
-
-        # Go silent the moment a press lands: stop the thinking cue here, and
-        # flag say() to stop speech on its next poll (~100 ms; hush avoids
-        # touching the SAPI COM object cross-thread). Every gesture's action
-        # implies silence anyway — and it keeps a state-tracking dongle
-        # (Yealink) in sync: the dongle swallows the next press whenever the
-        # host keeps playing through a "pause", which is how the 2nd/3rd
-        # clicks of a gesture were getting eaten. See MEDIA_CONTROL.md.
+    def _on_media_press(self):
+        """Every accepted click: go silent the moment the press lands — stop the
+        thinking cue here, and flag say() to stop speech on its next poll
+        (~100 ms; hush avoids touching the SAPI COM object cross-thread). Every
+        gesture's action implies silence anyway — and it keeps a state-tracking
+        dongle (Yealink) in sync: the dongle swallows the next press whenever
+        the host keeps playing through a "pause", which is how the 2nd/3rd
+        clicks of a gesture were getting eaten. See MEDIA_CONTROL.md."""
         self.idle.stop()
         self.hush.set()
         # Obediently pause the silent keepalive stream too, so the dongle sees
@@ -150,39 +141,13 @@ class Agent:
         if media is not None:
             media.duck()
 
-        if not hasattr(self, "_media_click_lock"):
-            self._media_click_lock = threading.Lock()
-            self._media_click_count = 0
-            self._media_click_timer = None
-
-        with self._media_click_lock:
-            self._media_click_count += 1
-
-            if self._media_click_timer:
-                self._media_click_timer.cancel()
-
-            self._media_click_timer = threading.Timer(
-                0.45,
-                self._finish_media_clicks,
-            )
-            self._media_click_timer.daemon = True
-            self._media_click_timer.start()
-
-
-    def _finish_media_clicks(self):
-        with self._media_click_lock:
-            count = self._media_click_count
-            self._media_click_count = 0
-            self._media_click_timer = None
-
+    def _on_media_gesture(self, count):
         if count == 1:
             self.log.info("media hotkey: single click -> toggle mute")
             self._push("toggle_mute")
-
         elif count == 2:
             self.log.info("media hotkey: double click -> toggle note-taking")
             self._toggle_note()
-
         else:
             self.log.info("media hotkey: triple click -> quit")
             self._push("quit")
@@ -201,7 +166,7 @@ class Agent:
         def on_press(key):
             if key == keyboard.Key.media_play_pause:
                 self.log.info("media key received (speaking=%s)", self.tts.is_busy())
-                self._media_click()
+                self._gesture.click()
 
         self._listener = keyboard.Listener(on_press=on_press)
         self._listener.start()
@@ -212,7 +177,7 @@ class Agent:
             def on_play_pause():
                 self.log.info("media button (SMTC) received (speaking=%s)",
                               self.tts.is_busy())
-                self._media_click()
+                self._gesture.click()
 
             self._media = MediaButtonListener(
                 on_play_pause=on_play_pause,
