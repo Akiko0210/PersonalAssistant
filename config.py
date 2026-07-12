@@ -12,6 +12,9 @@ DATA_DIR = BASE_DIR / "data"
 CHROMA_DIR = DATA_DIR / "chroma"
 LOG_DIR = BASE_DIR / "logs"
 INDEX_PATH = DATA_DIR / "index.json"
+# Detailed project description — the knowledge source the describe_project tool
+# reads so the agent can answer questions about its own design.
+PROJECT_DOC_PATH = BASE_DIR / "PROJECT.md"
 # User-created / renamed folders are persisted here and overlaid on the built-in
 # NOTE_CATEGORIES defaults below at startup (see load_categories).
 CATEGORIES_PATH = DATA_DIR / "categories.json"

@@ -3,7 +3,9 @@
 A local, voice-driven assistant with two modes:
 
 - **Conversation mode** (default) — talk to it like you talk to Claude. Ask about
-  your saved notes ("what's my latest note?", "what did I say about the budget?").
+  your saved notes ("what's my latest note?", "what did I say about the budget?"),
+  switch which Claude model answers ("switch to Opus"), or ask how the agent
+  itself works ("how does barge-in work?").
 - **Notetaking mode** — a silent recorder. It listens without speaking, handles long
   silences efficiently (an hour-long session with only a few minutes of speech does
   almost no transcription work), and on stop it saves a transcript + an AI summary to
@@ -13,6 +15,10 @@ Everything runs locally except Claude (the brains + summaries): transcription
 (faster-whisper), speech (Windows SAPI), and semantic note search (Chroma +
 sentence-transformers) are all on-device. No UI — just your voice and hotkeys —
 but everything is logged to `logs/`.
+
+For a detailed technical walkthrough — module map, data flows, the tool
+registry, and extension points — see **[PROJECT.md](PROJECT.md)**. (You can also
+just ask the agent: "tell me about this project.")
 
 ## Setup
 
@@ -132,8 +138,8 @@ note", "what did I think about X") search across **all** categories by default,
 and can be scoped to one folder by naming it ("what's the latest note in my
 General folder", "search my Trading notes for spreads").
 
-The built-in categories are defined in `config.py` under `NOTE_CATEGORIES` — each
-entry has a folder name and a description of what belongs there. You can also
+The built-in categories are defined in `categories.py` under `NOTE_CATEGORIES` —
+each entry has a folder name and a description of what belongs there. You can also
 manage folders **by voice** in conversation mode:
 
 - **Create** — "create a folder called Recipes".
@@ -170,13 +176,56 @@ cites the source (and page, for PDFs). `run.bat --kb-list` shows what's been
 ingested. The
 content stays local and, like the rest of `data/`, is gitignored.
 
+## Switching the Claude model by voice
+
+Conversation defaults to **Haiku 4.5** for low latency. Ask for a different model
+mid-conversation and it switches from that reply onward:
+
+- "switch to Opus" / "use the smartest model" → **Opus 4.8** (most capable, slowest)
+- "use Sonnet" → **Sonnet 5** (stronger reasoning, a little slower)
+- "go back to the fast one" → **Haiku 4.5**
+
+The choice lasts for the session and resets to the fast default on restart (so you
+never get silently left on an expensive model). Note summaries always use
+`SUMMARY_MODEL` regardless. The models are defined in `config.py` under
+`CONVO_MODELS`.
+
+## Asking the agent about itself
+
+The agent can answer questions about its own design — "how does barge-in work?",
+"where are my notes stored?", "what tools do you have?", "how do I switch models?".
+It reads [PROJECT.md](PROJECT.md) (via the `describe_project` tool) and answers
+from it, so its self-knowledge stays in sync with the documentation.
+
+## Project layout
+
+```
+voice_agent.py   entry point + Agent orchestration (main loop, modes, say/barge-in)
+audio.py stt.py tts.py sound.py     mic/VAD, transcription, speech, thinking cue
+barge_in.py gestures.py media_control.py   interrupt logic, button decode, SMTC
+llm.py history.py memory.py         Claude loop, history repair, long-term memory
+notes.py knowledge.py discord_data.py categories.py   stores + folder registry
+config.py        shared constants (paths, audio params, models, system prompt)
+tools/           tool registry — one file per domain (notes, discord, model, ...)
+tests/           unittest suite over the pure logic (no hardware needed)
+scripts/         manual hardware probes used while developing button handling
+```
+
+Adding a capability is one decorated function under `tools/` — see
+[PROJECT.md](PROJECT.md) §5. Run the tests with:
+
+```sh
+python -m unittest discover tests
+```
+
 ## Tuning
 
 All settings live in `config.py`:
 
 - `WHISPER_MODEL` — `base.en` (faster) ↔ `small.en` (default) ↔ `medium.en` (more accurate).
-- `CONVO_MODEL` / `SUMMARY_MODEL` — Claude models (conversation defaults to Haiku for
-  low latency; summaries use Sonnet for quality).
+- `CONVO_MODELS` / `CONVO_MODEL` / `SUMMARY_MODEL` — Claude models. Conversation
+  defaults to Haiku for low latency and can be switched by voice (see above);
+  summaries use Sonnet for quality.
 - `CONVO_ENDPOINT_MS` / `NOTE_ENDPOINT_MS` — how much trailing silence ends an utterance.
 - `VAD_AGGRESSIVENESS` — 0–3; raise it if background noise is being picked up as speech.
 - `TTS_RATE` / `TTS_VOICE` — speech speed and voice selection.

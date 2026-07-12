@@ -72,3 +72,4 @@ from tools import time_tools      # noqa: E402,F401
 from tools import memory_tools    # noqa: E402,F401
 from tools import knowledge_tools # noqa: E402,F401
 from tools import model_tools     # noqa: E402,F401
+from tools import project_tools   # noqa: E402,F401
