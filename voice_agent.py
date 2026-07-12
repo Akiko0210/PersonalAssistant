@@ -22,6 +22,7 @@ except ImportError:
 
 import config as cfg
 from audio import AudioEngine
+from barge_in import BargeInDetector
 from stt import Transcriber
 from tts import Speaker
 from notes import NoteStore
@@ -398,20 +399,7 @@ class Agent:
         self.hush.clear()  # only clicks during *this* utterance may hush it
         start = time.monotonic()
         self.tts.begin(text)
-
-        voiced_ms = 0.0
-        calib_ms = 0
-        echo_samples = []
-        threshold = float(cfg.BARGE_IN_ENERGY)  # until calibration finishes
-        peak_speech_rms = 0.0  # loudest voiced frame seen — logged for tuning
-
-        # Retain the audio we consume while deciding this is a real barge-in, so
-        # the opening words aren't lost. `recent` keeps a short pre-roll; once a
-        # qualifying voiced run starts, `run` accumulates it (pre-roll included)
-        # and is pushed back to the mic when the interruption fires.
-        pad_frames = max(1, cfg.SPEECH_PAD_MS // cfg.FRAME_MS)
-        recent = collections.deque(maxlen=pad_frames)
-        run = None
+        detector = BargeInDetector()
 
         while self.tts.is_busy():
             # A raw click just landed: stop speaking NOW, before the multi-click
@@ -429,57 +417,15 @@ class Agent:
             res = self.audio.poll_speech(timeout=0.1, return_frame=True)
             if res is None:
                 continue
-            is_speech, rms, frame = res
-            recent.append(frame)
+            if detector.feed(*res):
+                self.tts.stop()
+                self.audio.pushback(detector.run)  # give the words back to capture
+                if save_resume:
+                    self._save_interrupted(text, time.monotonic() - start)
+                self.log.info("(interrupted — listening)")
+                return True
 
-            # Calibrate the echo floor from the first part of playback (the user
-            # almost never barges in this quickly), then lock the threshold.
-            if calib_ms < cfg.BARGE_IN_CALIB_MS:
-                echo_samples.append(rms)
-                calib_ms += cfg.FRAME_MS
-                if calib_ms >= cfg.BARGE_IN_CALIB_MS and echo_samples:
-                    echo_samples.sort()
-                    # A low percentile rather than the median: if the user starts
-                    # talking *during* calibration, their loud frames shouldn't
-                    # inflate the echo baseline. An inflated baseline pushes the
-                    # threshold so high the rest of this utterance can't be
-                    # interrupted — the "sometimes I can't barge in" failure.
-                    baseline = echo_samples[len(echo_samples) // 3]
-                    threshold = max(cfg.BARGE_IN_ENERGY,
-                                    baseline * cfg.BARGE_IN_ENERGY_RATIO)
-                    self.log.info("barge-in armed (echo baseline=%.0f, threshold=%.0f)",
-                                  baseline, threshold)
-                continue  # don't allow interruption during calibration
-
-            if is_speech:
-                peak_speech_rms = max(peak_speech_rms, rms)
-
-            # Only loud, voiced audio counts — this rejects the agent's own echo.
-            # The counter leaks (rather than hard-resetting) on non-qualifying
-            # frames so brief VAD/energy dropouts mid-speech don't wipe progress.
-            if is_speech and rms > threshold:
-                run = list(recent) if run is None else run + [frame]
-                voiced_ms += cfg.FRAME_MS
-                if voiced_ms >= cfg.BARGE_IN_MS:
-                    self.tts.stop()
-                    self.audio.pushback(run)  # give the spoken words back to capture
-                    if save_resume:
-                        self._save_interrupted(text, time.monotonic() - start)
-                    self.log.info("(interrupted — listening)")
-                    return True
-            else:
-                voiced_ms = max(0.0, voiced_ms - cfg.FRAME_MS * cfg.BARGE_IN_DECAY)
-                if run is not None:
-                    run.append(frame)        # keep brief gaps within the run
-                    if voiced_ms <= 0:
-                        run = None            # run fizzled — it was a false start
-
-        # Finished speaking without an interruption. If the user clearly spoke but
-        # we never triggered, the threshold is probably too high — surface the
-        # numbers so BARGE_IN_ENERGY can be tuned.
-        if peak_speech_rms > 0:
-            self.log.info("reply finished; loudest speech rms=%.0f vs threshold=%.0f"
-                          " (no barge-in)", peak_speech_rms, threshold)
+        detector.log_summary()  # finished uninterrupted; surface tuning numbers
         return False
 
     def _save_interrupted(self, full_text: str, elapsed_s: float):
