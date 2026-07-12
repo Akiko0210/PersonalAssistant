@@ -71,6 +71,12 @@ class Agent:
 
         self.cmds: "queue.Queue[str]" = queue.Queue()
         self.interrupt = threading.Event()
+        # Set by a raw button click to silence playback IMMEDIATELY — before the
+        # multi-click window decides which command it was. The Yealink dongle
+        # only transmits a press reliably when the host actually pauses on the
+        # previous one (see MEDIA_CONTROL.md), so the 2nd/3rd clicks of a
+        # gesture would be swallowed if speech played on through the window.
+        self.hush = threading.Event()
         self.running = True
         self._interrupted_reply = None   # full text of the last interrupted reply
         self._interrupted_remaining = None  # unsaid portion after barge-in
@@ -118,12 +124,30 @@ class Agent:
 
         now = time.monotonic()
 
-        # Ignore accidental duplicate events from one physical press
+        # One physical press can surface twice — as a duplicate event, or once
+        # per listening channel (keyboard hook AND SMTC) — so anything inside
+        # the dedupe window counts once. Real double-clicks arrive further
+        # apart than this.
         last = getattr(self, "_last_media_click", 0)
-        if now - last < 0.08:
+        if now - last < cfg.MEDIA_CLICK_DEDUPE_S:
             return
 
         self._last_media_click = now
+
+        # Go silent the moment a press lands: stop the thinking cue here, and
+        # flag say() to stop speech on its next poll (~100 ms; hush avoids
+        # touching the SAPI COM object cross-thread). Every gesture's action
+        # implies silence anyway — and it keeps a state-tracking dongle
+        # (Yealink) in sync: the dongle swallows the next press whenever the
+        # host keeps playing through a "pause", which is how the 2nd/3rd
+        # clicks of a gesture were getting eaten. See MEDIA_CONTROL.md.
+        self.idle.stop()
+        self.hush.set()
+        # Obediently pause the silent keepalive stream too, so the dongle sees
+        # its "pause" honoured no matter what was (or wasn't) playing.
+        media = getattr(self, "_media", None)
+        if media is not None:
+            media.duck()
 
         if not hasattr(self, "_media_click_lock"):
             self._media_click_lock = threading.Lock()
@@ -163,18 +187,50 @@ class Agent:
             self._push("quit")
 
     def start_hotkeys(self):
+        # The button is listened to on BOTH channels at once, because different
+        # headsets deliver presses differently (see MEDIA_CONTROL.md):
+        #   - keyboard hook: wired headsets and USB wireless dongles (media-key
+        #     events);
+        #   - SMTC media session: Bluetooth-native headsets (AVRCP — their
+        #     presses never appear as key events).
+        # A press that arrives on both channels within MEDIA_CLICK_DEDUPE_S is
+        # counted once by _media_click.
         from pynput import keyboard
 
         def on_press(key):
             if key == keyboard.Key.media_play_pause:
-                # Diagnostic: if this line is absent from the log while the agent
-                # is speaking but present when it's idle, the OS/headset is eating
-                # the button during audio playback (it never reaches us).
                 self.log.info("media key received (speaking=%s)", self.tts.is_busy())
                 self._media_click()
 
         self._listener = keyboard.Listener(on_press=on_press)
         self._listener.start()
+
+        try:
+            from media_control import MediaButtonListener
+
+            def on_play_pause():
+                self.log.info("media button (SMTC) received (speaking=%s)",
+                              self.tts.is_busy())
+                self._media_click()
+
+            self._media = MediaButtonListener(
+                on_play_pause=on_play_pause,
+                # Headsets that decode multi-press in firmware (e.g. AirPods)
+                # deliver double/triple as Next/Previous — map them to the same
+                # actions as counted double/triple clicks.
+                on_next=self._toggle_note,
+                on_previous=lambda: self._push("quit"),
+                # Short debounce: real double-clicks arrive ~200 ms apart and
+                # must get through; cross-channel dedupe lives in _media_click.
+                debounce_s=0.08,
+                keepalive=cfg.MEDIA_KEEPALIVE,
+            )
+            self._media.start()
+        except Exception as e:  # noqa: BLE001 - any winrt/SMTC failure
+            self.log.warning(
+                "SMTC media session unavailable (%s); Bluetooth-native headset "
+                "buttons won't be received (keyboard hook still active)", e
+            )
 
     # --- modes ---------------------------------------------------------------
     def run_conversation_turn(self):
@@ -210,7 +266,9 @@ class Agent:
         self._interrupted_reply = None
         self._interrupted_remaining = None
 
-        reply = self.llm.converse(text)
+        reply = self._converse_with_followups(text)
+        if not reply:
+            return  # a hotkey command cut the turn short; main loop handles it
         self.log.info("agent: %s", reply)
         interrupted = self.say(reply, save_resume=True)
 
@@ -224,6 +282,94 @@ class Agent:
 
         if not interrupted:
             self.audio.flush()
+
+    def _converse_with_followups(self, text: str) -> str:
+        """Get Claude's reply while the mic stays live, so a pause mid-sentence
+        never swallows words. The model call runs in a background thread; the
+        main thread keeps watching the mic. If the user resumes talking before
+        the reply is spoken, the continuation is captured and transcribed, the
+        stale reply (to the incomplete sentence) is discarded from history, and
+        the model is asked again with the full utterance."""
+        while True:
+            box = {}
+
+            def work(t=text):
+                try:
+                    box["reply"] = self.llm.converse(t)
+                except Exception as e:  # re-raised on the main thread below
+                    box["error"] = e
+
+            worker = threading.Thread(target=work, daemon=True)
+            worker.start()
+            continued = self._mic_activity_during(worker)
+
+            if not continued:
+                worker.join()
+                if "error" in box:
+                    raise box["error"]
+                return box.get("reply", "")
+
+            # The user kept talking. Their opening frames were pushed back, so
+            # collect the rest of the utterance now — while the stale model call
+            # finishes in the background — then merge and redo the turn.
+            more = self.audio.collect_utterance(
+                interrupt=self.interrupt, endpoint_ms=cfg.CONVO_ENDPOINT_MS
+            )
+            worker.join()
+            if "error" in box:
+                raise box["error"]
+            addition = ""
+            if more is not None and more.size > 0:
+                addition = self.stt.transcribe(more)
+            if not addition:
+                # False trigger (a cough, room noise) — the reply we already
+                # have answers everything the user actually said. Use it.
+                return box.get("reply", "")
+            self.log.info("you (continued): %s", addition)
+            self.llm.discard_last_turn()
+            text = f"{text} {addition}"
+            if self.interrupt.is_set():
+                # A hotkey command arrived mid-continuation; don't start another
+                # model call — the main loop needs to drain and act on it.
+                return ""
+
+    def _mic_activity_during(self, worker) -> bool:
+        """Watch the mic while a background model call runs. Returns True the
+        moment the user audibly starts (or, thanks to buffering, already
+        started) talking — the triggering frames are pushed back so the words
+        are captured from the very beginning. Returns False once the call
+        finishes with the mic quiet, or when a hotkey command arrives. Frames
+        consumed here are silence or sub-threshold noise, so dropping them
+        loses nothing."""
+        pad_frames = max(1, cfg.SPEECH_PAD_MS // cfg.FRAME_MS)
+        ring = collections.deque(maxlen=pad_frames)
+        grace_deadline = None
+        while True:
+            if self.interrupt.is_set():
+                return False
+            res = self.audio.poll_speech(timeout=0.05, return_frame=True)
+            if res is not None:
+                is_speech, rms, frame = res
+                # The energy floor keeps the idle "thinking" cue (on open
+                # speakers) and room noise from counting as the user talking.
+                qualifies = is_speech and rms >= cfg.BARGE_IN_ENERGY
+                ring.append((frame, qualifies))
+                voiced = sum(1 for _, q in ring if q)
+                if voiced > cfg.TRIGGER_RATIO * ring.maxlen:
+                    self.audio.pushback(f for f, _ in ring)
+                    self.log.info("(you kept talking — waiting for the rest)")
+                    return True
+            if not worker.is_alive():
+                voiced = sum(1 for _, q in ring if q)
+                if voiced == 0:
+                    return False
+                # Speech may be just starting as the reply lands — give it a
+                # short grace window to become a real trigger rather than
+                # racing the reply onto the speakers over the user's words.
+                if grace_deadline is None:
+                    grace_deadline = time.monotonic() + cfg.CONTINUATION_GRACE_MS / 1000
+                elif time.monotonic() >= grace_deadline:
+                    return False
 
     def say(self, text: str, *, voice: bool = True, commands: bool = True,
             save_resume: bool = False) -> bool:
@@ -249,6 +395,7 @@ class Agent:
             self.tts.speak(text)
             return False
         self.audio.flush()
+        self.hush.clear()  # only clicks during *this* utterance may hush it
         start = time.monotonic()
         self.tts.begin(text)
 
@@ -267,10 +414,15 @@ class Agent:
         run = None
 
         while self.tts.is_busy():
+            # A raw click just landed: stop speaking NOW, before the multi-click
+            # window even resolves into a command — the dongle swallows the
+            # gesture's next click if playback runs on (see MEDIA_CONTROL.md).
+            # The command itself arrives via _push/interrupt moments later.
+            if commands and self.hush.is_set():
+                self.hush.clear()
+                self.tts.stop()
+                return False
             if self.interrupt.is_set():   # a hotkey command arrived while speaking
-                # Diagnostic: shows the flag DID reach the speaking loop. If a
-                # failed click never logs this, the interrupt was never set (the
-                # press didn't get through on_press -> _media_click -> _push).
                 if commands:
                     self.tts.stop()
                     return False
@@ -450,11 +602,23 @@ class Agent:
         self.say("Voice agent ready. Conversation mode.", voice=False, commands=False)
         try:
             while self.running:
-                self.run_conversation_turn()
+                try:
+                    self.run_conversation_turn()
+                except KeyboardInterrupt:
+                    raise
+                except Exception:
+                    # A model/API error (e.g. a transient 400/500) must not kill
+                    # the whole session. Log it, tell the user, and carry on — the
+                    # next turn re-sanitizes history so it self-heals.
+                    self.log.exception("conversation turn failed; continuing")
+                    self.say("Sorry, I hit an error. Let's try that again.",
+                             voice=False, commands=False)
         except KeyboardInterrupt:
             pass
         finally:
             self.audio.stop()
+            if getattr(self, "_media", None) is not None:
+                self._media.stop()
             self.log.info("shut down")
 
 

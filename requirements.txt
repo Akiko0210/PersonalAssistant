@@ -7,6 +7,12 @@ faster-whisper>=1.0
 pyttsx3>=2.90
 pywin32>=306
 pynput>=1.7
+# Windows media-session (SMTC) headset-button control; prebuilt wheels incl. 3.13
+winrt-runtime>=3.2
+winrt-Windows.Media>=3.2
+winrt-Windows.Media.Playback>=3.2
+winrt-Windows.Media.Core>=3.2
+winrt-Windows.Foundation>=3.2
 sentence-transformers>=2.2
 chromadb>=0.5
 pypdf>=4.0

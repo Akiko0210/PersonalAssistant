@@ -61,13 +61,30 @@ All controls work globally (even when another window is focused).
 | Toggle notetaking            | Double click          |
 | Quit                         | Triple click          |
 
-The headset button listens for `media_play_pause` events. Multi-click
+Button presses are listened for on two channels at once (see
+`MEDIA_CONTROL.md`): a keyboard hook (how wired headsets and USB wireless
+dongles deliver presses) and a Windows media session (SMTC — how
+Bluetooth-native headsets like AirPods deliver them; those never appear as key
+events). A press arriving on both channels is counted once. Multi-click
 detection uses a 450 ms window — clicks within that window count together.
+Headsets that decode multi-press in firmware (e.g. AirPods) send Next/Previous
+instead; those map to the same double/triple actions. A silent keepalive
+stream runs continuously (`MEDIA_KEEPALIVE` in `config.py`) so the headset's
+audio link never spins up from silence — wireless dongles drop presses during
+those first seconds — and every click briefly pauses it so state-tracking
+dongles stay in sync (see `MEDIA_CONTROL.md`).
 
 ### Barge-in (interrupt the agent)
 
 While the agent is speaking a reply, just start talking — it will stop and
 listen. Say "continue", "go on", or "keep going" to resume where it left off.
+
+### Pausing mid-sentence
+
+If you pause long enough that the agent starts thinking, just keep talking:
+the mic stays live while it waits on the model, so the rest of your sentence is
+captured, the premature reply is silently discarded, and the model is re-asked
+with your complete sentence.
 
 ## Conversation memory
 

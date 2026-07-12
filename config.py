@@ -237,6 +237,32 @@ TTS_VOICE = None              # None = system default; or a SAPI voice id substr
 # error.
 IDLE_SOUND = BASE_DIR / "assets" / "summarizing.wav"
 
+# --- Headset button -------------------------------------------------------------
+# The button is listened to on two channels at once: the keyboard hook (how wired
+# headsets and USB wireless dongles deliver presses, as media-key events) and an
+# SMTC media session (how Bluetooth-native headsets like AirPods deliver them —
+# their presses never appear as key events). A press that shows up on both
+# channels within MEDIA_CLICK_DEDUPE_S counts once.
+MEDIA_CLICK_DEDUPE_S = 0.15
+# MEDIA_KEEPALIVE loops a silent audio stream continuously. It serves two
+# purposes: (1) it makes our media session the active one, so Bluetooth AVRCP
+# buttons route to us; (2) it means the headset's audio stream NEVER starts
+# from silence — the Yealink dongle drops button presses during the first
+# seconds after a stream spins up, so a reply beginning to play used to open
+# an uninterruptible window. Every accepted click briefly pauses the keepalive
+# (see duck() in media_control.py) so the dongle sees its "pause" honoured and
+# never desyncs. Costs some headset battery (the radio link stays active).
+MEDIA_KEEPALIVE = True
+
+# --- Listening while thinking --------------------------------------------------
+# The model reply is fetched in a background thread while the mic stays live, so
+# words spoken during transcription/thinking are never lost. If the user resumes
+# talking before the reply is spoken (the agent endpointed too early), the stale
+# reply is discarded and the model is re-asked with the completed sentence. The
+# grace window lets speech that starts JUST as the reply arrives win the race
+# instead of being talked over.
+CONTINUATION_GRACE_MS = 400
+
 # --- Barge-in (interrupt the agent by speaking while it talks) ---------------
 # Works best with headphones. On open speakers the mic can hear the agent's own
 # voice and self-interrupt; raise BARGE_IN_MS or set BARGE_IN = False if so.
