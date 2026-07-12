@@ -1,12 +1,12 @@
 """Claude integration: conversation (with note-access tools) and summarisation."""
 
-import json
 import logging
 from datetime import datetime
 
 import anthropic
 
 import config as cfg
+import history as hist
 from discord_data import DiscordData
 from knowledge import KnowledgeStore
 from memory import ConversationMemory
@@ -436,75 +436,12 @@ class Claude:
         dicts so the history is JSON-serializable (the API accepts dicts back)."""
         return block if isinstance(block, dict) else block.model_dump(exclude_none=True)
 
-    @staticmethod
-    def _sanitize(history):
-        """Make a history safe to send. Drops any tool_use whose tool_result never
-        arrived (and any tool_result with no matching tool_use), then merges
-        adjacent same-role turns. Without this, a conversation persisted
-        mid-tool-loop — e.g. a turn abandoned between the tool call and its result
-        by the background-thread/barge-in path — replays into a 400 'tool_use ids
-        were found without tool_result blocks'. Because the bad history reloads on
-        every launch, that 400 bricks the app until the file is repaired; this
-        makes it self-heal instead."""
-        result_ids, use_ids = set(), set()
-        for m in history:
-            c = m.get("content")
-            if isinstance(c, list):
-                for b in c:
-                    if isinstance(b, dict):
-                        if b.get("type") == "tool_result":
-                            result_ids.add(b.get("tool_use_id"))
-                        elif b.get("type") == "tool_use":
-                            use_ids.add(b.get("id"))
-        cleaned = []
-        for m in history:
-            c = m.get("content")
-            if isinstance(c, list):
-                blocks = []
-                for b in c:
-                    if isinstance(b, dict):
-                        if b.get("type") == "tool_use" and b.get("id") not in result_ids:
-                            continue  # unanswered tool call — its result was lost
-                        if b.get("type") == "tool_result" and b.get("tool_use_id") not in use_ids:
-                            continue  # result with no surviving tool call
-                    blocks.append(b)
-                if not blocks:
-                    continue  # message had only orphaned blocks — drop it whole
-                m = {**m, "content": blocks}
-            cleaned.append(m)
-        # Dropping a message can leave two same-role turns adjacent, which the API
-        # also rejects; fold them together so roles keep alternating.
-        to_list = lambda c: [{"type": "text", "text": c}] if isinstance(c, str) else list(c)
-        coalesced = []
-        for m in cleaned:
-            if coalesced and coalesced[-1]["role"] == m["role"]:
-                prev = coalesced[-1]
-                pc, mc = prev["content"], m["content"]
-                if isinstance(pc, str) and isinstance(mc, str):
-                    prev["content"] = f"{pc}\n\n{mc}"
-                else:
-                    prev["content"] = to_list(pc) + to_list(mc)
-            else:
-                content = m["content"] if isinstance(m["content"], str) else list(m["content"])
-                coalesced.append({**m, "content": content})
-        return coalesced
-
-    @staticmethod
-    def _trim_history(history):
-        """Cap the history and make sure it starts on a plain user message — a
-        trim boundary must never orphan a tool_result from its tool_use, or the
-        API rejects the conversation."""
-        h = list(history[-cfg.HISTORY_MAX_MESSAGES:])
-        while h and not (h[0].get("role") == "user" and isinstance(h[0].get("content"), str)):
-            h.pop(0)
-        return h
-
     def _trim_and_archive(self, history):
-        """Trim to the rolling window, staging whatever falls off into long-term
-        memory instead of discarding it. The kept part is always a contiguous
-        suffix, so the dropped prefix is everything before it."""
-        history = self._sanitize(history)  # never carry an orphaned tool call forward
-        kept = self._trim_history(history)
+        """Sanitize + trim to the rolling window, staging whatever falls off into
+        long-term memory instead of discarding it. The kept part is always a
+        contiguous suffix, so the dropped prefix is everything before it."""
+        history = hist.sanitize(history)  # never carry an orphaned tool call forward
+        kept = hist.trim(history, cfg.HISTORY_MAX_MESSAGES)
         dropped = history[:len(history) - len(kept)]
         if dropped:
             try:
@@ -514,30 +451,17 @@ class Claude:
         return kept
 
     def _load_history(self):
-        try:
-            if cfg.HISTORY_PATH.exists():
-                h = json.loads(cfg.HISTORY_PATH.read_text(encoding="utf-8"))
-                if isinstance(h, list) and h:
-                    h = self._trim_and_archive(h)
-                    log.info("restored %d message(s) of conversation history", len(h))
-                    return h
-        except (OSError, ValueError) as e:
-            log.warning("could not load conversation history: %s", e)
-        return []
+        h = hist.load(cfg.HISTORY_PATH)
+        if h:
+            h = self._trim_and_archive(h)
+            log.info("restored %d message(s) of conversation history", len(h))
+        return h
 
     def _save_history(self):
         # Saved untrimmed: trimming happens on load / at each turn, where the
         # dropped part is staged into long-term memory. Trimming here instead
-        # would silently discard the overflow on quit. Sanitized, though, so a
-        # turn abandoned mid-tool-loop can never persist an orphaned tool_use
-        # that would 400 (and brick) the next launch.
-        try:
-            cfg.HISTORY_PATH.write_text(
-                json.dumps(self._sanitize(self.history), indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except (OSError, TypeError) as e:
-            log.warning("could not save conversation history: %s", e)
+        # would silently discard the overflow on quit.
+        hist.save(cfg.HISTORY_PATH, self.history)
 
     def converse(self, user_text: str) -> str:
         # Trim in memory too, so a long-running session doesn't grow unbounded;
@@ -547,7 +471,7 @@ class Claude:
         # If the previous turn was abandoned right after its user message (leaving
         # history ending on a user turn), this new message would be a second
         # consecutive user turn — which the API also rejects. Fold them together.
-        self.history = self._sanitize(self.history)
+        self.history = hist.sanitize(self.history)
         self.idle.start()  # thinking — keep it looping across the whole tool loop
         try:
             while True:
