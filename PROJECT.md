@@ -149,10 +149,14 @@ unit-tested without a microphone, speakers, or an API key.
 1. `run_conversation_turn` calls `audio.collect_utterance` — blocks (cheaply)
    until a spoken utterance is captured, using VAD + endpointing.
 2. `stt.transcribe` turns the audio into text.
-3. `_converse_with_followups` runs `llm.converse` in a **background thread** while
-   the main thread keeps watching the mic (`_mic_activity_during`). If the user
-   was only pausing mid-sentence, the rest is captured, the premature reply is
-   discarded from history, and the model is re-asked with the full sentence.
+3. `_converse_with_followups` **settles before calling**: after the utterance
+   ends it listens for `CONTINUATION_SETTLE_MS` (`_await_continuation`); if the
+   user resumes, the continuation is captured, merged, and the window restarts.
+   Only once they've finished does it call `llm.converse` — **once**, with the
+   complete utterance. This is what keeps a multi-part question (spoken with
+   pauses) to a single billed model call. (An earlier design fired a speculative
+   `converse` at each pause and discarded the reply when the user kept talking;
+   that billed a full call per pause — §11.)
 4. `converse` sanitizes + trims history, appends the user message, then loops:
    call the model → if it returned `tool_use`, dispatch each tool via the
    registry and feed results back → repeat until the model returns plain text.
@@ -291,3 +295,31 @@ words. See `MEDIA_CONTROL.md` for the full hardware story.
 - **Engine interfaces** — formal `SpeechToText` / `TextToSpeech` / `ChatModel`
   protocols so backends (streaming Whisper, neural TTS, streaming Claude) are
   swappable without touching orchestration.
+
+---
+
+## 11. One reply per turn (and why the model isn't called until you finish)
+
+Speech recognition ends an utterance after `CONVO_ENDPOINT_MS` of trailing
+silence — but a natural pause mid-thought can be longer than that, so the app
+must tolerate you continuing after it thinks you stopped.
+
+The **original** approach fired `converse()` speculatively the instant the
+utterance endpointed, in a background thread, while watching the mic. If you
+kept talking, it waited for that in-flight call to finish, threw the reply away
+(`discard_last_turn`), and re-asked with the merged text. Because Anthropic's
+non-streaming `messages.create` generates (and bills) the whole response
+server-side, **every mid-thought pause cost a full, discarded model call** — and
+more if the speculative call fanned out into a tool loop. On a pricier model
+(the `set_conversation_model` tool can switch to Opus) that adds up fast.
+
+The **current** approach settles first: after the utterance ends,
+`_await_continuation` listens for `CONTINUATION_SETTLE_MS`; if you resume, the
+continuation is captured, merged, and the window restarts; only once you've
+truly finished is `converse()` called — exactly once, with the complete
+utterance. You hear the same single reply you always did (the speculative
+intermediate replies were never spoken anyway), but nothing is generated or
+billed until the turn is complete. The cost is a small, tunable latency
+(`CONTINUATION_SETTLE_MS`) before each reply. The behaviour is covered by
+`tests/test_continuation.py` (one `converse` per turn, continuations merged,
+coughs and hotkeys cost nothing).

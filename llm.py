@@ -85,20 +85,6 @@ class Claude:
     def pending_note(self, value):
         self._ctx.pending_note = value
 
-    def discard_last_turn(self):
-        """Erase the most recent exchange — the last plain-text user message and
-        everything after it (assistant reply, tool calls/results). Used when the
-        user kept talking while the model was thinking: that reply was never
-        spoken, and the combined utterance replaces the whole turn. Any note the
-        discarded reply prepared is dropped with it."""
-        for i in range(len(self.history) - 1, -1, -1):
-            m = self.history[i]
-            if m.get("role") == "user" and isinstance(m.get("content"), str):
-                del self.history[i:]
-                break
-        self.pending_note = None
-        self._save_history()
-
     def take_pending_note(self):
         """Hand the pending conversation note (if any) to the agent, clearing it."""
         pending, self.pending_note = self.pending_note, None

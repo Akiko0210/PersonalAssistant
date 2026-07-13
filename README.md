@@ -87,10 +87,16 @@ listen. Say "continue", "go on", or "keep going" to resume where it left off.
 
 ### Pausing mid-sentence
 
-If you pause long enough that the agent starts thinking, just keep talking:
-the mic stays live while it waits on the model, so the rest of your sentence is
-captured, the premature reply is silently discarded, and the model is re-asked
-with your complete sentence.
+You don't have to say everything in one breath. When your utterance ends, the
+agent waits a short **settle window** (`CONTINUATION_SETTLE_MS` in `config.py`,
+default 600 ms) — listening, not yet answering. If you keep talking within it,
+the continuation is captured and merged and the window restarts; only once
+you've truly finished (the window passes in silence) does it call the model,
+**once**, with your complete question. So a multi-part question with pauses
+costs exactly one reply, not one per pause. The trade-off is a little latency
+before each reply (`CONVO_ENDPOINT_MS + CONTINUATION_SETTLE_MS` of silence):
+lower the settle window to answer sooner, raise it if your natural pauses get
+cut off mid-thought.
 
 ## Conversation memory
 

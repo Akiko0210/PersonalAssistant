@@ -251,92 +251,68 @@ class Agent:
             self.audio.flush()
 
     def _converse_with_followups(self, text: str) -> str:
-        """Get Claude's reply while the mic stays live, so a pause mid-sentence
-        never swallows words. The model call runs in a background thread; the
-        main thread keeps watching the mic. If the user resumes talking before
-        the reply is spoken, the continuation is captured and transcribed, the
-        stale reply (to the incomplete sentence) is discarded from history, and
-        the model is asked again with the full utterance."""
-        while True:
-            box = {}
+        """Collect the *whole* turn before calling the model, so a pause
+        mid-sentence never swallows words — and never costs a wasted API call.
 
-            def work(t=text):
-                try:
-                    box["reply"] = self.llm.converse(t)
-                except Exception as e:  # re-raised on the main thread below
-                    box["error"] = e
+        After the utterance endpoints, keep listening for a short settle window
+        (CONTINUATION_SETTLE_MS). If the user resumes talking, capture that
+        continuation, merge it, and settle again. Only once they've truly
+        finished — the window elapses in silence — do we call converse() once,
+        with the complete utterance.
 
-            worker = threading.Thread(target=work, daemon=True)
-            worker.start()
-            continued = self._mic_activity_during(worker)
-
-            if not continued:
-                worker.join()
-                if "error" in box:
-                    raise box["error"]
-                return box.get("reply", "")
-
+        (The previous design fired a speculative converse() the instant the
+        utterance ended and threw the reply away whenever the user kept talking;
+        each mid-thought pause billed a full model call — see PROJECT.md §4.)"""
+        while self._await_continuation(cfg.CONTINUATION_SETTLE_MS):
+            if self.interrupt.is_set():
+                # A hotkey command (mute / note-taking / quit) arrived — don't
+                # call the model; let the main loop drain and act on it.
+                return ""
             # The user kept talking. Their opening frames were pushed back, so
-            # collect the rest of the utterance now — while the stale model call
-            # finishes in the background — then merge and redo the turn.
+            # collect the rest of this chunk, merge it, and settle again.
             more = self.audio.collect_utterance(
                 interrupt=self.interrupt, endpoint_ms=cfg.CONVO_ENDPOINT_MS
             )
-            worker.join()
-            if "error" in box:
-                raise box["error"]
-            addition = ""
+            if self.interrupt.is_set():
+                return ""
             if more is not None and more.size > 0:
                 addition = self.stt.transcribe(more)
-            if not addition:
-                # False trigger (a cough, room noise) — the reply we already
-                # have answers everything the user actually said. Use it.
-                return box.get("reply", "")
-            self.log.info("you (continued): %s", addition)
-            self.llm.discard_last_turn()
-            text = f"{text} {addition}"
-            if self.interrupt.is_set():
-                # A hotkey command arrived mid-continuation; don't start another
-                # model call — the main loop needs to drain and act on it.
-                return ""
+                if addition:
+                    self.log.info("you (continued): %s", addition)
+                    text = f"{text} {addition}"
+            # else: a cough / room noise triggered the settle — nothing to add,
+            # and (unlike before) nothing was spent. Loop and keep settling.
+        if self.interrupt.is_set():
+            return ""
+        return self.llm.converse(text)
 
-    def _mic_activity_during(self, worker) -> bool:
-        """Watch the mic while a background model call runs. Returns True the
-        moment the user audibly starts (or, thanks to buffering, already
-        started) talking — the triggering frames are pushed back so the words
-        are captured from the very beginning. Returns False once the call
-        finishes with the mic quiet, or when a hotkey command arrives. Frames
-        consumed here are silence or sub-threshold noise, so dropping them
-        loses nothing."""
+    def _await_continuation(self, settle_ms) -> bool:
+        """After an utterance ends, listen for up to `settle_ms` in case the user
+        was only pausing mid-thought. Returns True the moment they audibly resume
+        — the triggering frames are pushed back so collect_utterance captures the
+        words from the very beginning — or False if the window elapses quietly
+        (or a hotkey command arrives). Frames consumed here are silence or
+        sub-threshold noise, so dropping them loses nothing."""
         pad_frames = max(1, cfg.SPEECH_PAD_MS // cfg.FRAME_MS)
         ring = collections.deque(maxlen=pad_frames)
-        grace_deadline = None
-        while True:
+        deadline = time.monotonic() + settle_ms / 1000
+        while time.monotonic() < deadline:
             if self.interrupt.is_set():
                 return False
             res = self.audio.poll_speech(timeout=0.05, return_frame=True)
-            if res is not None:
-                is_speech, rms, frame = res
-                # The energy floor keeps the idle "thinking" cue (on open
-                # speakers) and room noise from counting as the user talking.
-                qualifies = is_speech and rms >= cfg.BARGE_IN_ENERGY
-                ring.append((frame, qualifies))
-                voiced = sum(1 for _, q in ring if q)
-                if voiced > cfg.TRIGGER_RATIO * ring.maxlen:
-                    self.audio.pushback(f for f, _ in ring)
-                    self.log.info("(you kept talking — waiting for the rest)")
-                    return True
-            if not worker.is_alive():
-                voiced = sum(1 for _, q in ring if q)
-                if voiced == 0:
-                    return False
-                # Speech may be just starting as the reply lands — give it a
-                # short grace window to become a real trigger rather than
-                # racing the reply onto the speakers over the user's words.
-                if grace_deadline is None:
-                    grace_deadline = time.monotonic() + cfg.CONTINUATION_GRACE_MS / 1000
-                elif time.monotonic() >= grace_deadline:
-                    return False
+            if res is None:
+                continue
+            is_speech, rms, frame = res
+            # The energy floor keeps room noise (and any lingering echo) from
+            # counting as the user talking.
+            qualifies = is_speech and rms >= cfg.BARGE_IN_ENERGY
+            ring.append((frame, qualifies))
+            voiced = sum(1 for _, q in ring if q)
+            if voiced > cfg.TRIGGER_RATIO * ring.maxlen:
+                self.audio.pushback(f for f, _ in ring)
+                self.log.info("(you kept talking — waiting for the rest)")
+                return True
+        return False
 
     def say(self, text: str, *, voice: bool = True, commands: bool = True,
             save_resume: bool = False) -> bool:

@@ -117,14 +117,17 @@ MEDIA_CLICK_DEDUPE_S = 0.15
 # never desyncs. Costs some headset battery (the radio link stays active).
 MEDIA_KEEPALIVE = True
 
-# --- Listening while thinking --------------------------------------------------
-# The model reply is fetched in a background thread while the mic stays live, so
-# words spoken during transcription/thinking are never lost. If the user resumes
-# talking before the reply is spoken (the agent endpointed too early), the stale
-# reply is discarded and the model is re-asked with the completed sentence. The
-# grace window lets speech that starts JUST as the reply arrives win the race
-# instead of being talked over.
-CONTINUATION_GRACE_MS = 400
+# --- Settle before answering ---------------------------------------------------
+# After an utterance endpoints, the agent waits this long — listening, not yet
+# calling the model — in case the user was only pausing mid-thought. If they
+# resume within the window, the continuation is captured and merged, and the
+# window restarts; only once it elapses in silence is the model called, ONCE,
+# with the complete utterance. This is what prevents a wasted (billed) model
+# call per mid-thought pause. It adds this much latency to the start of each
+# reply, so it trades a little responsiveness for cost: lower it to answer
+# sooner, raise it if your natural pauses are being cut off mid-thought. The
+# effective silence before a reply is CONVO_ENDPOINT_MS + this.
+CONTINUATION_SETTLE_MS = 600
 
 # --- Barge-in (interrupt the agent by speaking while it talks) ---------------
 # Works best with headphones. On open speakers the mic can hear the agent's own
