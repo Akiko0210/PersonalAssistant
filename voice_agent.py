@@ -31,6 +31,7 @@ from notes import NoteStore
 from knowledge import KnowledgeStore
 from llm import Claude
 from sound import IdleSound
+from single_instance import SingleInstance, AlreadyRunning
 
 
 def setup_logging():
@@ -592,7 +593,23 @@ def main():
     elif args.resync:
         print(NoteStore().resync())
     else:
-        Agent().run()
+        # Refuse to start a second live agent against the same data/ dir: two
+        # would talk over each other and race-corrupt history.json + Chroma.
+        log = logging.getLogger("agent")
+        try:
+            lock = SingleInstance(cfg.LOCK_PATH).acquire()
+        except AlreadyRunning:
+            log.error("A voice agent is already running (lock: %s). Exiting.",
+                      cfg.LOCK_PATH)
+            try:  # a spoken heads-up too, since this is a screenless tool
+                Speaker().speak("A voice agent is already running, so this copy will exit.")
+            except Exception:  # noqa: BLE001 - never let the notice mask the exit
+                pass
+            sys.exit(1)
+        try:
+            Agent().run()
+        finally:
+            lock.release()
 
 
 if __name__ == "__main__":

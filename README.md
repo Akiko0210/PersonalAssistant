@@ -55,6 +55,12 @@ python voice_agent.py            # start the agent (conversation mode)
 python voice_agent.py --selftest # check mic, STT, TTS, Claude, and note search
 ```
 
+Only one agent can run at a time: a second `python voice_agent.py` detects the
+first (via a lock on `data/agent.lock`) and exits immediately with a spoken
+notice, so two instances can't talk over each other or corrupt your history and
+note index. The lock is released automatically when the agent stops — even on a
+crash — so there's nothing to clean up.
+
 ## Controls
 
 All controls work globally (even when another window is focused).

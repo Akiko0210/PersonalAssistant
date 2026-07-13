@@ -12,6 +12,11 @@ DATA_DIR = BASE_DIR / "data"
 CHROMA_DIR = DATA_DIR / "chroma"
 LOG_DIR = BASE_DIR / "logs"
 INDEX_PATH = DATA_DIR / "index.json"
+# Single-instance lock: a second launch takes a lock on this file (Windows
+# msvcrt; see single_instance.py) and exits if it's already held, so two agents
+# can't talk over each other or race on history.json and the Chroma index
+# (which would corrupt them).
+LOCK_PATH = DATA_DIR / "agent.lock"
 # Detailed project description — the knowledge source the describe_project tool
 # reads so the agent can answer questions about its own design.
 PROJECT_DOC_PATH = BASE_DIR / "PROJECT.md"

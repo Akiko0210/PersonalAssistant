@@ -261,6 +261,13 @@ logs/                dated session logs
 Everything under `data/`, `logs/`, `knowledge/`, and `.env` is gitignored — the
 user's content and keys never enter version control.
 
+Only one agent may run against this directory at a time. At startup
+`single_instance.py` takes a Windows `msvcrt` lock on `data/agent.lock`; a second
+launch finds it held and exits with a spoken notice, so two instances can't race
+on `history.json` / the Chroma index (which would corrupt them) or talk over each
+other. The OS drops the lock when the process exits — including on a crash — so
+no stale lock is ever left behind.
+
 ---
 
 ## 9. Headset button & barge-in
