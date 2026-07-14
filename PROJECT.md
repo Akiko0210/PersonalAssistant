@@ -268,6 +268,13 @@ on `history.json` / the Chroma index (which would corrupt them) or talk over eac
 other. The OS drops the lock when the process exits — including on a crash — so
 no stale lock is ever left behind.
 
+The JSON state files (`history.json`, `memory_pending.json`) are written
+**atomically** via `atomic_io.write_text_atomic` — temp file, fsync, then
+`os.replace` (an atomic same-volume rename). A power loss mid-save therefore
+leaves either the complete old file or the complete new one, never a torn or
+empty file, so the recent conversation window can't be lost to a crash during a
+write. (Chroma is SQLite, already crash-safe by design.)
+
 ---
 
 ## 9. Headset button & barge-in

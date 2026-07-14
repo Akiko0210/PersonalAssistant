@@ -5,6 +5,8 @@ mid-tool-loop with an unanswered tool_use, which replays into a 400 on every
 launch. Run with:  python -m unittest discover tests
 """
 
+import os
+import tempfile
 import unittest
 
 import history
@@ -88,6 +90,39 @@ class TestTrim(unittest.TestCase):
     def test_short_history_kept_whole(self):
         h = [user("a"), assistant_text("r")]
         self.assertEqual(history.trim(h, 40), h)
+
+
+class TestSaveLoad(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        for name in os.listdir(self.dir):
+            try:
+                os.unlink(os.path.join(self.dir, name))
+            except OSError:
+                pass
+        try:
+            os.rmdir(self.dir)
+        except OSError:
+            pass
+
+    def test_roundtrip(self):
+        from pathlib import Path
+        path = Path(self.dir) / "history.json"
+        h = [user("hi"), assistant_text("hello"), user("bye")]
+        history.save(path, h)
+        self.assertEqual(history.load(path), h)
+
+    def test_load_missing_returns_empty(self):
+        from pathlib import Path
+        self.assertEqual(history.load(Path(self.dir) / "nope.json"), [])
+
+    def test_save_is_atomic_no_temp_left(self):
+        from pathlib import Path
+        history.save(Path(self.dir) / "history.json", [user("x")])
+        leftovers = [n for n in os.listdir(self.dir) if n.startswith(".tmp-")]
+        self.assertEqual(leftovers, [])
 
 
 if __name__ == "__main__":

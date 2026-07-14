@@ -13,6 +13,8 @@ model classes so it can be tested without hardware or an API key.
 import json
 import logging
 
+from atomic_io import write_text_atomic
+
 log = logging.getLogger("history")
 
 
@@ -89,11 +91,12 @@ def load(path):
 
 def save(path, history):
     """Persist `history` to `path`, sanitized so a turn abandoned mid-tool-loop
-    can never write an orphaned tool_use that would 400 the next launch."""
+    can never write an orphaned tool_use that would 400 the next launch. Written
+    atomically (temp + rename) so a power loss mid-save can't corrupt or empty
+    the file — the previous good version survives intact."""
     try:
-        path.write_text(
-            json.dumps(sanitize(history), indent=2, ensure_ascii=False),
-            encoding="utf-8",
+        write_text_atomic(
+            path, json.dumps(sanitize(history), indent=2, ensure_ascii=False)
         )
     except (OSError, TypeError) as e:
         log.warning("could not save conversation history: %s", e)
