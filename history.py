@@ -13,7 +13,7 @@ model classes so it can be tested without hardware or an API key.
 import json
 import logging
 
-from atomic_io import write_text_atomic
+from atomic_io import write_json_atomic
 
 log = logging.getLogger("history")
 
@@ -95,8 +95,6 @@ def save(path, history):
     atomically (temp + rename) so a power loss mid-save can't corrupt or empty
     the file — the previous good version survives intact."""
     try:
-        write_text_atomic(
-            path, json.dumps(sanitize(history), indent=2, ensure_ascii=False)
-        )
+        write_json_atomic(path, sanitize(history))
     except (OSError, TypeError) as e:
         log.warning("could not save conversation history: %s", e)

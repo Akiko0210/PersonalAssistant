@@ -14,6 +14,7 @@ import json
 import re
 
 import config as cfg
+from atomic_io import write_json_atomic
 
 # Slugs never change once assigned so notes, the index, and Chroma metadata
 # stay linked across renames.
@@ -98,9 +99,7 @@ def load_categories():
 
 
 def save_categories():
-    cfg.CATEGORIES_PATH.write_text(
-        json.dumps(NOTE_CATEGORIES, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    write_json_atomic(cfg.CATEGORIES_PATH, NOTE_CATEGORIES)
 
 
 def add_category(display: str, description: str = "") -> str:

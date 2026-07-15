@@ -17,6 +17,7 @@ from chromadb.utils import embedding_functions
 
 import categories
 import config as cfg
+from atomic_io import write_json_atomic, write_text_atomic
 
 log = logging.getLogger("notes")
 
@@ -82,17 +83,15 @@ class NoteStore:
         return {}
 
     def _save_index(self):
-        cfg.INDEX_PATH.write_text(
-            json.dumps(self.index, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        write_json_atomic(cfg.INDEX_PATH, self.index)
 
     # --- live transcript -----------------------------------------------------
     def new_session(self) -> str:
         note_id = datetime.now().strftime("note_%Y-%m-%d_%H%M%S")
         path = cfg.PENDING_DIR / f"{note_id}.md"
-        path.write_text(
+        write_text_atomic(
+            path,
             f"# Transcript {note_id}\n\nStarted {datetime.now().isoformat(timespec='seconds')}\n\n",
-            encoding="utf-8",
         )
         return note_id
 
@@ -133,7 +132,7 @@ class NoteStore:
         frontmatter = (
             f"---\ntitle: {title}\ndate: {date}\nid: {note_id}\ncategory: {category}\n---\n\n"
         )
-        path.write_text(frontmatter + full_markdown.strip() + "\n", encoding="utf-8")
+        write_text_atomic(path, frontmatter + full_markdown.strip() + "\n")
 
         self.index[note_id] = {"title": title, "date": date, "category": category}
         self._save_index()
@@ -316,7 +315,7 @@ class NoteStore:
             text = path.read_text(encoding="utf-8")
             new, n = re.subn(r"(?m)^category:\s*.*$", f"category: {slug}", text, count=1)
             if n:
-                path.write_text(new, encoding="utf-8")
+                write_text_atomic(path, new)
         except OSError as e:
             log.warning("frontmatter update for %s: %s", note_id, e)
 

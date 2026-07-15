@@ -22,7 +22,7 @@ import chromadb
 from chromadb.utils import embedding_functions
 
 import config as cfg
-from atomic_io import write_text_atomic
+from atomic_io import write_json_atomic
 
 log = logging.getLogger("memory")
 
@@ -86,10 +86,7 @@ class ConversationMemory:
     def _save_pending(self, pending: list):
         # Atomic (temp + rename) so a power loss mid-save can't corrupt the
         # staging file and lose not-yet-consolidated memory.
-        write_text_atomic(
-            cfg.MEMORY_PENDING_PATH,
-            json.dumps(pending, indent=2, ensure_ascii=False),
-        )
+        write_json_atomic(cfg.MEMORY_PENDING_PATH, pending)
 
     def record_dropped(self, messages) -> int:
         """Stage messages that fell off the history window. Returns how many

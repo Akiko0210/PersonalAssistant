@@ -23,6 +23,7 @@ from chromadb.utils import embedding_functions
 from pypdf import PdfReader
 
 import config as cfg
+from atomic_io import write_json_atomic
 
 log = logging.getLogger("knowledge")
 
@@ -58,9 +59,7 @@ class KnowledgeStore:
         return {}
 
     def _save_manifest(self, manifest: dict):
-        cfg.KNOWLEDGE_MANIFEST.write_text(
-            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        write_json_atomic(cfg.KNOWLEDGE_MANIFEST, manifest)
 
     # --- ingestion -----------------------------------------------------------
     @staticmethod

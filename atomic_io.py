@@ -9,8 +9,16 @@ atomic rename on the same volume, so at any instant of power loss you have
 either the complete old file or the complete new file — never a torn one.
 """
 
+import json
 import os
 import tempfile
+
+
+def write_json_atomic(path, obj, *, indent=2, ensure_ascii=False):
+    """Atomically write `obj` as JSON to `path`. Thin convenience over
+    write_text_atomic for the common case (indent=2, ensure_ascii=False) — the
+    shape almost every state file in this project uses."""
+    write_text_atomic(path, json.dumps(obj, indent=indent, ensure_ascii=ensure_ascii))
 
 
 def write_text_atomic(path, text, encoding="utf-8"):

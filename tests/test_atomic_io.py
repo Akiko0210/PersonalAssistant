@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from atomic_io import write_text_atomic
+from atomic_io import write_text_atomic, write_json_atomic
 
 
 class TestAtomicWrite(unittest.TestCase):
@@ -61,6 +61,14 @@ class TestAtomicWrite(unittest.TestCase):
     def test_unicode_roundtrip(self):
         write_text_atomic(self.path, "café — spread — 日本語")
         self.assertEqual(self._read(), "café — spread — 日本語")
+
+    def test_write_json_atomic_roundtrips(self):
+        import json
+        obj = {"a": 1, "notes": ["x", "y"], "unicode": "café"}
+        write_json_atomic(self.path, obj)
+        with open(self.path, encoding="utf-8") as f:
+            self.assertEqual(json.load(f), obj)
+        self.assertEqual(self._temp_leftovers(), [])
 
 
 if __name__ == "__main__":
