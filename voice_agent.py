@@ -34,6 +34,37 @@ from sound import IdleSound
 from single_instance import SingleInstance, AlreadyRunning
 
 
+def explain_error(e: Exception) -> str:
+    """Turn a turn-level failure into a spoken sentence naming the real cause.
+
+    A generic "let's try that again" once sent the user chasing a phantom bug
+    for a whole session while the actual problem was an empty credit balance —
+    so name the cause whenever the exception identifies one, and say whether
+    retrying can help.
+    """
+    msg = str(e).lower()
+    if "credit balance is too low" in msg:
+        return ("My Anthropic credit balance is too low — please add API "
+                "credits. Retrying won't help until you do.")
+    if "invalid x-api-key" in msg or "authentication_error" in msg:
+        return ("My API key was rejected — it may be missing, expired, or "
+                "revoked. Retrying won't help until the key is fixed.")
+    if "rate_limit" in msg or "error code: 429" in msg:
+        return ("I'm being rate limited by the API. Give it a minute, "
+                "then try again.")
+    if "overloaded" in msg or "error code: 529" in msg:
+        return ("The Anthropic API is overloaded right now. This usually "
+                "clears quickly — try again shortly.")
+    if ("connection" in msg or "timed out" in msg or "timeout" in msg
+            or "getaddrinfo" in msg or "unreachable" in msg):
+        return ("I couldn't reach the Anthropic API — this looks like a "
+                "network problem. Check the internet connection.")
+    if "error code: 500" in msg or "internal server error" in msg or "api_error" in msg:
+        return ("The Anthropic API returned a server error. That's on their "
+                "end — try again shortly.")
+    return "Sorry, I hit an error. Let's try that again."
+
+
 def setup_logging():
     cfg.ensure_dirs()
     logfile = cfg.LOG_DIR / f"session_{datetime.now():%Y-%m-%d}.log"
@@ -443,6 +474,17 @@ class Agent:
         category = self._confirm_category(suggested, title, content[:300])
         self.store.save_summary(note_id, title, content, category)
         self.log.info("saved conversation note '%s' -> %s", title, category)
+        # The folder dialogue and this save both happen after converse() returned,
+        # in separate model memory the main history never sees — so on its own the
+        # model still thinks the note is "pending" (the placeholder the tool
+        # returned mid-turn). Record what actually happened and fold it in.
+        display = categories.NOTE_CATEGORIES[category]["display"]
+        self.llm.record_tool_event(
+            f"Completed the note the user asked me to save (save_conversation_note): "
+            f"after a spoken folder-choice dialogue it was filed into the {display} "
+            f"folder and saved as note {note_id} — titled '{title}'."
+        )
+        self.llm.flush_tool_events(persist=True)
         interrupted = self.say(f"Notes saved. {spoken}")
         if not interrupted:
             self.audio.flush()
@@ -495,13 +537,15 @@ class Agent:
                     self.run_conversation_turn()
                 except KeyboardInterrupt:
                     raise
-                except Exception:
+                except Exception as e:
                     # A model/API error (e.g. a transient 400/500) must not kill
                     # the whole session. Log it, tell the user, and carry on — the
                     # next turn re-sanitizes history so it self-heals.
                     self.log.exception("conversation turn failed; continuing")
-                    self.say("Sorry, I hit an error. Let's try that again.",
-                             voice=False, commands=False)
+                    # Speak the real cause when we can identify it: a billing
+                    # error is not transient, and "let's try that again" once
+                    # sent the user chasing a phantom bug for a whole session.
+                    self.say(explain_error(e), voice=False, commands=False)
         except KeyboardInterrupt:
             pass
         finally:

@@ -90,6 +90,40 @@ class Claude:
         pending, self.pending_note = self.pending_note, None
         return pending
 
+    def record_tool_event(self, text):
+        """Record a factual note about work a tool did beyond its return string
+        (a deferred save, a sub-dialogue that ran in separate model memory), so
+        flush_tool_events can fold it into the conversation. See ToolContext."""
+        self._ctx.record_event(text)
+
+    def flush_tool_events(self, persist=False):
+        """Fold any recorded tool-activity notes into the conversation as an
+        assistant self-note, so the next turn's model knows what actually
+        happened inside its tool calls.
+
+        A tool's return string is the only thing that reaches history on its
+        own. Work that finishes *after* the tool returns — a note filed through
+        the spoken folder dialogue — or that runs in a *separate* model memory
+        never lands there, so the model keeps answering from the stale
+        placeholder the tool returned mid-turn (which is how it reported a note
+        as still "pending" after it had been filed). Recorded events close that
+        gap.
+
+        Called at the end of converse() for synchronous tools; called with
+        persist=True from the agent after a deferred flow that finishes past
+        converse()'s own save. The note is an assistant turn — it is the agent's
+        own record of what it did, not a fabricated user utterance — and
+        sanitize() coalesces it into the reply that precedes it."""
+        events, self._ctx.events = self._ctx.events, []
+        if not events:
+            return
+        note = ("(Note to self — what my tool actions just did, for when the "
+                "user asks about them: " + " ".join(events) + ")")
+        self.history.append({"role": "assistant", "content": note})
+        self.history = hist.sanitize(self.history)
+        if persist:
+            self._save_history()
+
     def consolidate_memory(self):
         """Fold staged (aged-out) conversation text into long-term memory. Run at
         boot; a no-op unless enough has accumulated. Failures keep the staging
@@ -185,6 +219,10 @@ class Claude:
                 return "".join(b.text for b in resp.content if b.type == "text").strip()
         finally:
             self.idle.stop()
+            # Fold in anything a synchronous tool recorded this turn, then save.
+            # Deferred flows (the conversation-note save) flush themselves later
+            # with persist=True, since they finish after this point.
+            self.flush_tool_events()
             self._save_history()  # every turn — survives crashes and quits alike
 
     # --- summarisation -------------------------------------------------------

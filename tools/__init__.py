@@ -31,6 +31,19 @@ class ToolContext:
     # Active conversation model id; set by set_conversation_model and read by
     # Claude.converse each call, so the user can switch models by voice.
     convo_model: str = None
+    # Factual notes about work a tool did *beyond* the string it returned — a
+    # deferred save, or a sub-dialogue that ran in its own model memory. Only
+    # a tool's return value lands in history automatically; anything that
+    # happens after (or in separate memory) is invisible to the model unless
+    # recorded here. Claude.flush_tool_events folds these into the conversation
+    # so the next turn knows what its tools actually did.
+    events: list = field(default_factory=list)
+
+    def record_event(self, text):
+        """Record what a tool actually did, for the model to see next turn.
+        No-op on empty text so callers needn't guard."""
+        if text:
+            self.events.append(str(text))
 
 
 _REGISTRY = {}  # name -> (schema, handler); insertion-ordered
