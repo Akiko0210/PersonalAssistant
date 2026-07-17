@@ -164,6 +164,22 @@ BARGE_IN_ENERGY = 200        # absolute RMS floor (int16) the user's voice must 
 BARGE_IN_ENERGY_RATIO = 3.0   # ...and must exceed this multiple of the echo baseline
 BARGE_IN_CALIB_MS = 350       # initial window used to measure the echo baseline
 
+# Backchannel tolerance: listeners naturally say "yeah" / "uh-huh" / "okay"
+# WHILE someone talks, meaning "I'm listening", not "stop". The detector can't
+# tell a filler from a real interruption (it only sees voiced energy), so the
+# distinction is made AFTER the barge-in fires: the captured speech is
+# transcribed, and when it is nothing but words from this set, the agent
+# resumes the reply where it left off instead of abandoning it. Real commands
+# ("stop", "wait", "no") are deliberately absent. Whisper's spellings of the
+# common grunts (mm-hmm, uh-huh, aha) are tokenized on non-letters, so the set
+# holds the individual tokens.
+BACKCHANNEL_WORDS = frozenset({
+    "yeah", "yes", "yep", "yup", "ok", "okay", "sure", "right", "alright",
+    "uh", "huh", "mm", "mhm", "hmm", "hm", "aha", "ah", "oh", "wow",
+    "cool", "nice", "true", "gotcha", "got", "it", "i", "see", "interesting",
+})
+BACKCHANNEL_MAX_WORDS = 3     # "oh okay yeah" is a filler; a longer utterance is a turn
+
 # --- Claude ------------------------------------------------------------------
 # Conversation models the user can switch between by voice (see the
 # set_conversation_model tool). Spoken name -> API id; the active choice lives

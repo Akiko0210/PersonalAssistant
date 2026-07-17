@@ -9,6 +9,7 @@ import argparse
 import collections
 import logging
 import queue
+import re
 import sys
 import threading
 import time
@@ -74,6 +75,16 @@ def explain_error(e: Exception) -> str:
         return ("The Anthropic API returned a server error. That's on their "
                 "end — try again shortly.")
     return "Sorry, I hit an error. Let's try that again."
+
+
+def is_backchannel(text: str) -> bool:
+    """True when a transcript is nothing but listener filler ("yeah", "uh-huh",
+    "oh okay") — an acknowledgement, not a request to stop talking. Used after
+    a barge-in fires to decide between resuming the reply and yielding the
+    floor. Empty text is NOT a backchannel (there was nothing to classify)."""
+    words = re.findall(r"[a-z']+", text.lower())
+    return (0 < len(words) <= cfg.BACKCHANNEL_MAX_WORDS
+            and all(w in cfg.BACKCHANNEL_WORDS for w in words))
 
 
 def setup_logging():
@@ -261,17 +272,24 @@ class Agent:
             return
         self.log.info("you: %s", text)
 
-        # "continue" after an interruption — resume where we left off
-        if self._interrupted_remaining and text.strip().lower() in (
-            "continue", "go on", "keep going", "go ahead",
-        ):
-            self.log.info("resuming interrupted reply")
-            interrupted = self.say(self._interrupted_remaining, save_resume=True)
-            if not interrupted:
-                self._interrupted_reply = None
-                self._interrupted_remaining = None
-                self.audio.flush()
-            return
+        # Resume the interrupted reply — either the user asked to ("continue"),
+        # or the "interruption" was just a listener filler ("yeah", "uh-huh"):
+        # an acknowledgement means keep talking, not stop. Neither costs a
+        # model call.
+        if self._interrupted_remaining:
+            asked = text.strip().lower() in (
+                "continue", "go on", "keep going", "go ahead",
+            )
+            if asked or is_backchannel(text):
+                self.log.info("resuming interrupted reply"
+                              if asked else
+                              "(just an acknowledgement — carrying on)")
+                interrupted = self.say(self._interrupted_remaining, save_resume=True)
+                if not interrupted:
+                    self._interrupted_reply = None
+                    self._interrupted_remaining = None
+                    self.audio.flush()
+                return
 
         self._interrupted_reply = None
         self._interrupted_remaining = None
@@ -519,7 +537,9 @@ class Agent:
             # A voice barge-in leaves the captured speech buffered so the next
             # conversation turn picks it up; a hotkey leaves self.interrupt set so
             # the main loop drains and acts on it (mute, new note, quit).
-            interrupted = self.say(f"Notes saved. {spoken}")
+            # save_resume so a filler "yeah" mid-recap resumes it (and "continue"
+            # works) instead of the recap being lost.
+            interrupted = self.say(f"Notes saved. {spoken}", save_resume=True)
         else:
             interrupted = self.say("No speech was recorded, so nothing was saved.")
         if not interrupted:
@@ -552,7 +572,7 @@ class Agent:
             f"folder and saved as note {note_id} — titled '{title}'."
         )
         self.llm.flush_tool_events(persist=True)
-        interrupted = self.say(f"Notes saved. {spoken}")
+        interrupted = self.say(f"Notes saved. {spoken}", save_resume=True)
         if not interrupted:
             self.audio.flush()
 
