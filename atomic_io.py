@@ -12,6 +12,7 @@ either the complete old file or the complete new file — never a torn one.
 import json
 import os
 import tempfile
+import time
 
 
 def write_json_atomic(path, obj, *, indent=2, ensure_ascii=False):
@@ -35,7 +36,7 @@ def write_text_atomic(path, text, encoding="utf-8"):
             f.write(text)
             f.flush()
             os.fsync(f.fileno())   # force to disk before the rename is exposed
-        os.replace(tmp, path)      # atomic on the same filesystem
+        _replace_with_retry(tmp, path)  # atomic on the same filesystem
     except BaseException:
         # Any failure: don't leave the temp file behind, and leave the original
         # in place (we never touched it).
@@ -44,3 +45,25 @@ def write_text_atomic(path, text, encoding="utf-8"):
         except OSError:
             pass
         raise
+
+
+def _replace_with_retry(tmp, path, attempts=6, first_delay=0.05):
+    """os.replace with a short backoff on Windows sharing violations.
+
+    Unlike the in-place write this module replaced, os.replace needs delete
+    access on the destination — and fails with PermissionError while any other
+    process holds the file open without FILE_SHARE_DELETE. This project's data/
+    lives in a Dropbox-synced folder, where the sync client (and AV/indexers)
+    routinely holds JSON files open for a moment; those holds clear in
+    milliseconds, so a few quick retries turn a spurious crash into a wait.
+    Total worst-case wait ~1.5s before the PermissionError propagates."""
+    delay = first_delay
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(delay)
+            delay *= 2

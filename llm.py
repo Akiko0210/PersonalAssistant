@@ -124,6 +124,14 @@ class Claude:
         if persist:
             self._save_history()
 
+    def record_unanswered(self, user_text: str):
+        """Keep a transcribed utterance in history when a hotkey cut the turn
+        short before the model was called — the words must not vanish just
+        because the user clicked mute mid-settle. The next turn's sanitize
+        folds consecutive user turns together, so the model still sees them."""
+        self.history.append({"role": "user", "content": user_text})
+        self._save_history()
+
     def consolidate_memory(self):
         """Fold staged (aged-out) conversation text into long-term memory. Run at
         boot; a no-op unless enough has accumulated. Failures keep the staging
@@ -179,7 +187,7 @@ class Claude:
         self.history = hist.sanitize(self.history)
         self.idle.start()  # thinking — keep it looping across the whole tool loop
         try:
-            while True:
+            for _ in range(cfg.CONVO_MAX_TOOL_ROUNDS):
                 # Read the model fresh each pass: if set_conversation_model runs
                 # during this turn's tool loop, the follow-up call (and every
                 # later turn) uses the newly chosen model.
@@ -189,14 +197,25 @@ class Claude:
                     "If the user asks to change models, or for a smarter or faster "
                     "one, use the set_conversation_model tool."
                 )
-                resp = self.client.messages.create(
-                    model=model,
-                    max_tokens=cfg.CONVO_MAX_TOKENS,
-                    system=system,
-                    tools=api_tools(),
-                    thinking={"type": "disabled"},
-                    messages=self.history,
-                )
+                try:
+                    resp = self.client.messages.create(
+                        model=model,
+                        max_tokens=cfg.CONVO_MAX_TOKENS,
+                        system=system,
+                        tools=api_tools(),
+                        thinking={"type": "disabled"},
+                        messages=self.history,
+                    )
+                except anthropic.NotFoundError:
+                    # A switched-to model id the API no longer serves must not
+                    # brick every later turn — the voice fix (switching back)
+                    # itself needs a working model call. Revert and retry.
+                    if model != cfg.CONVO_MODEL:
+                        log.warning("model %s rejected (not found); reverting "
+                                    "to default %s", model, cfg.CONVO_MODEL)
+                        self._ctx.convo_model = cfg.CONVO_MODEL
+                        continue
+                    raise
                 self.history.append(
                     {"role": "assistant",
                      "content": [self._dump_block(b) for b in resp.content]}
@@ -217,6 +236,13 @@ class Claude:
                     continue
 
                 return "".join(b.text for b in resp.content if b.type == "text").strip()
+            # The model kept calling tools without ever answering. Bail out with
+            # an honest line rather than billing API calls forever; the next
+            # turn's sanitize repairs whatever the loop left mid-flight.
+            log.warning("tool loop hit CONVO_MAX_TOOL_ROUNDS (%d); bailing out",
+                        cfg.CONVO_MAX_TOOL_ROUNDS)
+            return ("I got stuck repeating tool calls and stopped myself. "
+                    "Could you ask that again, maybe more specifically?")
         finally:
             self.idle.stop()
             # Fold in anything a synchronous tool recorded this turn, then save.
@@ -357,7 +383,11 @@ class Claude:
                     if chosen is not None:
                         if chosen in categories.NOTE_CATEGORIES:
                             return chosen
-                        return self.store._match_category(chosen) or suggested
+                        # Re-validate before falling back: delete_folder may
+                        # have removed `suggested` from the registry during
+                        # this very dialogue.
+                        return (self.store._match_category(chosen)
+                                or categories.valid_slug(suggested))
                     history.append({"role": "user", "content": results})
                     continue  # still thinking — keep the loop playing
 
@@ -371,4 +401,4 @@ class Claude:
             self.idle.stop()
 
         log.info("folder dialogue hit max turns; using suggested %s", suggested)
-        return suggested
+        return categories.valid_slug(suggested)  # it may have been deleted mid-dialogue

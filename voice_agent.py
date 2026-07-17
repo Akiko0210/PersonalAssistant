@@ -20,6 +20,8 @@ try:
 except ImportError:
     pass  # python-dotenv not installed yet; env vars still work
 
+import anthropic
+
 import categories
 import config as cfg
 from audio import AudioEngine
@@ -42,24 +44,33 @@ def explain_error(e: Exception) -> str:
     so name the cause whenever the exception identifies one, and say whether
     retrying can help.
     """
-    msg = str(e).lower()
-    if "credit balance is too low" in msg:
-        return ("My Anthropic credit balance is too low — please add API "
-                "credits. Retrying won't help until you do.")
-    if "invalid x-api-key" in msg or "authentication_error" in msg:
-        return ("My API key was rejected — it may be missing, expired, or "
-                "revoked. Retrying won't help until the key is fixed.")
-    if "rate_limit" in msg or "error code: 429" in msg:
-        return ("I'm being rate limited by the API. Give it a minute, "
-                "then try again.")
-    if "overloaded" in msg or "error code: 529" in msg:
-        return ("The Anthropic API is overloaded right now. This usually "
-                "clears quickly — try again shortly.")
-    if ("connection" in msg or "timed out" in msg or "timeout" in msg
-            or "getaddrinfo" in msg or "unreachable" in msg):
+    # Dispatch on the SDK's typed exceptions, not message substrings: the turn
+    # wraps audio capture, STT, TTS, and the note stores too, and a local fault
+    # whose message happens to contain "timeout" or "connection" (sounddevice,
+    # CUDA, SQLite) must never be announced as an Anthropic network problem —
+    # that's the same misdirection this function exists to prevent.
+    if not isinstance(e, anthropic.APIError):
+        return "Sorry, I hit an error. Let's try that again."
+    if isinstance(e, anthropic.APIConnectionError):  # includes APITimeoutError
         return ("I couldn't reach the Anthropic API — this looks like a "
                 "network problem. Check the internet connection.")
-    if "error code: 500" in msg or "internal server error" in msg or "api_error" in msg:
+    if "credit balance is too low" in str(e).lower():
+        return ("My Anthropic credit balance is too low — please add API "
+                "credits. Retrying won't help until you do.")
+    if isinstance(e, anthropic.AuthenticationError):
+        return ("My API key was rejected — it may be missing, expired, or "
+                "revoked. Retrying won't help until the key is fixed.")
+    if isinstance(e, anthropic.RateLimitError):
+        return ("I'm being rate limited by the API. Give it a minute, "
+                "then try again.")
+    if isinstance(e, anthropic.NotFoundError):
+        return ("The model I tried to use wasn't found by the API. If this "
+                "keeps happening, check the model ids in config.py.")
+    status = getattr(e, "status_code", None)
+    if status == 529:
+        return ("The Anthropic API is overloaded right now. This usually "
+                "clears quickly — try again shortly.")
+    if status is not None and status >= 500:
         return ("The Anthropic API returned a server error. That's on their "
                 "end — try again shortly.")
     return "Sorry, I hit an error. Let's try that again."
@@ -295,17 +306,29 @@ class Agent:
         (The previous design fired a speculative converse() the instant the
         utterance ended and threw the reply away whenever the user kept talking;
         each mid-thought pause billed a full model call — see PROJECT.md §4.)"""
+        rounds = 0
         while self._await_continuation(cfg.CONTINUATION_SETTLE_MS):
             if self.interrupt.is_set():
                 # A hotkey command (mute / note-taking / quit) arrived — don't
-                # call the model; let the main loop drain and act on it.
+                # call the model, but keep the words: the user said them, and
+                # they must not vanish because of a mute click mid-settle.
+                self.llm.record_unanswered(text)
                 return ""
+            rounds += 1
+            if rounds > cfg.MAX_CONTINUATION_ROUNDS:
+                # Something keeps re-triggering the settle window (a TV, a
+                # second voice). Answer what we have instead of holding the
+                # turn hostage and merging noise into the question; whatever
+                # keeps talking is handled by the normal turn machinery.
+                self.log.info("continuation cap reached — answering now")
+                break
             # The user kept talking. Their opening frames were pushed back, so
             # collect the rest of this chunk, merge it, and settle again.
             more = self.audio.collect_utterance(
                 interrupt=self.interrupt, endpoint_ms=cfg.CONVO_ENDPOINT_MS
             )
             if self.interrupt.is_set():
+                self.llm.record_unanswered(text)
                 return ""
             if more is not None and more.size > 0:
                 addition = self.stt.transcribe(more)
@@ -315,6 +338,7 @@ class Agent:
             # else: a cough / room noise triggered the settle — nothing to add,
             # and (unlike before) nothing was spent. Loop and keep settling.
         if self.interrupt.is_set():
+            self.llm.record_unanswered(text)
             return ""
         return self.llm.converse(text)
 
@@ -323,12 +347,22 @@ class Agent:
         was only pausing mid-thought. Returns True the moment they audibly resume
         — the triggering frames are pushed back so collect_utterance captures the
         words from the very beginning — or False if the window elapses quietly
-        (or a hotkey command arrives). Frames consumed here are silence or
-        sub-threshold noise, so dropping them loses nothing."""
+        (or a hotkey command arrives). If a speech onset is mid-flight at the
+        deadline (voiced frames consumed but not yet a trigger), the window is
+        extended once (CONTINUATION_GRACE_MS) so the onset can become a real
+        trigger instead of having its opening frames dropped at the boundary;
+        everything else consumed here is silence or sub-threshold noise."""
         pad_frames = max(1, cfg.SPEECH_PAD_MS // cfg.FRAME_MS)
         ring = collections.deque(maxlen=pad_frames)
         deadline = time.monotonic() + settle_ms / 1000
-        while time.monotonic() < deadline:
+        graced = False
+        while True:
+            if time.monotonic() >= deadline:
+                if not graced and any(q for _, q in ring):
+                    graced = True
+                    deadline = time.monotonic() + cfg.CONTINUATION_GRACE_MS / 1000
+                else:
+                    return False
             if self.interrupt.is_set():
                 return False
             res = self.audio.poll_speech(timeout=0.05, return_frame=True)
@@ -344,7 +378,6 @@ class Agent:
                 self.audio.pushback(f for f, _ in ring)
                 self.log.info("(you kept talking — waiting for the rest)")
                 return True
-        return False
 
     def say(self, text: str, *, voice: bool = True, commands: bool = True,
             save_resume: bool = False) -> bool:
@@ -369,7 +402,22 @@ class Agent:
         if not (voice and cfg.BARGE_IN and self.tts.supports_async):
             self.tts.speak(text)
             return False
-        self.audio.flush()
+        # Audio buffered while the model was thinking may be the user talking —
+        # they resumed after the settle window closed, mid-model-call. A blind
+        # flush() here silently deleted those words. Scan the buffer instead:
+        # a speech onset means the user is already talking, so hold the reply
+        # and hand the frames back for capture — exactly a barge-in at t=0.
+        # (This also keeps their live speech out of the barge-in detector's
+        # echo calibration, which would otherwise lock the threshold above
+        # their own voice and make the reply uninterruptible.) Pure silence or
+        # noise is discarded, as flush() always did.
+        onset = self._drain_buffered_speech()
+        if onset is not None:
+            self.audio.pushback(onset)
+            if save_resume:
+                self._save_interrupted(text, 0.0)
+            self.log.info("(you were already talking — holding the reply)")
+            return True
         self.hush.clear()  # only clicks during *this* utterance may hush it
         start = time.monotonic()
         self.tts.begin(text)
@@ -401,6 +449,25 @@ class Agent:
 
         detector.log_summary()  # finished uninterrupted; surface tuning numbers
         return False
+
+    def _drain_buffered_speech(self):
+        """Drain the mic buffer, watching for a speech onset. Returns the
+        onset's frames (pre-roll included) if the user is/was talking — the
+        caller pushes them back so no words are lost — or None once the buffer
+        runs dry having held only silence/noise (discarded, as flush() would).
+        Frames after a detected onset stay queued for collect_utterance."""
+        pad_frames = max(1, cfg.SPEECH_PAD_MS // cfg.FRAME_MS)
+        ring = collections.deque(maxlen=pad_frames)
+        while True:
+            res = self.audio.poll_speech(timeout=0.05, return_frame=True)
+            if res is None:
+                return None
+            is_speech, rms, frame = res
+            qualifies = is_speech and rms >= cfg.BARGE_IN_ENERGY
+            ring.append((frame, qualifies))
+            voiced = sum(1 for _, q in ring if q)
+            if voiced > cfg.TRIGGER_RATIO * ring.maxlen:
+                return [f for f, _ in ring]
 
     def _save_interrupted(self, full_text: str, elapsed_s: float):
         words = full_text.split()
@@ -498,6 +565,10 @@ class Agent:
         # is fully interruptible, so this stays a short blocking line rather than
         # barge-in (whose retained audio the recap's flush would discard anyway).
         final = self.llm.choose_folder_via_dialogue(title, summary, suggested, self._ask)
+        # Belt and braces: the dialogue validates its return, but the registry
+        # is mutable (delete_folder) — never let a stale slug KeyError here and
+        # lose the note.
+        final = categories.valid_slug(final)
         self.say(f"Putting it into {categories.NOTE_CATEGORIES[final]['display']}.",
                  voice=False, commands=False)
         return final
@@ -626,34 +697,40 @@ def main():
     args = parser.parse_args()
 
     setup_logging()
-    if args.selftest:
-        selftest()
-    elif args.miccheck:
+    log = logging.getLogger("agent")
+    # Read-only / mic-only modes need no lock.
+    if args.miccheck:
         miccheck()
-    elif args.ingest:
-        print(KnowledgeStore().ingest_folder())
-    elif args.kb_list:
+        return
+    if args.kb_list:
         print(KnowledgeStore().list_sources())
-    elif args.resync:
-        print(NoteStore().resync())
-    else:
-        # Refuse to start a second live agent against the same data/ dir: two
-        # would talk over each other and race-corrupt history.json + Chroma.
-        log = logging.getLogger("agent")
-        try:
-            lock = SingleInstance(cfg.LOCK_PATH).acquire()
-        except AlreadyRunning:
-            log.error("A voice agent is already running (lock: %s). Exiting.",
-                      cfg.LOCK_PATH)
-            try:  # a spoken heads-up too, since this is a screenless tool
+        return
+    # Everything below writes the shared state (history.json, index.json, the
+    # Chroma stores), so it must hold the same single-instance lock as the live
+    # agent — running --resync or --selftest beside a running agent would
+    # race-corrupt exactly the data the lock exists to protect.
+    try:
+        lock = SingleInstance(cfg.LOCK_PATH).acquire()
+    except AlreadyRunning:
+        log.error("A voice agent is already running (lock: %s). Exiting.",
+                  cfg.LOCK_PATH)
+        if not (args.selftest or args.ingest or args.resync):
+            try:  # a spoken heads-up too, since the agent is a screenless tool
                 Speaker().speak("A voice agent is already running, so this copy will exit.")
             except Exception:  # noqa: BLE001 - never let the notice mask the exit
                 pass
-            sys.exit(1)
-        try:
+        sys.exit(1)
+    try:
+        if args.selftest:
+            selftest()
+        elif args.ingest:
+            print(KnowledgeStore().ingest_folder())
+        elif args.resync:
+            print(NoteStore().resync())
+        else:
             Agent().run()
-        finally:
-            lock.release()
+    finally:
+        lock.release()
 
 
 if __name__ == "__main__":

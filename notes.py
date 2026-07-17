@@ -78,8 +78,15 @@ class NoteStore:
 
     # --- index helpers -------------------------------------------------------
     def _load_index(self):
-        if cfg.INDEX_PATH.exists():
-            return json.loads(cfg.INDEX_PATH.read_text(encoding="utf-8"))
+        # Guarded like history.load(): a corrupt index (Dropbox conflict copy,
+        # pre-atomic-write crash) must never block startup — fall back to empty
+        # and let --resync rebuild it from the note files on disk.
+        try:
+            if cfg.INDEX_PATH.exists():
+                return json.loads(cfg.INDEX_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            log.warning("index.json unreadable (%s) — starting with an empty "
+                        "index; run --resync to rebuild it", e)
         return {}
 
     def _save_index(self):

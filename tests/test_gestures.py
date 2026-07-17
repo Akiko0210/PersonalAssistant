@@ -50,6 +50,20 @@ class TestGestures(unittest.TestCase):
         self.settle()
         self.assertEqual(self.gestures, [])
 
+    def test_stale_timer_callback_is_ignored(self):
+        # A Timer whose callback fired but hasn't run yet can't be cancel()ed;
+        # if a new click has re-armed the window since, the stale callback must
+        # do nothing — not consume the new click's count or orphan its timer.
+        d = self.make()
+        d.click()                 # arms generation 1
+        stale_gen = d._gen
+        time.sleep(0.2)           # let gesture 1 resolve normally
+        d.click()                 # arms generation 2
+        d._resolve(stale_gen)     # simulate gen-1's late callback arriving now
+        self.assertEqual(self.gestures, [1])  # gen 1 resolved once, not twice
+        self.settle()
+        self.assertEqual(self.gestures, [1, 1])  # gen 2 still resolves on time
+
 
 if __name__ == "__main__":
     unittest.main()

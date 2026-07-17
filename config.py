@@ -133,6 +133,15 @@ MEDIA_KEEPALIVE = True
 # sooner, raise it if your natural pauses are being cut off mid-thought. The
 # effective silence before a reply is CONVO_ENDPOINT_MS + this.
 CONTINUATION_SETTLE_MS = 600
+# If speech is just starting as the settle window expires — some voiced frames
+# consumed but not yet enough to trigger — the window is extended once by this
+# much, so an onset straddling the boundary becomes a real continuation instead
+# of having its opening frames silently dropped.
+CONTINUATION_GRACE_MS = 400
+# Hard cap on continuation rounds per turn. Continuous background speech (a TV,
+# a second person) can otherwise re-trigger the settle window forever, holding
+# the turn hostage and merging the noise into the user's question.
+MAX_CONTINUATION_ROUNDS = 6
 
 # --- Barge-in (interrupt the agent by speaking while it talks) ---------------
 # Works best with headphones. On open speakers the mic can hear the agent's own
@@ -174,6 +183,10 @@ CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)
 SUMMARY_MODEL = "claude-sonnet-4-6"   # higher quality for note summaries
 CONVO_MAX_TOKENS = 1024
 SUMMARY_MAX_TOKENS = 2000
+# Safety cap on model->tool->model rounds within one turn. Real turns use a
+# handful; a model stuck re-calling tools without ever answering would
+# otherwise bill unbounded API calls with no way to stop it by voice.
+CONVO_MAX_TOOL_ROUNDS = 15
 
 
 def convo_model_label(model_id: str) -> str:

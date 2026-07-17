@@ -47,10 +47,14 @@ class FakeSTT:
 class FakeLLM:
     def __init__(self):
         self.calls = []
+        self.unanswered = []
 
     def converse(self, text):
         self.calls.append(text)
         return f"reply::{text}"
+
+    def record_unanswered(self, text):
+        self.unanswered.append(text)
 
 
 def make_agent(*, await_seq=None, stt=None, utterances=None, poll_frames=None):
@@ -101,6 +105,26 @@ class TestOneConversePerTurn(unittest.TestCase):
         self.assertEqual(reply, "")
         self.assertEqual(agent.llm.calls, [])  # nothing billed
 
+    def test_hotkey_during_settle_keeps_the_words(self):
+        # The aborted turn's transcript must land in history, not vanish: a
+        # mute click milliseconds after "remember X" must not erase "remember X".
+        agent = make_agent(await_seq=[False])
+        agent.interrupt.set()
+        agent._converse_with_followups("remember the dentist moved to Friday")
+        self.assertEqual(agent.llm.unanswered,
+                         ["remember the dentist moved to Friday"])
+
+    def test_endless_retriggers_hit_the_cap_and_answer(self):
+        # Continuous background speech (a TV) re-triggers the settle window
+        # forever; the cap must break the loop and answer what we have instead
+        # of holding the turn hostage.
+        agent = make_agent(await_seq=[True] * 50,
+                           stt=["noise"] * 50,
+                           utterances=[_audio()] * 50)
+        reply = agent._converse_with_followups("real question")
+        self.assertEqual(len(agent.llm.calls), 1)  # exactly one model call
+        self.assertTrue(reply.startswith("reply::real question"))
+
 
 class TestAwaitContinuation(unittest.TestCase):
     def make(self, poll_frames=None):
@@ -127,6 +151,46 @@ class TestAwaitContinuation(unittest.TestCase):
         agent = self.make(poll_frames=[(True, 300, b"x")] * 8)
         agent.interrupt.set()
         self.assertFalse(agent._await_continuation(5000))
+
+    def test_onset_straddling_deadline_gets_grace(self):
+        # Speech starting just before the settle deadline: the frames consumed
+        # so far aren't yet a trigger when the window expires. The one-time
+        # grace extension must let the onset finish triggering instead of
+        # dropping its opening frames at the boundary.
+        import time as _t
+
+        class SlowAudio(FakeAudio):
+            def poll_speech(self, timeout=0.05, return_frame=False):
+                _t.sleep(0.01)  # ~real frame cadence, so the deadline can pass
+                return super().poll_speech(timeout, return_frame)
+
+        agent = Agent.__new__(Agent)
+        agent.log = logging.getLogger("test")
+        agent.interrupt = threading.Event()
+        # 8 qualifying frames: at 10 ms each, a 30 ms window expires mid-onset.
+        agent.audio = SlowAudio(poll_frames=[(True, 300, b"x")] * 8)
+        self.assertTrue(agent._await_continuation(30))
+        self.assertTrue(agent.audio.pushed)  # opening frames handed back
+
+
+class TestDrainBufferedSpeech(unittest.TestCase):
+    """say() must never destroy words buffered while the model was thinking."""
+
+    def make(self, poll_frames=None):
+        agent = Agent.__new__(Agent)
+        agent.log = logging.getLogger("test")
+        agent.audio = FakeAudio(poll_frames=poll_frames)
+        return agent
+
+    def test_buffered_speech_is_returned_not_dropped(self):
+        agent = self.make(poll_frames=[(True, 300, b"w")] * 8)
+        onset = agent._drain_buffered_speech()
+        self.assertIsNotNone(onset)
+        self.assertTrue(all(f == b"w" for f in onset))
+
+    def test_silence_drains_to_none(self):
+        agent = self.make(poll_frames=[(False, 10, b"q")] * 5)
+        self.assertIsNone(agent._drain_buffered_speech())
 
 
 if __name__ == "__main__":

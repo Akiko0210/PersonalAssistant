@@ -58,6 +58,35 @@ class TestAtomicWrite(unittest.TestCase):
         self.assertEqual(self._read(), "ORIGINAL")  # old file untouched
         self.assertEqual(self._temp_leftovers(), [])  # temp cleaned up
 
+    def test_transient_sharing_violation_is_retried(self):
+        # Windows: os.replace fails with PermissionError while another process
+        # (Dropbox sync, AV scanner) briefly holds the destination open. Those
+        # holds clear in milliseconds — the write must retry, not crash.
+        real_replace = os.replace
+        calls = {"n": 0}
+
+        def flaky_replace(src, dst):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError(13, "sharing violation", dst)
+            return real_replace(src, dst)
+
+        with mock.patch("atomic_io.os.replace", side_effect=flaky_replace):
+            write_text_atomic(self.path, "survived the sync client")
+        self.assertEqual(self._read(), "survived the sync client")
+        self.assertEqual(calls["n"], 3)
+        self.assertEqual(self._temp_leftovers(), [])
+
+    def test_persistent_permission_error_still_raises(self):
+        write_text_atomic(self.path, "ORIGINAL")
+        with mock.patch("atomic_io.os.replace",
+                        side_effect=PermissionError(13, "held forever")), \
+             mock.patch("atomic_io.time.sleep"):  # don't actually back off
+            with self.assertRaises(PermissionError):
+                write_text_atomic(self.path, "NEVER-LANDS")
+        self.assertEqual(self._read(), "ORIGINAL")
+        self.assertEqual(self._temp_leftovers(), [])
+
     def test_unicode_roundtrip(self):
         write_text_atomic(self.path, "café — spread — 日本語")
         self.assertEqual(self._read(), "café — spread — 日本語")

@@ -37,6 +37,13 @@ class ClickGestureDecoder:
         self._count = 0
         self._timer = None
         self._last_click = 0.0
+        # Generation counter: cancel() can't stop a Timer whose callback has
+        # already fired but not yet taken the lock, so each armed window gets a
+        # generation and a stale callback recognises itself and does nothing.
+        # Without this, a click landing in that gap was counted into the
+        # expired gesture (one stray click read as a double), and _resolve then
+        # orphaned the freshly armed timer by clearing self._timer.
+        self._gen = 0
 
     def click(self):
         now = time.monotonic()
@@ -49,14 +56,18 @@ class ClickGestureDecoder:
             self._count += 1
             if self._timer:
                 self._timer.cancel()
-            self._timer = threading.Timer(self._window_s, self._resolve)
+            self._gen += 1
+            self._timer = threading.Timer(self._window_s, self._resolve,
+                                          args=(self._gen,))
             self._timer.daemon = True
             self._timer.start()
         if self._on_press:
             self._on_press()
 
-    def _resolve(self):
+    def _resolve(self, gen):
         with self._lock:
+            if gen != self._gen:
+                return  # a newer click re-armed the window; that timer decides
             count = self._count
             self._count = 0
             self._timer = None
@@ -68,4 +79,5 @@ class ClickGestureDecoder:
             if self._timer:
                 self._timer.cancel()
                 self._timer = None
+            self._gen += 1  # invalidate any already-fired, not-yet-run callback
             self._count = 0

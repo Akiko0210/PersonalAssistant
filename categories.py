@@ -55,8 +55,15 @@ DEFAULT_CATEGORY = "general"
 
 def category_dir(slug):
     """Absolute path to a category's folder; unknown slugs fall back to default."""
-    slug = slug if slug in NOTE_CATEGORIES else DEFAULT_CATEGORY
-    return cfg.DATA_DIR / NOTE_CATEGORIES[slug]["folder"]
+    return cfg.DATA_DIR / NOTE_CATEGORIES[valid_slug(slug)]["folder"]
+
+
+def valid_slug(slug):
+    """`slug` if it is (still) a registered category, else the default. Folders
+    can be deleted while a flow is in flight — e.g. delete_folder called during
+    the spoken folder dialogue — so a slug chosen earlier must be re-validated
+    at the moment it's used, or NOTE_CATEGORIES[slug] raises KeyError."""
+    return slug if slug in NOTE_CATEGORIES else DEFAULT_CATEGORY
 
 
 def _slugify(name: str) -> str:
