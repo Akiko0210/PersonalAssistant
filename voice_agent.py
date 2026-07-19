@@ -475,24 +475,43 @@ class Agent:
         backlog runs dry having held only silence/noise (discarded, as flush()
         would). Frames after a detected onset stay queued for collect_utterance.
 
-        The scan must stop at the LIVE EDGE of the always-on stream: new
-        frames arrive every FRAME_MS forever, so a poll timeout longer than
-        that never comes back empty and this loop would consume the live
-        stream instead of the backlog — say() then never starts speaking (the
-        every-reply-goes-silent failure in session_2026-07-17.log). Hence the
-        poll timeout is a fraction of FRAME_MS: the first inter-frame gap
-        means the backlog is drained. One exception: if the backlog ends with
-        a possible onset mid-flight (qualifying frames in the ring), keep
-        listening briefly so a user who is talking right now isn't spoken
-        over — and doesn't poison the barge-in echo calibration."""
+        Two properties make this scan unable to block speech (the
+        every-reply-goes-silent failure in session_2026-07-17.log, where a
+        50 ms poll timeout lost the race against the 30 ms frame cadence and
+        the loop consumed the live stream forever):
+
+        1. DETERMINISTIC STOP — backlog reads are non-blocking (timeout=0):
+           the scan takes only frames already waiting in the queue and stops
+           the instant it's empty. No timeout races the frame cadence,
+           because no timer is involved; the always-on stream can't feed a
+           non-blocking read faster than the loop consumes it. The only
+           blocking polls are in the grace phase, which is deadline-bounded.
+        2. HARD BUDGET — the entire scan is wall-clock capped. Whatever
+           happens (a pathological queue, a bug in the grace logic), the
+           reply starts speaking within the budget; worst case we log and
+           fall back to the old flush-like behaviour of just proceeding.
+
+        Grace phase: if the backlog ends with a possible onset mid-flight
+        (qualifying frames in the ring), keep listening briefly so a user
+        talking right now isn't spoken over — and doesn't poison the
+        barge-in echo calibration."""
         pad_frames = max(1, cfg.SPEECH_PAD_MS // cfg.FRAME_MS)
         ring = collections.deque(maxlen=pad_frames)
-        edge_timeout = cfg.FRAME_MS / 4000  # well under one frame interval
+        budget = time.monotonic() + 2.0  # absolute cap on the whole scan
         grace_deadline = None
-        for _ in range(4000):  # safety cap (~2 min of backlog); never in practice
-            waiting = grace_deadline is not None
+        while True:
+            now = time.monotonic()
+            if now >= budget:
+                self.log.warning("mic backlog scan hit its %0.1fs budget — "
+                                 "speaking anyway", 2.0)
+                return None
+            if grace_deadline is not None and now >= grace_deadline:
+                return None  # the onset fizzled — it was a noise blip
             res = self.audio.poll_speech(
-                timeout=0.05 if waiting else edge_timeout, return_frame=True
+                # Backlog phase: non-blocking. Grace phase: short real waits,
+                # bounded by grace_deadline above.
+                timeout=0 if grace_deadline is None else 0.05,
+                return_frame=True,
             )
             if res is None:
                 if not any(q for _, q in ring):
@@ -500,8 +519,6 @@ class Agent:
                 if grace_deadline is None:
                     grace_deadline = (time.monotonic()
                                       + cfg.CONTINUATION_GRACE_MS / 1000)
-                if time.monotonic() >= grace_deadline:
-                    return None  # the onset fizzled — it was a noise blip
                 continue
             is_speech, rms, frame = res
             qualifies = is_speech and rms >= cfg.BARGE_IN_ENERGY
@@ -509,7 +526,6 @@ class Agent:
             voiced = sum(1 for _, q in ring if q)
             if voiced > cfg.TRIGGER_RATIO * ring.maxlen:
                 return [f for f, _ in ring]
-        return None
 
     def _save_interrupted(self, full_text: str, elapsed_s: float):
         words = full_text.split()

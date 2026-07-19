@@ -223,6 +223,24 @@ class TestDrainBufferedSpeech(unittest.TestCase):
         self.assertIsNone(agent._drain_buffered_speech())
         self.assertLess(_t.monotonic() - start, 1.0)  # not consuming forever
 
+    def test_even_a_never_empty_queue_cannot_block_speech(self):
+        # Adversarial worst case: an audio source that ALWAYS has a silence
+        # frame instantly available (no inter-frame gap ever). The non-blocking
+        # stop condition can't fire, so the hard wall-clock budget must — the
+        # reply may be delayed by at most the budget, never silenced.
+        import time as _t
+
+        class FirehoseAudio:
+            def poll_speech(self, timeout=0.1, return_frame=False):
+                return (False, 5, b"s")  # instantly, forever
+
+        agent = Agent.__new__(Agent)
+        agent.log = logging.getLogger("test")
+        agent.audio = FirehoseAudio()
+        start = _t.monotonic()
+        self.assertIsNone(agent._drain_buffered_speech())  # speaks anyway
+        self.assertLess(_t.monotonic() - start, 3.0)  # bounded by the budget
+
 
 if __name__ == "__main__":
     unittest.main()
