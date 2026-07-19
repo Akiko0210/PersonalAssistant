@@ -469,23 +469,47 @@ class Agent:
         return False
 
     def _drain_buffered_speech(self):
-        """Drain the mic buffer, watching for a speech onset. Returns the
+        """Drain the mic BACKLOG, watching for a speech onset. Returns the
         onset's frames (pre-roll included) if the user is/was talking — the
-        caller pushes them back so no words are lost — or None once the buffer
-        runs dry having held only silence/noise (discarded, as flush() would).
-        Frames after a detected onset stay queued for collect_utterance."""
+        caller pushes them back so no words are lost — or None once the
+        backlog runs dry having held only silence/noise (discarded, as flush()
+        would). Frames after a detected onset stay queued for collect_utterance.
+
+        The scan must stop at the LIVE EDGE of the always-on stream: new
+        frames arrive every FRAME_MS forever, so a poll timeout longer than
+        that never comes back empty and this loop would consume the live
+        stream instead of the backlog — say() then never starts speaking (the
+        every-reply-goes-silent failure in session_2026-07-17.log). Hence the
+        poll timeout is a fraction of FRAME_MS: the first inter-frame gap
+        means the backlog is drained. One exception: if the backlog ends with
+        a possible onset mid-flight (qualifying frames in the ring), keep
+        listening briefly so a user who is talking right now isn't spoken
+        over — and doesn't poison the barge-in echo calibration."""
         pad_frames = max(1, cfg.SPEECH_PAD_MS // cfg.FRAME_MS)
         ring = collections.deque(maxlen=pad_frames)
-        while True:
-            res = self.audio.poll_speech(timeout=0.05, return_frame=True)
+        edge_timeout = cfg.FRAME_MS / 4000  # well under one frame interval
+        grace_deadline = None
+        for _ in range(4000):  # safety cap (~2 min of backlog); never in practice
+            waiting = grace_deadline is not None
+            res = self.audio.poll_speech(
+                timeout=0.05 if waiting else edge_timeout, return_frame=True
+            )
             if res is None:
-                return None
+                if not any(q for _, q in ring):
+                    return None  # backlog drained, nothing voiced in flight
+                if grace_deadline is None:
+                    grace_deadline = (time.monotonic()
+                                      + cfg.CONTINUATION_GRACE_MS / 1000)
+                if time.monotonic() >= grace_deadline:
+                    return None  # the onset fizzled — it was a noise blip
+                continue
             is_speech, rms, frame = res
             qualifies = is_speech and rms >= cfg.BARGE_IN_ENERGY
             ring.append((frame, qualifies))
             voiced = sum(1 for _, q in ring if q)
             if voiced > cfg.TRIGGER_RATIO * ring.maxlen:
                 return [f for f, _ in ring]
+        return None
 
     def _save_interrupted(self, full_text: str, elapsed_s: float):
         words = full_text.split()

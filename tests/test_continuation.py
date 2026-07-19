@@ -192,6 +192,37 @@ class TestDrainBufferedSpeech(unittest.TestCase):
         agent = self.make(poll_frames=[(False, 10, b"q")] * 5)
         self.assertIsNone(agent._drain_buffered_speech())
 
+    def test_live_stream_terminates_at_the_edge(self):
+        # Regression for session_2026-07-17: the always-on mic delivers a
+        # frame every FRAME_MS forever, so a drain that only stops on an empty
+        # poll never stops — say() never begins speaking and every reply goes
+        # silent. The drain must stop at the live edge (first inter-frame gap)
+        # when nothing voiced is in flight.
+        import time as _t
+
+        class LiveSilentAudio:
+            """A silence frame becomes available every 30 ms, forever;
+            poll_speech honours its timeout like the real AudioEngine."""
+
+            def __init__(self):
+                self._next_at = _t.monotonic() + 0.03
+
+            def poll_speech(self, timeout=0.1, return_frame=False):
+                wait = self._next_at - _t.monotonic()
+                if wait > timeout:
+                    _t.sleep(timeout)
+                    return None
+                _t.sleep(max(0.0, wait))
+                self._next_at += 0.03
+                return (False, 5, b"s")
+
+        agent = Agent.__new__(Agent)
+        agent.log = logging.getLogger("test")
+        agent.audio = LiveSilentAudio()
+        start = _t.monotonic()
+        self.assertIsNone(agent._drain_buffered_speech())
+        self.assertLess(_t.monotonic() - start, 1.0)  # not consuming forever
+
 
 if __name__ == "__main__":
     unittest.main()
