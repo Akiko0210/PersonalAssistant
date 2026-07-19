@@ -223,23 +223,26 @@ class TestDrainBufferedSpeech(unittest.TestCase):
         self.assertIsNone(agent._drain_buffered_speech())
         self.assertLess(_t.monotonic() - start, 1.0)  # not consuming forever
 
-    def test_even_a_never_empty_queue_cannot_block_speech(self):
-        # Adversarial worst case: an audio source that ALWAYS has a silence
-        # frame instantly available (no inter-frame gap ever). The non-blocking
-        # stop condition can't fire, so the hard wall-clock budget must — the
-        # reply may be delayed by at most the budget, never silenced.
+    def test_huge_silent_backlog_drains_fast(self):
+        # A long model call leaves minutes of buffered silence. Reading it
+        # must take milliseconds (non-blocking reads of recorded frames),
+        # not real time — and must conclude "no speech" via the VAD verdicts.
         import time as _t
 
-        class FirehoseAudio:
-            def poll_speech(self, timeout=0.1, return_frame=False):
-                return (False, 5, b"s")  # instantly, forever
-
-        agent = Agent.__new__(Agent)
-        agent.log = logging.getLogger("test")
-        agent.audio = FirehoseAudio()
+        two_minutes_of_silence = [(False, 5, b"s")] * 4000
+        agent = self.make(poll_frames=two_minutes_of_silence)
         start = _t.monotonic()
-        self.assertIsNone(agent._drain_buffered_speech())  # speaks anyway
-        self.assertLess(_t.monotonic() - start, 3.0)  # bounded by the budget
+        self.assertIsNone(agent._drain_buffered_speech())
+        self.assertLess(_t.monotonic() - start, 1.0)
+
+    def test_speech_at_the_end_of_a_long_backlog_is_found(self):
+        # Silence while the model thought, then the user spoke: the VAD
+        # verdicts flip and the drain must return those frames, not lose them.
+        backlog = [(False, 5, b"s")] * 500 + [(True, 300, b"w")] * 8
+        agent = self.make(poll_frames=backlog)
+        onset = agent._drain_buffered_speech()
+        self.assertIsNotNone(onset)
+        self.assertIn(b"w", onset)
 
 
 if __name__ == "__main__":

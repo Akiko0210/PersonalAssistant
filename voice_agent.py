@@ -469,57 +469,27 @@ class Agent:
         return False
 
     def _drain_buffered_speech(self):
-        """Drain the mic BACKLOG, watching for a speech onset. Returns the
-        onset's frames (pre-roll included) if the user is/was talking — the
-        caller pushes them back so no words are lost — or None once the
-        backlog runs dry having held only silence/noise (discarded, as flush()
-        would). Frames after a detected onset stay queued for collect_utterance.
+        """Everything recorded while the model was thinking is sitting in the
+        mic buffer, each frame already carrying the VAD's speech/silence
+        verdict. Read the buffer back and ask one question: did the user
+        speak? If yes, return the frames from where their speech starts (the
+        caller pushes them back so no words are lost). If it was only
+        silence/noise, discard it — exactly what flush() did — and return
+        None so the reply plays.
 
-        Two properties make this scan unable to block speech (the
-        every-reply-goes-silent failure in session_2026-07-17.log, where a
-        50 ms poll timeout lost the race against the 30 ms frame cadence and
-        the loop consumed the live stream forever):
-
-        1. DETERMINISTIC STOP — backlog reads are non-blocking (timeout=0):
-           the scan takes only frames already waiting in the queue and stops
-           the instant it's empty. No timeout races the frame cadence,
-           because no timer is involved; the always-on stream can't feed a
-           non-blocking read faster than the loop consumes it. The only
-           blocking polls are in the grace phase, which is deadline-bounded.
-        2. HARD BUDGET — the entire scan is wall-clock capped. Whatever
-           happens (a pathological queue, a bug in the grace logic), the
-           reply starts speaking within the budget; worst case we log and
-           fall back to the old flush-like behaviour of just proceeding.
-
-        Grace phase: if the backlog ends with a possible onset mid-flight
-        (qualifying frames in the ring), keep listening briefly so a user
-        talking right now isn't spoken over — and doesn't poison the
-        barge-in echo calibration."""
+        Reads are non-blocking (timeout=0): we take only what is already
+        recorded. The always-on stream adds a frame every FRAME_MS and a
+        non-blocking read is instant, so this loop always finishes — unlike
+        a timed poll, which loses the race against the frame cadence and
+        consumes the live stream forever (session_2026-07-17.log, where
+        every reply went silent). Speech starting at this exact moment is
+        the barge-in detector's job, not ours."""
         pad_frames = max(1, cfg.SPEECH_PAD_MS // cfg.FRAME_MS)
         ring = collections.deque(maxlen=pad_frames)
-        budget = time.monotonic() + 2.0  # absolute cap on the whole scan
-        grace_deadline = None
         while True:
-            now = time.monotonic()
-            if now >= budget:
-                self.log.warning("mic backlog scan hit its %0.1fs budget — "
-                                 "speaking anyway", 2.0)
-                return None
-            if grace_deadline is not None and now >= grace_deadline:
-                return None  # the onset fizzled — it was a noise blip
-            res = self.audio.poll_speech(
-                # Backlog phase: non-blocking. Grace phase: short real waits,
-                # bounded by grace_deadline above.
-                timeout=0 if grace_deadline is None else 0.05,
-                return_frame=True,
-            )
+            res = self.audio.poll_speech(timeout=0, return_frame=True)
             if res is None:
-                if not any(q for _, q in ring):
-                    return None  # backlog drained, nothing voiced in flight
-                if grace_deadline is None:
-                    grace_deadline = (time.monotonic()
-                                      + cfg.CONTINUATION_GRACE_MS / 1000)
-                continue
+                return None  # buffer fully read — the VAD saw no speech in it
             is_speech, rms, frame = res
             qualifies = is_speech and rms >= cfg.BARGE_IN_ENERGY
             ring.append((frame, qualifies))
