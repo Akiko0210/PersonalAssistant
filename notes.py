@@ -22,6 +22,21 @@ from atomic_io import write_json_atomic, write_text_atomic
 log = logging.getLogger("notes")
 
 
+def parse_frontmatter(text):
+    """Parse the YAML-ish frontmatter block save_summary writes (--- key: value
+    lines ---). Returns ({fields}, body). Tolerant: missing or malformed
+    frontmatter yields ({}, whole text)."""
+    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, re.DOTALL)
+    if not m:
+        return {}, text
+    fields = {}
+    for line in m.group(1).splitlines():
+        if ":" in line:
+            key, _, value = line.partition(":")
+            fields[key.strip()] = value.strip()
+    return fields, text[m.end():]
+
+
 class NoteStore:
     def __init__(self):
         cfg.ensure_dirs()
@@ -429,10 +444,45 @@ class NoteStore:
             except Exception as e:
                 problems.append(f"{nid}: chroma update failed: {e}")
 
+        # Adopt orphaned note files: a summary on disk with no index entry.
+        # That's what a crash between the file write and the index save leaves
+        # behind (see atomic_io) — and the only way such a note ever becomes
+        # searchable again. The file's frontmatter carries everything the
+        # index needs.
+        adopted = 0
+        for slug in categories.NOTE_CATEGORIES:
+            cdir = categories.category_dir(slug)
+            if not cdir.exists():
+                continue
+            for path in cdir.glob("note_*.md"):
+                if path.name.endswith(".transcript.md"):
+                    continue
+                nid = path.stem
+                if nid in self.index:
+                    continue
+                try:
+                    fields, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+                except OSError as e:
+                    problems.append(f"{nid}: could not read orphan file: {e}")
+                    continue
+                entry = {"title": fields.get("title") or nid,
+                         "date": fields.get("date")
+                                 or datetime.fromtimestamp(path.stat().st_mtime)
+                                             .isoformat(timespec="seconds"),
+                         "category": slug}
+                self.index[nid] = entry
+                try:
+                    self._col.upsert(ids=[nid], documents=[body.strip()],
+                                     metadatas=[{**entry}])
+                except Exception as e:
+                    problems.append(f"{nid}: adopted but chroma embed failed: {e}")
+                adopted += 1
+                log.info("resync %s: adopted orphan file from '%s'", nid, slug)
+
         self._save_index()
         report = (f"Resync done: {index_fixed} index slug(s) fixed, {moved} file(s) "
                   f"moved, {fm_fixed} frontmatter(s) rewritten, {chroma_fixed} "
-                  f"chroma record(s) updated.")
+                  f"chroma record(s) updated, {adopted} orphan file(s) adopted.")
         if problems:
             report += "\nUnresolved:\n" + "\n".join(f"  - {p}" for p in problems)
         return report
