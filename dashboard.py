@@ -48,6 +48,22 @@ LOG_NAME_RE = re.compile(r"^session_[\w.-]+\.log$")
 # and server-side validation; min/max are hard bounds enforced on save.
 WHISPER_CHOICES = ["tiny.en", "base.en", "small.en", "medium.en", "large-v3"]
 
+# Friendly names for models offered in the summary-model dropdown. Starts from
+# the conversation-model labels (so both pickers stay in sync) and adds any
+# summary-only ids. The current SUMMARY_MODEL default is always included below,
+# so a value config.py ships that isn't listed here still appears selectable.
+SUMMARY_MODEL_LABELS = {**cfg.CONVO_MODEL_LABELS, "claude-sonnet-4-6": "Sonnet 4.6"}
+
+
+def model_choices(labels, must_include):
+    """Build a {value,label} choice list, guaranteeing `must_include` is present
+    (appended with a best-effort label) so a dropdown always shows the current
+    value selected rather than silently falling back to the first option."""
+    ids = list(labels)
+    if must_include and must_include not in ids:
+        ids.append(must_include)
+    return [dict(value=mid, label=labels.get(mid, mid)) for mid in ids]
+
 TUNABLES = [
     # -- Turn taking ----------------------------------------------------------
     dict(key="CONVO_ENDPOINT_MS", group="Turn taking", label="Conversation endpoint",
@@ -111,7 +127,7 @@ TUNABLES = [
              for mid in cfg.CONVO_MODELS.values()],
          help="Default model for spoken back-and-forth. Voice switching (set_conversation_model) still works and resets to this on restart."),
     dict(key="SUMMARY_MODEL", group="Models & tokens", label="Summary model",
-         type="text",
+         type="choice", choices=model_choices(SUMMARY_MODEL_LABELS, cfg.SUMMARY_MODEL),
          help="Model used for note summaries (quality matters more than latency here)."),
     dict(key="CONVO_MAX_TOKENS", group="Models & tokens", label="Reply budget",
          type="int", min=256, max=16384, step=256, unit="tokens",

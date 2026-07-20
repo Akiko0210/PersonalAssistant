@@ -78,6 +78,19 @@ class ValidatePayloadTests(unittest.TestCase):
     def test_bad_choice_rejected(self):
         _, errors = dashboard.validate_payload({"CONVO_MODEL": "gpt-4"})
         self.assertIn("CONVO_MODEL", errors)
+        _, errors = dashboard.validate_payload({"SUMMARY_MODEL": "gpt-4"})
+        self.assertIn("SUMMARY_MODEL", errors)
+
+    def test_summary_model_is_a_dropdown_including_the_default(self):
+        meta = dashboard.TUNABLES_BY_KEY["SUMMARY_MODEL"]
+        self.assertEqual(meta["type"], "choice")
+        values = [c["value"] for c in meta["choices"]]
+        # the current coded default must be selectable, or the dropdown would
+        # render a value the user never chose
+        self.assertIn(cfg.SUMMARY_MODEL, values)
+        overrides, errors = dashboard.validate_payload({"SUMMARY_MODEL": cfg.SUMMARY_MODEL})
+        self.assertEqual(errors, {})
+        self.assertEqual(overrides["SUMMARY_MODEL"], cfg.SUMMARY_MODEL)
 
     def test_bool_must_be_bool(self):
         _, errors = dashboard.validate_payload({"BARGE_IN": "yes"})
