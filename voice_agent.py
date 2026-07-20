@@ -296,7 +296,15 @@ class Agent:
 
         reply = self._converse_with_followups(text)
         if not reply:
-            return  # a hotkey command cut the turn short; main loop handles it
+            # Expected only when a hotkey cut the turn short. An empty reply
+            # with NO interrupt means the model produced nothing — that must
+            # never pass silently again (a truncated tool call once died here
+            # unnoticed, and the user heard nothing for 12 minutes).
+            if not self.interrupt.is_set():
+                self.log.warning("model returned an empty reply for: %r", text)
+                self.say("I came back with an empty reply — something went "
+                         "wrong. Try that again.", voice=False, commands=False)
+            return
         self.log.info("agent: %s", reply)
         interrupted = self.say(reply, save_resume=True)
 

@@ -235,7 +235,26 @@ class Claude:
                     self.history.append({"role": "user", "content": results})
                     continue
 
-                return "".join(b.text for b in resp.content if b.type == "text").strip()
+                text = "".join(b.text for b in resp.content if b.type == "text").strip()
+                if resp.stop_reason == "max_tokens":
+                    # The reply hit CONVO_MAX_TOKENS. If it died inside a tool
+                    # call, that call was never dispatched — the action did NOT
+                    # happen, and the dangling tool_use will be sanitized away,
+                    # so the model won't even remember trying. Say so out loud;
+                    # a silent empty return here cost a whole note save while
+                    # the model kept announcing "saving now" (2026-07-19 log).
+                    truncated_tool = any(b.type == "tool_use" for b in resp.content)
+                    log.warning("reply truncated at CONVO_MAX_TOKENS "
+                                "(tool call cut off: %s)", truncated_tool)
+                    if truncated_tool:
+                        notice = ("Sorry — that action needed a longer reply than "
+                                  "I'm allowed, so it did not complete. Try asking "
+                                  "for a shorter version.")
+                        return f"{text} {notice}".strip()
+                    if not text:
+                        return ("My reply hit its length limit before I could say "
+                                "anything. Try asking for a shorter version.")
+                return text
             # The model kept calling tools without ever answering. Bail out with
             # an honest line rather than billing API calls forever; the next
             # turn's sanitize repairs whatever the loop left mid-flight.

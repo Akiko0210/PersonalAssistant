@@ -197,7 +197,14 @@ CONVO_MODEL_LABELS = {
 }
 CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)
 SUMMARY_MODEL = "claude-sonnet-4-6"   # higher quality for note summaries
-CONVO_MAX_TOKENS = 1024
+# Reply budget must cover TOOL CALLS too, not just spoken sentences: a
+# save_conversation_note carrying a full written-up document is one big JSON
+# blob inside the reply. At 1024 a long note was truncated mid-JSON
+# (stop_reason max_tokens), never dispatched, and the turn died silently —
+# the model kept announcing "saving now" while unable to ever finish
+# (session_2026-07-19.log, 19:53-20:05). Tokens are billed as used, so a
+# roomy cap costs nothing on ordinary short replies.
+CONVO_MAX_TOKENS = 4096
 SUMMARY_MAX_TOKENS = 2000
 # Safety cap on model->tool->model rounds within one turn. Real turns use a
 # handful; a model stuck re-calling tools without ever answering would
