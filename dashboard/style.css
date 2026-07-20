@@ -355,3 +355,57 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
   .f-side { justify-content: flex-start; }
   .sidebar { width: 190px; flex-basis: 190px; }
 }
+
+/* ---------- Agents ---------- */
+.agent-card { margin-bottom: 18px; }
+.ac-head { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.ac-head h2 { margin: 0; }
+.ac-reset { margin-left: auto; }
+.agent-dot {
+  width: 14px; height: 14px; border-radius: 50%;
+  display: inline-block; flex: 0 0 auto;
+}
+.agent-alice { background: #b57edc; }
+.agent-bob   { background: var(--accent); }
+.agent-cobe  { background: var(--warning); }
+.agent-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  font-size: 20px; font-weight: 700;
+}
+.agent-chip::before {
+  content: ""; width: 11px; height: 11px; border-radius: 50%;
+  background: var(--muted);
+}
+.agent-chip.agent-alice::before { background: #b57edc; }
+.agent-chip.agent-bob::before   { background: var(--accent); }
+.agent-chip.agent-cobe::before  { background: var(--warning); }
+.t-muted { color: var(--muted); font-size: 16px; font-weight: 600; }
+.badge.live {
+  background: rgba(12, 163, 12, 0.16); color: var(--good);
+  border-color: rgba(12, 163, 12, 0.4);
+}
+.ac-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px 16px; margin-bottom: 12px;
+}
+.ac-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+.ac-field > span { font-size: 12.5px; font-weight: 600; color: var(--muted); }
+.ac-field .f-text, .ac-field .f-select, .ac-field .f-num { width: 100%; }
+.ac-persona {
+  width: 100%; resize: vertical; min-height: 120px;
+  background: var(--surface-2); color: var(--ink-2);
+  border: 1px solid var(--hairline); border-radius: 8px;
+  padding: 10px 12px; font-size: 13.5px; line-height: 1.55;
+  font-family: ui-monospace, Consolas, "Cascadia Mono", monospace;
+}
+.ac-persona:focus { outline: none; border-color: var(--accent); color: var(--ink); }
+.ac-tools {
+  font-size: 12.5px; color: var(--muted);
+  border-top: 1px solid var(--hairline); padding-top: 10px;
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline;
+}
+.ac-tools code {
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: 5px; padding: 1px 7px; font-size: 12px;
+}
+.ac-tools-note { margin-left: auto; font-style: italic; }

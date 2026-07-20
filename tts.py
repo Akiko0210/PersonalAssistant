@@ -32,10 +32,23 @@ class _SapiSpeaker:
         self._voice = win32com.client.Dispatch("SAPI.SpVoice")
         self._voice.Rate = _wpm_to_sapi_rate(cfg.TTS_RATE)
         if cfg.TTS_VOICE:
-            for token in self._voice.GetVoices():
-                if cfg.TTS_VOICE.lower() in token.GetDescription().lower():
-                    self._voice.Voice = token
-                    break
+            self.set_voice(cfg.TTS_VOICE)
+
+    def set_voice(self, substring, rate_wpm=None):
+        """Switch to the first installed voice whose description contains
+        `substring` (case-insensitive), at `rate_wpm` (None = config default).
+        Fail-soft: an unknown/None voice keeps the current one — on a machine
+        with only Zira and David installed, a third persona simply shares a
+        voice and the spoken announcement carries the switch signal. Call only
+        between utterances, from the thread that owns the COM object."""
+        self._voice.Rate = _wpm_to_sapi_rate(rate_wpm or cfg.TTS_RATE)
+        if not substring:
+            return
+        for token in self._voice.GetVoices():
+            if substring.lower() in token.GetDescription().lower():
+                self._voice.Voice = token
+                return
+        log.info("no installed voice matches %r; keeping current voice", substring)
 
     def speak(self, text: str):
         self._voice.Speak(text)  # synchronous, blocks until done
@@ -79,6 +92,17 @@ class Speaker:
     @property
     def supports_async(self) -> bool:
         return self._backend.supports_async
+
+    def set_voice(self, substring, rate_wpm=None):
+        """Per-persona voice switching (see agents.py). No-op on the pyttsx3
+        fallback — there the personas share the one system voice."""
+        backend_set = getattr(self._backend, "set_voice", None)
+        if backend_set is None:
+            return
+        try:
+            backend_set(substring, rate_wpm)
+        except Exception:  # noqa: BLE001 - a voice change must never crash speech
+            log.exception("set_voice(%r) failed; keeping current voice", substring)
 
     def speak(self, text: str):
         """Blocking speak (used when interruption isn't needed)."""

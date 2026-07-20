@@ -23,6 +23,7 @@ except ImportError:
 
 import anthropic
 
+import agents
 import categories
 import config as cfg
 from audio import AudioEngine
@@ -294,6 +295,17 @@ class Agent:
         self._interrupted_reply = None
         self._interrupted_remaining = None
 
+        # Spoken agent addressing: "Bob, what's my last note?" or "switch to
+        # Cobe". Detected on the transcript directly — zero model calls; any
+        # free-form phrasing the regex misses is covered by the switch_agent
+        # tool the active persona can call.
+        target, remainder = agents.match_address(text)
+        if target and target != self.llm.active:
+            self._switch_agent(target)
+            if not remainder:
+                return  # a pure switch — back to listening in the new voice
+            text = remainder
+
         reply = self._converse_with_followups(text)
         if not reply:
             # Expected only when a hotkey cut the turn short. An empty reply
@@ -314,10 +326,38 @@ class Agent:
         pending = self.llm.take_pending_note()
         if pending:
             self._save_pending_note(pending)
+            if self.llm.take_pending_switch():
+                # Both in one turn is a model overreach; the note save owns the
+                # turn, and a stale switch must not fire minutes later.
+                self.log.info("dropped pending agent switch (note save took the turn)")
             return
+
+        # The model handed the conversation to another persona (switch_agent):
+        # the goodbye above came out in the old voice; switch now and, if the
+        # user's question was forwarded, let the new persona answer it.
+        switch = self.llm.take_pending_switch()
+        if switch:
+            key, forward = switch
+            self._switch_agent(key)
+            if forward:
+                forwarded = self.llm.converse(forward)
+                if forwarded:
+                    self.log.info("agent: %s", forwarded)
+                    interrupted = self.say(forwarded, save_resume=True)
 
         if not interrupted:
             self.audio.flush()
+
+    def _switch_agent(self, key):
+        """Flip the active persona everywhere it shows: model/tools/prompt
+        (llm.switch_to), the speaking voice, and a short spoken announcement —
+        the announcement is the load-bearing signal on machines where two
+        personas share a SAPI voice."""
+        self.llm.switch_to(key)
+        hat = agents.AGENTS[key]
+        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
+        self.log.info("=== talking to %s ===", hat["name"])
+        self.say(f"{hat['name']} here.", voice=False, commands=False)
 
     def _converse_with_followups(self, text: str) -> str:
         """Collect the *whole* turn before calling the model, so a pause
@@ -639,7 +679,10 @@ class Agent:
         self.log.info(
             "Ready. Headset button: 1-click=mute  2-click=note  3-click=quit"
         )
-        self.say("Voice agent ready. Conversation mode.", voice=False, commands=False)
+        hat = agents.AGENTS[self.llm.active]
+        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
+        self.say(f"Voice agent ready. {hat['name']} speaking.",
+                 voice=False, commands=False)
         try:
             while self.running:
                 try:

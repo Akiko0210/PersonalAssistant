@@ -31,6 +31,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import agents as agents_registry
 import categories
 import config as cfg
 from atomic_io import write_json_atomic
@@ -303,6 +304,7 @@ def api_overview():
 
     return {
         "agent_running": agent_running(),
+        "talking_to": talking_to(),
         "total_notes": len(index),
         "folder_counts": [
             {"slug": slug, "display": meta["display"], "count": counts.get(slug, 0)}
@@ -402,6 +404,144 @@ def api_search(query):
         if len(results) >= 30:
             break
     return {"results": results}
+
+
+def talking_to():
+    """Which persona is active, from the state file llm.switch_to writes.
+    Meaningful only while the agent runs; the dashboard greys it out otherwise."""
+    state = _read_json(cfg.AGENT_STATE_PATH, {})
+    return state if isinstance(state, dict) else {}
+
+
+def api_voices():
+    """Installed SAPI voices, for the per-agent voice dropdown. Read from the
+    registry (stdlib winreg) rather than COM: the same tokens SAPI's
+    GetVoices() returns, but with no pywin32 dependency and no per-thread
+    CoInitialize headaches under ThreadingHTTPServer. [] on any failure, and
+    the UI falls back to a free-text input."""
+    voices = []
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Speech\Voices\Tokens") as k:
+            for i in range(winreg.QueryInfoKey(k)[0]):
+                name = winreg.EnumKey(k, i)
+                try:
+                    voices.append(winreg.QueryValue(k, name))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return {"voices": voices}
+
+
+def api_agents():
+    """The persona registry: coded defaults overlaid with data/agents.json,
+    plus who's active. Editable fields only — tool lists are shown read-only."""
+    agents_registry.load_agents()  # pick up saved edits fresh, like folder_registry
+    overlay = _read_json(cfg.AGENTS_PATH, {})
+    defaults = agents_registry.defaults()
+    out = []
+    for key, agent in agents_registry.AGENTS.items():
+        out.append({
+            "key": key,
+            "name": agent["name"],
+            "role": agent["role"],
+            "persona": agent["persona"],
+            "aliases": list(agent["aliases"]),
+            "model": agent["model"],
+            "tts_voice": agent["tts_voice"],
+            "tts_rate": agent["tts_rate"],
+            "tools": sorted(agent["tools"]),
+            "default": {f: (list(v) if isinstance(v, tuple) else v)
+                        for f, v in defaults[key].items() if f != "tools"},
+            "modified": key in overlay if isinstance(overlay, dict) else False,
+        })
+    return {"agents": out,
+            "default_agent": agents_registry.DEFAULT_AGENT,
+            "models": [dict(value=k, label=cfg.CONVO_MODEL_LABELS.get(v, v))
+                       for k, v in cfg.CONVO_MODELS.items()],
+            "talking_to": talking_to(),
+            "agent_running": agent_running(),
+            "agents_path": str(cfg.AGENTS_PATH)}
+
+
+def save_agents(payload):
+    """Validate and persist persona edits to data/agents.json. Payload:
+    {agent_key: {field: value, ...} | null} — null resets that agent to its
+    coded defaults. Unknown agents/fields are errors, not silently dropped."""
+    if not isinstance(payload, dict):
+        return {"ok": False, "errors": {"_": "expected an object"}}
+    agents_registry.load_agents()
+    overlay = _read_json(cfg.AGENTS_PATH, {})
+    if not isinstance(overlay, dict):
+        overlay = {}
+    errors = {}
+    model_keys = set(cfg.CONVO_MODELS)
+    for key, edits in payload.items():
+        if key not in agents_registry.AGENTS:
+            errors[key] = "unknown agent"
+            continue
+        if edits is None:
+            overlay.pop(key, None)  # reset to coded defaults
+            continue
+        if not isinstance(edits, dict):
+            errors[key] = "expected an object of fields"
+            continue
+        clean = {}
+        for field, value in edits.items():
+            if field == "model":
+                if value not in model_keys:
+                    errors[f"{key}.model"] = "not one of the known models"
+                    continue
+                clean[field] = value
+            elif field in ("role", "persona"):
+                if not isinstance(value, str) or not value.strip():
+                    errors[f"{key}.{field}"] = "may not be empty"
+                    continue
+                clean[field] = value.strip()
+            elif field == "aliases":
+                if not isinstance(value, list):
+                    errors[f"{key}.aliases"] = "expected a list of names"
+                    continue
+                words = [str(w).strip().lower() for w in value if str(w).strip()]
+                if not words:
+                    errors[f"{key}.aliases"] = "need at least one name"
+                    continue
+                clean[field] = sorted(set(words))
+            elif field == "tts_voice":
+                clean[field] = (str(value).strip() or None) if value else None
+            elif field == "tts_rate":
+                if value in (None, ""):
+                    clean[field] = None
+                else:
+                    try:
+                        rate = int(value)
+                    except (TypeError, ValueError):
+                        errors[f"{key}.tts_rate"] = "expected a number"
+                        continue
+                    if not 80 <= rate <= 400:
+                        errors[f"{key}.tts_rate"] = "must be 80-400 wpm"
+                        continue
+                    clean[field] = rate
+            else:
+                errors[f"{key}.{field}"] = "not an editable field"
+        if clean:
+            overlay[key] = {**overlay.get(key, {}), **clean}
+    # Aliases must stay globally unique or match_address becomes ambiguous.
+    seen = {}
+    for key, agent in agents_registry.AGENTS.items():
+        aliases = (overlay.get(key, {}).get("aliases")
+                   or list(agent["aliases"]))
+        for a in aliases:
+            if a in seen and seen[a] != key:
+                errors[f"{key}.aliases"] = f"'{a}' already answers for {seen[a]}"
+            seen[a] = key
+    if errors:
+        return {"ok": False, "errors": errors}
+    write_json_atomic(cfg.AGENTS_PATH, overlay)
+    agents_registry.load_agents()  # reflect immediately in this process
+    return {"ok": True, "saved": sorted(overlay)}
 
 
 def api_config():
@@ -546,6 +686,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, api_search(arg("q", "")))
             if route == "/api/config":
                 return self._send(200, api_config())
+            if route == "/api/agents":
+                return self._send(200, api_agents())
+            if route == "/api/voices":
+                return self._send(200, api_voices())
             if route == "/api/history":
                 return self._send(200, api_history(int(arg("limit", "200"))))
             if route == "/api/memory":
@@ -565,12 +709,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urlparse(self.path)
-        if url.path != "/api/config":
+        savers = {"/api/config": save_config, "/api/agents": save_agents}
+        saver = savers.get(url.path)
+        if saver is None:
             return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
-            result = save_config(payload)
+            result = saver(payload)
             return self._send(200 if result["ok"] else 400, result)
         except (ValueError, TypeError) as e:
             return self._send(400, {"error": f"bad request: {e}"})

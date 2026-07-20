@@ -140,6 +140,11 @@ views.overview = async function () {
         <div class="t-note">awaiting consolidation</div></div>
       <div class="tile"><div class="t-label">Knowledge docs</div><div class="t-value">${o.knowledge_docs}</div>
         <div class="t-note">ingested sources</div></div>
+      <div class="tile small"><div class="t-label">Talking to</div>
+        <div class="t-value">${o.agent_running && o.talking_to.name
+          ? `<span class="agent-chip agent-${esc(o.talking_to.active)}">${esc(o.talking_to.name)}</span>`
+          : `<span class="t-muted">${o.talking_to.name ? esc(o.talking_to.name) + " (agent stopped)" : "—"}</span>`}</div>
+        <div class="t-note"><a href="#/agents">manage agents</a></div></div>
       <div class="tile small"><div class="t-label">Conversation model</div><div class="t-value">${esc(o.convo_model)}</div>
         <div class="t-note">summaries: ${esc(o.summary_model)}</div></div>
       <div class="tile small"><div class="t-label">Whisper</div><div class="t-value">${esc(o.whisper_model)}</div>
@@ -169,6 +174,173 @@ views.overview = async function () {
         <tbody>${recent || '<tr><td colspan="3" class="empty">No notes yet</td></tr>'}</tbody>
       </table>
     </div>`;
+};
+
+/* ================= Agents ================= */
+views.agents = async function () {
+  const sub = "The personas you talk to by voice — say a name (\"Bob, …\") or \"switch to Cobe\" to change who answers.";
+  main.innerHTML = header("Agents", sub);
+  let data, voices;
+  try {
+    data = await api("/api/agents");
+    voices = (await api("/api/voices")).voices;
+  } catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
+
+  // pending edits: key -> {field: value}; key -> null means "reset this agent"
+  const pending = {};
+
+  function agentVal(a, field) {
+    const p = pending[a.key];
+    return p && field in p ? p[field] : a[field];
+  }
+
+  function voiceOptions(current) {
+    const opts = [`<option value="" ${!current ? "selected" : ""}>(system default)</option>`];
+    let matched = false;
+    for (const v of voices) {
+      // The registry stores a substring ("Zira"); match it against full names.
+      const sel = current && v.toLowerCase().includes(current.toLowerCase());
+      if (sel) matched = true;
+      opts.push(`<option value="${esc(v)}" ${sel ? "selected" : ""}>${esc(v)}</option>`);
+    }
+    if (current && !matched)
+      opts.push(`<option value="${esc(current)}" selected>${esc(current)} (not installed)</option>`);
+    return opts.join("");
+  }
+
+  function cardHtml(a) {
+    const isDefault = a.key === data.default_agent;
+    const modified = a.modified || a.key in pending;
+    return `
+      <div class="card agent-card" data-agent="${esc(a.key)}">
+        <div class="ac-head">
+          <span class="agent-dot agent-${esc(a.key)}"></span>
+          <h2>${esc(a.name)}</h2>
+          ${isDefault ? '<span class="badge">default</span>' : ""}
+          ${modified ? '<span class="badge">modified</span>' : ""}
+          ${data.talking_to.active === a.key && data.agent_running
+            ? '<span class="badge live">talking now</span>' : ""}
+          <button class="btn-ghost ac-reset" data-resetagent="${esc(a.key)}">Reset to defaults</button>
+        </div>
+        <div class="ac-grid">
+          <label class="ac-field"><span>Role (one line)</span>
+            <input class="f-text" data-agent-field="role" value="${esc(agentVal(a, "role"))}"></label>
+          <label class="ac-field"><span>Model</span>
+            <select class="f-select" data-agent-field="model">
+              ${data.models.map(m => `<option value="${esc(m.value)}"
+                ${m.value === agentVal(a, "model") ? "selected" : ""}>${esc(m.label)}</option>`).join("")}
+            </select></label>
+          <label class="ac-field"><span>Voice</span>
+            ${voices.length
+              ? `<select class="f-select" data-agent-field="tts_voice">${voiceOptions(agentVal(a, "tts_voice"))}</select>`
+              : `<input class="f-text" data-agent-field="tts_voice" value="${esc(agentVal(a, "tts_voice") || "")}"
+                        placeholder="SAPI voice substring">`}</label>
+          <label class="ac-field"><span>Speaking rate (wpm, empty = default)</span>
+            <input class="f-num" type="number" min="80" max="400" step="5"
+                   data-agent-field="tts_rate" value="${agentVal(a, "tts_rate") ?? ""}"></label>
+        </div>
+        <div class="ac-field"><span>Spoken names (how you address them — include likely mishearings)</span>
+          <div class="words-wrap" data-agent-words="${esc(a.key)}">
+            ${agentVal(a, "aliases").map(w =>
+              `<span class="word-tag">${esc(w)}<button data-word="${esc(w)}" title="remove">✕</button></span>`).join("")}
+            <input class="word-add" placeholder="+ add name">
+          </div></div>
+        <div class="ac-field"><span>Persona (system-prompt block)</span>
+          <textarea class="ac-persona" data-agent-field="persona" rows="7">${esc(agentVal(a, "persona"))}</textarea></div>
+        <div class="ac-tools">Tools: ${a.tools.map(t => `<code>${esc(t)}</code>`).join(" ")}
+          <span class="ac-tools-note">tool access is fixed in code (agents.py)</span></div>
+      </div>`;
+  }
+
+  function render() {
+    main.innerHTML = header("Agents", sub) + `
+      <div class="config-banner">
+        ⚠ Changes are written to <code>data/agents.json</code> and picked up when the agent
+        ${data.agent_running ? "is <strong>restarted</strong> (it is running now)" : "next starts"}.
+        Tool access stays in code.
+      </div>` +
+      data.agents.map(cardHtml).join("") + `
+      <div class="save-bar">
+        <button class="btn-primary" id="agents-save">Save changes</button>
+        <span class="save-msg" id="agents-msg">${Object.keys(pending).length} agent(s) edited</span>
+      </div>`;
+    wire();
+  }
+
+  function edit(key, field, value) {
+    if (pending[key] === null) pending[key] = {};
+    pending[key] = { ...(pending[key] || {}), [field]: value };
+  }
+
+  function wire() {
+    main.querySelectorAll(".agent-card").forEach(card => {
+      const key = card.dataset.agent;
+      card.querySelectorAll("[data-agent-field]").forEach(inp => {
+        inp.onchange = () => {
+          let v = inp.value;
+          if (inp.dataset.agentField === "tts_rate") v = v === "" ? null : Number(v);
+          if (inp.dataset.agentField === "tts_voice") v = v || null;
+          edit(key, inp.dataset.agentField, v);
+          $("#agents-msg").textContent = `${Object.keys(pending).length} agent(s) edited`;
+        };
+      });
+      const wrap = card.querySelector("[data-agent-words]");
+      const agent = data.agents.find(a => a.key === key);
+      wrap.querySelector(".word-add").onkeydown = (e) => {
+        if (e.key !== "Enter") return;
+        const w = e.target.value.trim().toLowerCase();
+        if (!w) return;
+        const cur = [...agentVal(agent, "aliases")];
+        if (!cur.includes(w)) cur.push(w);
+        edit(key, "aliases", cur);
+        render();
+      };
+      wrap.querySelectorAll(".word-tag button").forEach(b => {
+        b.onclick = () => {
+          edit(key, "aliases", agentVal(agent, "aliases").filter(w => w !== b.dataset.word));
+          render();
+        };
+      });
+      card.querySelector("[data-resetagent]").onclick = () => {
+        pending[key] = null;  // null = reset this agent to coded defaults
+        render();
+      };
+    });
+    $("#agents-save").onclick = save;
+  }
+
+  async function save() {
+    const msg = $("#agents-msg");
+    msg.className = "save-msg"; msg.textContent = "Saving…";
+    try {
+      const r = await fetch("/api/agents", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pending),
+      });
+      const body = await r.json();
+      if (body.ok) {
+        msg.className = "save-msg ok";
+        msg.textContent = "Saved. " + (data.agent_running
+          ? "Restart the agent to apply." : "Applied on next agent start.");
+        for (const k of Object.keys(pending)) delete pending[k];
+        data = await api("/api/agents");
+        render();
+        $("#agents-msg").className = "save-msg ok";
+        $("#agents-msg").textContent = "Saved. " + (data.agent_running
+          ? "Restart the agent to apply." : "Applied on next agent start.");
+      } else {
+        msg.className = "save-msg err";
+        msg.textContent = "Not saved: " + Object.entries(body.errors || {})
+          .map(([k, v]) => `${k}: ${v}`).join("; ");
+      }
+    } catch (e) {
+      msg.className = "save-msg err";
+      msg.textContent = "Save failed: " + e.message;
+    }
+  }
+
+  render();
 };
 
 /* ================= Notes ================= */

@@ -31,8 +31,10 @@ class FakeMessages:
 
 
 def make_claude(responses):
+    import agents
     c = Claude.__new__(Claude)
     c.client = SimpleNamespace(messages=FakeMessages(responses))
+    c.active = agents.DEFAULT_AGENT
     c._ctx = SimpleNamespace(convo_model=None, events=[])
     c.history = []
     c.idle = SimpleNamespace(start=lambda: None, stop=lambda: None)

@@ -1,12 +1,15 @@
 """Claude integration: conversation (with note-access tools) and summarisation."""
 
 import logging
+from datetime import datetime
 
 import anthropic
 
+import agents
 import categories
 import config as cfg
 import history as hist
+from atomic_io import write_json_atomic
 from discord_data import DiscordData
 from knowledge import KnowledgeStore
 from memory import ConversationMemory
@@ -63,12 +66,23 @@ class Claude:
         # Long-term memory must exist before the history loads: anything the
         # rolling window drops is staged into it rather than lost.
         self.memory = ConversationMemory()
+        # Personas ("hats") over the one shared conversation: per-agent system
+        # prompt, tools, model, and voice — but a single history. The registry
+        # defaults are overlaid with any dashboard edits first.
+        agents.load_agents()
+        self.active = agents.DEFAULT_AGENT
+        # Per-hat snapshots of a mid-session set_conversation_model choice, so
+        # "make Cobe smarter" survives switching away and back but never
+        # bleeds into the other personas.
+        self._model_overrides = {}
         # Everything tool handlers may touch (see tools/); also carries the
         # pending conversation note and the active conversation model (which the
         # set_conversation_model tool can switch mid-session).
         self._ctx = ToolContext(store=self.store, discord=self.discord,
                                 kb=self.kb, memory=self.memory,
-                                convo_model=cfg.CONVO_MODEL)
+                                convo_model=self._registry_model(self.active),
+                                active_agent=self.active)
+        self._write_agent_state()
         # Conversation memory: restore the last conversation (trimmed) so the agent
         # remembers it across restarts; saved back to disk after every turn.
         self.history = self._load_history()
@@ -89,6 +103,45 @@ class Claude:
         """Hand the pending conversation note (if any) to the agent, clearing it."""
         pending, self.pending_note = self.pending_note, None
         return pending
+
+    def take_pending_switch(self):
+        """Hand a pending agent switch (if any) to the agent, clearing it.
+        Returns (agent_key, forward_text) or None."""
+        pending, self._ctx.pending_switch = self._ctx.pending_switch, None
+        return pending
+
+    # --- personas ("hats") ----------------------------------------------------
+    @staticmethod
+    def _registry_model(key):
+        """The API model id an agent's registry entry names."""
+        return cfg.CONVO_MODELS.get(agents.AGENTS[key]["model"], cfg.CONVO_MODEL)
+
+    def switch_to(self, key):
+        """Make `key` the active persona: its system prompt, tool allowlist,
+        and model apply from the next converse() on. The one shared history is
+        untouched — hats share memory by design."""
+        if key == self.active:
+            return
+        # Preserve a mid-session "switch to opus" for the hat it was made in.
+        self._model_overrides[self.active] = self._ctx.convo_model
+        self.active = key
+        self._ctx.active_agent = key
+        self._ctx.convo_model = (self._model_overrides.get(key)
+                                 or self._registry_model(key))
+        self._write_agent_state()
+        log.info("active agent -> %s (%s)", key, self._ctx.convo_model)
+
+    def _write_agent_state(self):
+        """Tell the dashboard who is talking. Telemetry only — never read back,
+        and never allowed to break a switch."""
+        try:
+            write_json_atomic(cfg.AGENT_STATE_PATH, {
+                "active": self.active,
+                "name": agents.AGENTS[self.active]["name"],
+                "since": datetime.now().isoformat(timespec="seconds"),
+            })
+        except OSError as e:
+            log.warning("could not write agent state: %s", e)
 
     def record_tool_event(self, text):
         """Record a factual note about work a tool did beyond its return string
@@ -191,18 +244,20 @@ class Claude:
                 # Read the model fresh each pass: if set_conversation_model runs
                 # during this turn's tool loop, the follow-up call (and every
                 # later turn) uses the newly chosen model.
-                model = self._ctx.convo_model or cfg.CONVO_MODEL
-                system = cfg.CONVO_SYSTEM + (
+                model = self._ctx.convo_model or self._registry_model(self.active)
+                hat = agents.AGENTS[self.active]
+                system = (cfg.CONVO_SYSTEM_BASE + "\n\n" + hat["persona"]
+                          + agents.roster_block(self.active) + (
                     f"\n\nYou are currently answering as {cfg.convo_model_label(model)}. "
                     "If the user asks to change models, or for a smarter or faster "
                     "one, use the set_conversation_model tool."
-                )
+                ))
                 try:
                     resp = self.client.messages.create(
                         model=model,
                         max_tokens=cfg.CONVO_MAX_TOKENS,
                         system=system,
-                        tools=api_tools(),
+                        tools=api_tools(include=hat["tools"]),
                         thinking={"type": "disabled"},
                         messages=self.history,
                     )
@@ -210,10 +265,12 @@ class Claude:
                     # A switched-to model id the API no longer serves must not
                     # brick every later turn — the voice fix (switching back)
                     # itself needs a working model call. Revert and retry.
-                    if model != cfg.CONVO_MODEL:
+                    fallback = self._registry_model(self.active)
+                    if model != fallback:
                         log.warning("model %s rejected (not found); reverting "
-                                    "to default %s", model, cfg.CONVO_MODEL)
-                        self._ctx.convo_model = cfg.CONVO_MODEL
+                                    "to %s's default %s", model,
+                                    hat["name"], fallback)
+                        self._ctx.convo_model = fallback
                         continue
                     raise
                 self.history.append(
@@ -365,11 +422,13 @@ class Claude:
             },
         }
         # save_conversation_note is excluded (we're already filing a note, so a
-        # second pending note mid-dialogue would be circular); so is
-        # set_conversation_model — switching models is out of scope for the
-        # focused "where does this go" exchange.
+        # second pending note mid-dialogue would be circular); so are
+        # set_conversation_model and switch_agent — switching models or
+        # personas is out of scope for the focused "where does this go"
+        # exchange.
         tools = api_tools(exclude={"save_conversation_note",
-                                   "set_conversation_model"}) + [choose_tool]
+                                   "set_conversation_model",
+                                   "switch_agent"}) + [choose_tool]
         history = [{"role": "user",
                     "content": "I just finished recording a note. Where should it go?"}]
         try:

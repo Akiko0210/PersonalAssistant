@@ -31,6 +31,13 @@ class ToolContext:
     # Active conversation model id; set by set_conversation_model and read by
     # Claude.converse each call, so the user can switch models by voice.
     convo_model: str = None
+    # Key of the persona currently answering (see agents.py); read by
+    # switch_agent so "switch to Bob" while already Bob can say so.
+    active_agent: str = None
+    # Set by switch_agent: (agent_key, forward_text). The agent picks it up
+    # after the reply and performs the actual switch + optional forwarded
+    # question (see voice_agent) — the same deferred pattern as pending_note.
+    pending_switch: tuple = field(default=None)
     # Factual notes about work a tool did *beyond* the string it returned — a
     # deferred save, or a sub-dialogue that ran in its own model memory. Only
     # a tool's return value lands in history automatically; anything that
@@ -58,10 +65,13 @@ def tool(schema):
     return deco
 
 
-def api_tools(exclude=()):
-    """The `tools=` list for a messages.create call, optionally excluding
-    tools that don't fit the current dialogue."""
-    return [schema for name, (schema, _) in _REGISTRY.items() if name not in exclude]
+def api_tools(exclude=(), include=None):
+    """The `tools=` list for a messages.create call. `exclude` drops tools
+    that don't fit the current dialogue; `include` (an allowlist of names)
+    keeps only those — used for per-agent tool subsets. Registry insertion
+    order is preserved either way."""
+    return [schema for name, (schema, _) in _REGISTRY.items()
+            if name not in exclude and (include is None or name in include)]
 
 
 def dispatch(ctx, name, args):
@@ -86,3 +96,4 @@ from tools import memory_tools    # noqa: E402,F401
 from tools import knowledge_tools # noqa: E402,F401
 from tools import model_tools     # noqa: E402,F401
 from tools import project_tools   # noqa: E402,F401
+from tools import agent_tools     # noqa: E402,F401

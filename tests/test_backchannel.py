@@ -55,6 +55,8 @@ class FakeSTT:
 
 
 class FakeLLM:
+    active = "alice"  # persona routing needs to know who is active
+
     def __init__(self):
         self.calls = []
 
@@ -66,6 +68,9 @@ class FakeLLM:
         pass
 
     def take_pending_note(self):
+        return None
+
+    def take_pending_switch(self):
         return None
 
 
