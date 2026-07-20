@@ -4,6 +4,7 @@ Everything tunable lives here so behaviour can be changed without touching the
 logic modules.
 """
 
+import json
 from pathlib import Path
 
 # --- Paths -------------------------------------------------------------------
@@ -281,6 +282,88 @@ CONVO_SYSTEM = (
     "save or update notes, those were errors — never imitate them."
 )
 
+
+
+# --- Dashboard config overrides ----------------------------------------------
+# The web dashboard (dashboard.py) lets the user adjust tunables visually. Its
+# edits are persisted to this file and applied here, at import time, on top of
+# the defaults above — so a dashboard change reaches the agent on its next
+# start without anyone editing this module. Only the whitelisted names below
+# can be overridden; anything else in the file is ignored. A missing, corrupt,
+# or partially-invalid file must never break startup: every failure falls back
+# to the coded default.
+OVERRIDES_PATH = DATA_DIR / "config_overrides.json"
+
+
+def _cast_words(value):
+    return frozenset(str(w).strip().lower() for w in value if str(w).strip())
+
+
+def _cast_optional_str(value):
+    return None if value in (None, "") else str(value)
+
+
+# name -> caster applied to the JSON value before it replaces the default.
+OVERRIDABLE = {
+    # turn taking / endpointing
+    "CONVO_ENDPOINT_MS": int, "NOTE_ENDPOINT_MS": int, "SPEECH_PAD_MS": int,
+    "TRIGGER_RATIO": float, "MAX_UTTERANCE_S": int, "VAD_AGGRESSIVENESS": int,
+    "CONTINUATION_SETTLE_MS": int, "CONTINUATION_GRACE_MS": int,
+    "MAX_CONTINUATION_ROUNDS": int,
+    # barge-in
+    "BARGE_IN": bool, "BARGE_IN_MS": int, "BARGE_IN_DECAY": float,
+    "BARGE_IN_ENERGY": int, "BARGE_IN_ENERGY_RATIO": float,
+    "BARGE_IN_CALIB_MS": int,
+    # backchannel
+    "BACKCHANNEL_WORDS": _cast_words, "BACKCHANNEL_MAX_WORDS": int,
+    # models / tokens
+    "CONVO_MODEL": str, "SUMMARY_MODEL": str, "CONVO_MAX_TOKENS": int,
+    "SUMMARY_MAX_TOKENS": int, "CONVO_MAX_TOOL_ROUNDS": int,
+    # speech engines
+    "WHISPER_MODEL": str, "TTS_RATE": int, "TTS_VOICE": _cast_optional_str,
+    # memory / search
+    "HISTORY_MAX_MESSAGES": int, "SEARCH_RESULTS": int, "KB_SEARCH_RESULTS": int,
+    "MEMORY_SEARCH_RESULTS": int,
+    # headset button
+    "MEDIA_KEEPALIVE": bool, "MEDIA_CLICK_DEDUPE_S": float,
+}
+
+# Snapshot of the coded defaults, taken before any override is applied, so the
+# dashboard can show "default vs current" and offer per-field reset.
+CONFIG_DEFAULTS = {}
+
+
+def apply_overrides(data):
+    """Apply a dict of {name: value} onto this module's globals. Unknown names
+    and values the caster rejects are skipped. Returns the list of names
+    actually applied. Factored out of the file-load path so it can be tested
+    without touching the real overrides file."""
+    applied = []
+    if not isinstance(data, dict):
+        return applied
+    for name, value in data.items():
+        caster = OVERRIDABLE.get(name)
+        if caster is None:
+            continue
+        try:
+            globals()[name] = caster(value)
+            applied.append(name)
+        except (TypeError, ValueError):
+            pass
+    return applied
+
+
+def _load_overrides():
+    for name in OVERRIDABLE:
+        CONFIG_DEFAULTS[name] = globals()[name]
+    try:
+        data = json.loads(OVERRIDES_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    apply_overrides(data)
+
+
+_load_overrides()
 
 
 def ensure_dirs():

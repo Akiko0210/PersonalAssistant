@@ -127,7 +127,19 @@ unit-tested without a microphone, speakers, or an API key.
 
 ### Configuration
 - **`config.py`** — pure constants: paths, audio/VAD parameters, barge-in
-  thresholds, model ids, the system prompt, and `ensure_dirs()`.
+  thresholds, model ids, the system prompt, and `ensure_dirs()`. At import it
+  overlays `data/config_overrides.json` (whitelisted tunables only) so values
+  adjusted in the dashboard reach the agent on its next start.
+
+### Dashboard
+- **`dashboard.py`** + **`dashboard/`** — a local web dashboard
+  (`python dashboard.py`, or `dashboard.bat`; http://127.0.0.1:8765). Browse
+  notes/folders/transcripts, inspect the live conversation history, memory
+  staging, the knowledge base, Discord captures, and session logs — and edit
+  the tunable config values from a form. Stdlib-only (no chromadb import, so
+  it starts instantly and never loads a second embedding model); read-only
+  except for `data/config_overrides.json`, written atomically. Its search is
+  a plain substring scan — semantic search stays a voice feature.
 
 ### Tools package
 - **`tools/`** — the tool registry (§5). `__init__.py` holds the `@tool`
@@ -302,7 +314,9 @@ words. See `MEDIA_CONTROL.md` for the full hardware story.
 - **Swap an engine** — STT/TTS/embedding choices are isolated behind `stt.py` /
   `tts.py` / the stores; a new backend is a drop-in.
 - **Tuning** — audio thresholds, models, endpointing, and barge-in sensitivity
-  are all constants in `config.py`.
+  are all constants in `config.py`, adjustable visually via the dashboard
+  (`dashboard.bat`) — its edits persist to `data/config_overrides.json` and
+  apply on the agent's next start.
 
 ### Roadmap (not yet built)
 - **Event-driven core** — replace the blocking loop with actors (Ears, Mouth,
