@@ -214,6 +214,13 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
   padding: 13px 2px; border-bottom: 1px solid var(--grid);
 }
 .field:last-child { border-bottom: none; }
+/* Full-width stacked variant for tall controls (the word-tag editor): label,
+   control, side, and help each occupy their own full-width row so nothing
+   overlaps. */
+.field-wide { grid-template-columns: 1fr; align-items: start; gap: 8px; }
+.field-wide .f-control { width: 100%; }
+.field-wide .f-side { justify-content: flex-start; }
+.field-wide .f-default { white-space: normal; }
 .f-label { font-weight: 650; font-size: 14.5px; }
 .f-label .f-key { display: block; color: var(--muted); font-size: 11.5px; font-weight: 500; font-family: ui-monospace, Consolas, monospace; }
 .f-help { grid-column: 1 / -1; color: var(--muted); font-size: 13px; margin-top: -6px; padding-bottom: 2px; }
@@ -259,7 +266,7 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .toggle input:checked ~ .knob { transform: translateX(20px); background: var(--accent); }
 
 /* words editor */
-.words-wrap { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.words-wrap { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; width: 100%; }
 .word-tag {
   background: var(--surface-2); border: 1px solid var(--hairline);
   border-radius: 6px; padding: 3px 9px; font-size: 13px; color: var(--ink-2);

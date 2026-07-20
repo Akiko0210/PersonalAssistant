@@ -331,8 +331,11 @@ views.config = async function () {
 
   function fieldHtml(t) {
     const overridden = t.key in pending;
+    // Tall controls (the word-tag editor) get their own full-width stacked
+    // layout so they never collide with the centered label / default column.
+    const wide = t.type === "words" ? " field-wide" : "";
     return `
-      <div class="field" data-field="${t.key}">
+      <div class="field${wide}" data-field="${t.key}">
         <div class="f-label">${esc(t.label)}<span class="f-key">${t.key}</span></div>
         <div class="f-control">${controlHtml(t)}</div>
         <div class="f-side">
