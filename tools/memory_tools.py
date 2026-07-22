@@ -22,4 +22,4 @@ from tools import tool
     },
 })
 def search_past_conversations(ctx, args):
-    return ctx.memory.search(args["query"])
+    return ctx.memory.search(args["query"], client=ctx.client)

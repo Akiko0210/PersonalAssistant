@@ -65,6 +65,79 @@ class TestSearchStaged(unittest.TestCase):
         self.assertEqual(self.mem.search_staged("anything"), [])
 
 
+class FakeBlock:
+    def __init__(self, text):
+        self.type = "text"
+        self.text = text
+
+
+class FakeClient:
+    """Captures the recall prompt; returns a scripted answer or raises."""
+
+    def __init__(self, answer=None, error=None):
+        self.prompts = []
+        self._answer, self._error = answer, error
+        self.messages = self
+
+    def create(self, **kwargs):
+        if self._error:
+            raise self._error
+        self.prompts.append(kwargs["messages"][0]["content"])
+        return type("R", (), {"content": [FakeBlock(self._answer)]})()
+
+
+class TestRecallStaged(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        patcher = mock.patch.object(cfg, "MEMORY_PENDING_PATH",
+                                    Path(self.dir) / "memory_pending.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mem = ConversationMemory.__new__(ConversationMemory)
+        # A pre-set empty collection keeps search() from loading the real
+        # embedding model + Chroma store inside a unit test.
+        self.mem._col = type("Col", (), {"count": lambda self: 0})()
+
+    def _stage(self, *lines):
+        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines])
+
+    def test_llm_read_answers_complex_queries(self):
+        # The staged text never contains the word "sizing" — a keyword scan
+        # whiffs, but the model reads everything and can still answer.
+        self._stage("put two-thirds into the thirty-five delta guts",
+                    "the rest goes to the fifteen delta tail")
+        client = FakeClient(answer="You decided two-thirds in the guts, "
+                                   "the rest in the tail.")
+        out = self.mem.recall_staged(client, "what did we decide about sizing?")
+        self.assertIn("two-thirds", out)
+        # The model saw the verbatim staged lines and the query.
+        self.assertIn("thirty-five delta guts", client.prompts[0])
+        self.assertIn("sizing", client.prompts[0])
+
+    def test_nothing_relevant_is_an_answer_not_a_failure(self):
+        self._stage("we talked about the weather")
+        client = FakeClient(answer="NOTHING_RELEVANT")
+        self.assertEqual(self.mem.recall_staged(client, "bitcoin"), "")
+
+    def test_call_failure_returns_none_for_keyword_fallback(self):
+        self._stage("delta sizing details")
+        client = FakeClient(error=ConnectionError("offline"))
+        self.assertIsNone(self.mem.recall_staged(client, "sizing"))
+        # ...and search() then still finds it via the keyword scan.
+        out = self.mem.search("delta sizing", client=client)
+        self.assertIn("delta sizing details", out)
+
+    def test_nothing_staged_never_calls_the_model(self):
+        client = FakeClient(answer="should never be used")
+        self.assertIsNone(self.mem.recall_staged(client, "anything"))
+        self.assertEqual(client.prompts, [])
+
+    def test_search_without_client_uses_keyword_scan(self):
+        self._stage("the kicker is sixty-five days out")
+        out = self.mem.search("kicker")
+        self.assertIn("kicker", out)
+
+
 class TestEveryHatCanSearchMemory(unittest.TestCase):
     def test_shared_memory_is_searchable_by_every_persona(self):
         # The conversation memory is shared; a hat without the search tool

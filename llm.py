@@ -80,6 +80,7 @@ class Claude:
         # set_conversation_model tool can switch mid-session).
         self._ctx = ToolContext(store=self.store, discord=self.discord,
                                 kb=self.kb, memory=self.memory,
+                                client=self.client,
                                 convo_model=self._registry_model(self.active),
                                 active_agent=self.active)
         self._write_agent_state()

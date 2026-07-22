@@ -36,6 +36,23 @@ markdown.
 Excerpt:
 """
 
+RECALL_PROMPT = """You are the memory-recall subsystem of a voice assistant. \
+Below are verbatim conversation lines that scrolled out of the assistant's \
+recent window earlier in THIS session (oldest first, timestamped). Extract \
+ONLY material that directly bears on the query: the relevant statements, \
+decisions, and numbers, keeping exact figures and quoting or closely \
+paraphrasing the lines, with their timestamps. Plain prose, no markdown, no \
+preamble. This is strict: if the lines below contain nothing that answers the \
+query, reply with exactly NOTHING_RELEVANT — never substitute loosely related \
+or recent-but-off-topic material, and never answer from your own knowledge. \
+An honest NOTHING_RELEVANT lets the assistant check its other memory stores; \
+an off-topic answer misleads it.
+
+Query: {query}
+
+Staged conversation:
+"""
+
 
 class ConversationMemory:
     def __init__(self):
@@ -147,6 +164,54 @@ class ConversationMemory:
         return f"archived {n_lines} message(s) into long-term memory ({date})"
 
     # --- retrieval (used as a Claude tool) -------------------------------------
+    def recall_staged(self, client, query: str) -> str | None:
+        """LLM read over the staged, not-yet-consolidated lines: hand the
+        WHOLE staged text to a cheap model with the query and let it extract
+        what's relevant. No retrieval step means no retrieval misses — this is
+        what makes complex queries ('what did we decide about sizing?') work,
+        where a keyword scan can only match literal words. Runs only when the
+        memory tool is invoked, so it costs nothing per turn; a full session's
+        staging is a few thousand tokens, well under a cent on the default
+        model.
+
+        Returns the extracted answer; "" when the model read everything and
+        found nothing relevant (a real answer — don't fall back); None when
+        there is nothing staged or the call failed (caller should fall back
+        to the offline keyword scan)."""
+        batches = self._load_pending()
+        lines = []
+        for batch in batches:
+            ts = (batch.get("ts") or "")[:16].replace("T", " ")
+            for line in batch.get("lines", []):
+                lines.append(f"[{ts}] {line}")
+        if not lines:
+            return None
+        # Budget the staged text, newest lines kept — 100k chars ≈ 25k tokens.
+        text, budget = [], 100_000
+        for line in reversed(lines):
+            budget -= len(line) + 1
+            if budget < 0:
+                break
+            text.append(line)
+        staged = "\n".join(reversed(text))
+        try:
+            resp = client.messages.create(
+                model=cfg.CONVO_MODEL,
+                max_tokens=cfg.MEMORY_MAX_TOKENS,
+                thinking={"type": "disabled"},
+                messages=[{"role": "user",
+                           "content": RECALL_PROMPT.format(query=query) + staged}],
+            )
+        except Exception as e:  # offline etc. — degrade to the keyword scan
+            log.warning("staged-memory recall failed (%s); using keyword scan", e)
+            return None
+        answer = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if not answer:
+            return None
+        if "NOTHING_RELEVANT" in answer:
+            return ""
+        return answer
+
     def search_staged(self, query: str, max_lines: int = 12) -> list:
         """Keyword scan over the staged, NOT-yet-consolidated lines — the
         verbatim text of messages that fell off the window since the last
@@ -167,16 +232,25 @@ class ConversationMemory:
                     hits.append(f"[{ts}] {' '.join(line.split())[:300]}")
         return hits[-max_lines:]  # most recent matches win the budget
 
-    def search(self, query: str, n: int = None) -> str:
+    def search(self, query: str, n: int = None, client=None) -> str:
         n = n or cfg.MEMORY_SEARCH_RESULTS
         sections = []
 
         # Same-session recall first: staged lines are newer than any archive
         # record and verbatim, so when both match, these are the better answer.
-        staged = self.search_staged(query)
-        if staged:
+        # Preferred path is the LLM read (handles queries the literal words
+        # can't match); the keyword scan is the offline/no-client fallback.
+        # recalled == "" means the model read everything and found nothing —
+        # that's an answer, not a failure, so no fallback then.
+        recalled = self.recall_staged(client, query) if client is not None else None
+        if recalled:
             sections.append("From earlier in this session (not yet archived):\n"
-                            + "\n".join(staged))
+                            + recalled)
+        elif recalled is None:
+            staged = self.search_staged(query)
+            if staged:
+                sections.append("From earlier in this session (not yet archived):\n"
+                                + "\n".join(staged))
 
         self._ensure_chroma()
         count = self._col.count()

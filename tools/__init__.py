@@ -25,6 +25,9 @@ class ToolContext:
     discord: object = None    # DiscordData
     kb: object = None         # KnowledgeStore
     memory: object = None     # ConversationMemory
+    # The shared anthropic client, for tools that make their own (cheap,
+    # on-demand) model calls — e.g. the staged-memory recall read.
+    client: object = None
     # Set by save_conversation_note; the agent picks it up after the reply and
     # runs the folder dialogue + save (see voice_agent._save_pending_note).
     pending_note: dict = field(default=None)
