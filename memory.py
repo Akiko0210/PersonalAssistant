@@ -16,6 +16,7 @@ nothing is dropped.
 
 import json
 import logging
+import re
 from datetime import datetime
 
 import chromadb
@@ -146,20 +147,53 @@ class ConversationMemory:
         return f"archived {n_lines} message(s) into long-term memory ({date})"
 
     # --- retrieval (used as a Claude tool) -------------------------------------
+    def search_staged(self, query: str, max_lines: int = 12) -> list:
+        """Keyword scan over the staged, NOT-yet-consolidated lines — the
+        verbatim text of messages that fell off the window since the last
+        boot. Consolidation only runs at startup, so without this a long
+        session has a blind spot: something said two hours ago is neither in
+        the live window nor searchable in the archive (exactly how Cobe lost
+        a trade structure mid-session, 2026-07-20 21:07). No model call, no
+        embeddings — the lines are already on disk; just read them."""
+        words = {w for w in re.findall(r"[a-z0-9']+", (query or "").lower())
+                 if len(w) > 2}
+        if not words:
+            return []
+        hits = []
+        for batch in self._load_pending():
+            ts = (batch.get("ts") or "")[:16].replace("T", " ")
+            for line in batch.get("lines", []):
+                if any(w in line.lower() for w in words):
+                    hits.append(f"[{ts}] {' '.join(line.split())[:300]}")
+        return hits[-max_lines:]  # most recent matches win the budget
+
     def search(self, query: str, n: int = None) -> str:
         n = n or cfg.MEMORY_SEARCH_RESULTS
+        sections = []
+
+        # Same-session recall first: staged lines are newer than any archive
+        # record and verbatim, so when both match, these are the better answer.
+        staged = self.search_staged(query)
+        if staged:
+            sections.append("From earlier in this session (not yet archived):\n"
+                            + "\n".join(staged))
+
         self._ensure_chroma()
         count = self._col.count()
+        if count:
+            res = self._col.query(query_texts=[query], n_results=min(n, count))
+            docs = res.get("documents", [[]])[0]
+            metas = res.get("metadatas", [[]])[0]
+            archived = [f"[{(meta or {}).get('date', 'unknown date')}] "
+                        f"{' '.join(doc.split())[:800]}"
+                        for doc, meta in zip(docs, metas)]
+            if archived:
+                sections.append("From archived conversations:\n"
+                                + "\n\n".join(archived))
+
+        if sections:
+            return "\n\n".join(sections)
         if count == 0:
             return ("No archived conversations yet — long-term memory only fills "
                     "up as older conversations age out of the recent window.")
-        res = self._col.query(query_texts=[query], n_results=min(n, count))
-        docs = res.get("documents", [[]])[0]
-        metas = res.get("metadatas", [[]])[0]
-        if not docs:
-            return "Nothing in past conversations matches that."
-        out = []
-        for doc, meta in zip(docs, metas):
-            date = (meta or {}).get("date", "unknown date")
-            out.append(f"[{date}] {' '.join(doc.split())[:800]}")
-        return "\n\n".join(out)
+        return "Nothing in past conversations matches that."

@@ -39,6 +39,7 @@ AGENTS = {
             "there."
         ),
         "tools": {"get_current_time", "describe_project",
+                  "search_past_conversations",
                   "set_conversation_model", "switch_agent"},
         "model": "haiku",       # key into cfg.CONVO_MODELS
         "tts_voice": "Zira",    # SAPI voice-name substring; None = default
@@ -104,8 +105,14 @@ AGENTS = {
             "character. The user trades mostly SPX and RUT index options, "
             "plus occasional options on crude oil futures."
         ),
+        # search_past_conversations is deliberately in EVERY hat's allowlist:
+        # the conversation memory is shared, so every persona must be able to
+        # search it — Cobe once couldn't recall a trade structure that had
+        # aged out of the window mid-session because only Bob had the tool
+        # (session_2026-07-20.log 21:07, "Review your memory").
         "tools": {"get_recent_discord_messages", "search_discord_messages",
                   "get_recent_trades", "search_knowledge", "get_current_time",
+                  "search_past_conversations",
                   "set_conversation_model", "switch_agent"},
         "model": "sonnet",      # analysis benefits from the stronger model
         # Only Zira + David are installed on this machine, so Cobe shares
