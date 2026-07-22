@@ -613,9 +613,17 @@ class Agent:
         suggested = self.store._match_category(pending.get("category")) or categories.DEFAULT_CATEGORY
 
         note_id = self.store.new_session()
-        # The "transcript" of a conversation note is the note body itself, so the
-        # note keeps the same two-file layout as recorded notes.
-        self.store.append_transcript(note_id, f"(Saved from conversation)\n\n{content}")
+        # The transcript preserves the SOURCE conversation, not a second copy
+        # of the note body: the user's own words are the part that can't be
+        # regenerated, and the summary file already holds the note. (Early
+        # versions wrote `content` here too, so transcript == summary and the
+        # actual spoken exchange was silently lost.)
+        excerpt = self.llm.conversation_excerpt()
+        self.store.append_transcript(
+            note_id,
+            "(Saved from conversation — the recent exchange this note was "
+            "drawn from)\n\n" + (excerpt or content),
+        )
         category = self._confirm_category(suggested, title, content[:300])
         self.store.save_summary(note_id, title, content, category)
         self.log.info("saved conversation note '%s' -> %s", title, category)

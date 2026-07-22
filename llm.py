@@ -104,6 +104,17 @@ class Claude:
         pending, self.pending_note = self.pending_note, None
         return pending
 
+    def conversation_excerpt(self) -> str:
+        """Plain-text flatten of the current history window — 'user: …' /
+        'assistant: …' lines, tool traffic skipped (same flattening the
+        long-term memory staging uses). This is the SOURCE MATERIAL a
+        conversation note is drawn from: it becomes the note's transcript,
+        preserving what was actually said rather than a second copy of the
+        model's own summary."""
+        lines = [t for m in self.history
+                 if (t := ConversationMemory._message_text(m))]
+        return "\n\n".join(lines)
+
     def take_pending_switch(self):
         """Hand a pending agent switch (if any) to the agent, clearing it.
         Returns (agent_key, forward_text) or None."""
