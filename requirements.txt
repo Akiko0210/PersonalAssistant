@@ -16,3 +16,6 @@ winrt-Windows.Foundation>=3.2
 sentence-transformers>=2.2
 chromadb>=0.5
 pypdf>=4.0
+# Trading (tastytrade REST + DXLink streaming quotes) — see TRADING_PLAN.md
+requests>=2.31
+websocket-client>=1.7

@@ -147,6 +147,22 @@ unit-tested without a microphone, speakers, or an API key.
   call), and `dispatch()`. Each `*_tools.py` module registers handlers for one
   domain.
 
+### Trading package
+- **`trading/`** — real trading on the tastytrade API: multi-leg option
+  strategy building (19 named strategies, validated against the live option
+  chain), real-time bid/ask over a DXLink websocket, order dry-run → confirmed
+  submit → cancel, and realized/unrealized P&L from transaction history and
+  live marks. Self-contained: the agent reaches it only through
+  `tools/trading_tools.py`, the dashboard through lazily imported
+  `/api/trading/*` routes, and an unconfigured machine degrades to a friendly
+  "not configured" message. Credentials come from `.env` (`TASTY_*` keys, or
+  `TASTY_ENV_FILE` pointing at the Tasty-Web project's `.env`); orders go to
+  the sandbox unless `TASTY_ENV=live` is set explicitly. Submitting requires a
+  dry-run review of the exact current ticket (fingerprint-checked) plus an
+  explicit spoken confirmation — the gate lives in `trading/orders.py`, shared
+  by voice and web. Design + API research: **TRADING_PLAN.md**,
+  **TRADING_RESEARCH.md**.
+
 ### Tests & scripts
 - **`tests/`** — `unittest` suite over the pure logic (history, barge-in,
   gestures, summary parsing, model + project tools). Run:
@@ -221,6 +237,11 @@ central list or dispatch chain.
   conversation model between Haiku 4.5, Sonnet 5, and Opus 4.8 by voice.
 - **project** (`project_tools.py`): `describe_project` — returns this document so
   the agent can answer questions about its own design.
+- **trading** (`trading_tools.py`): `trading_status`, `get_quote`,
+  `list_expirations`, `build_strategy`, `adjust_leg`, `set_order_terms`,
+  `review_order`, `submit_order` (requires review + explicit confirmation),
+  `list_orders`, `cancel_order`, `get_positions`, `get_pnl`, `clear_ticket` —
+  real trading via the tastytrade API (see the trading package above).
 
 ---
 

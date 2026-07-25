@@ -703,19 +703,51 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/log":
                 log = api_log(arg("name", ""), int(arg("lines", "300")))
                 return self._send(200, log) if log else self._send(404, {"error": "no such log"})
+            if route.startswith("/api/trading/"):
+                return self._trading(route, arg)
             return self._send(404, {"error": "not found"})
         except Exception as e:  # one bad request must not kill the server
             return self._send(500, {"error": str(e)})
 
+    def _trading(self, route, arg, body=None):
+        # Trading is imported lazily so the dashboard keeps its instant,
+        # stdlib-only start; the requests/websocket deps load only when a
+        # Trading page is actually used.
+        from trading import web_api as tw
+        get_routes = {
+            "/api/trading/status": lambda: tw.status(),
+            "/api/trading/quote-token": lambda: tw.quote_token(),
+            "/api/trading/chain": lambda: tw.chain(arg("symbol", "")),
+            "/api/trading/ticket": lambda: tw.ticket_get(),
+            "/api/trading/orders": lambda: tw.orders_list(arg("start")),
+            "/api/trading/positions": lambda: tw.positions(),
+            "/api/trading/pnl": lambda: tw.pnl(arg("start"), arg("end"),
+                                               arg("underlying")),
+        }
+        post_routes = {
+            "/api/trading/ticket": lambda: tw.ticket_post(body),
+            "/api/trading/dry-run": lambda: tw.dry_run(),
+            "/api/trading/submit": lambda: tw.submit(body),
+            "/api/trading/cancel": lambda: tw.cancel(body),
+        }
+        fn = (post_routes if body is not None else get_routes).get(route)
+        if fn is None:
+            return self._send(404, {"error": "not found"})
+        result = fn()
+        bad = isinstance(result, dict) and "error" in result
+        return self._send(400 if bad else 200, result)
+
     def do_POST(self):
         url = urlparse(self.path)
-        savers = {"/api/config": save_config, "/api/agents": save_agents}
-        saver = savers.get(url.path)
-        if saver is None:
-            return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
+            if url.path.startswith("/api/trading/"):
+                return self._trading(url.path, None, body=payload)
+            savers = {"/api/config": save_config, "/api/agents": save_agents}
+            saver = savers.get(url.path)
+            if saver is None:
+                return self._send(404, {"error": "not found"})
             result = saver(payload)
             return self._send(200 if result["ok"] else 400, result)
         except (ValueError, TypeError) as e:

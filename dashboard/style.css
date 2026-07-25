@@ -409,3 +409,22 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
   border-radius: 5px; padding: 1px 7px; font-size: 12px;
 }
 .ac-tools-note { margin-left: auto; font-style: italic; }
+
+/* ---------- Trading ---------- */
+.tr-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; color: var(--ink-2); }
+.tr-env { background: var(--accent-soft); color: var(--ink); border: 1px solid var(--accent); font-weight: 700; }
+.tr-env.tr-live { background: #3a1420; color: #ff8fa3; border-color: #b03050; }
+.tr-build { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.tr-build .f-text, .tr-build .f-select { min-width: 120px; }
+.tr-build .f-num { width: 70px; }
+.tr-legs td { padding: 4px 6px; vertical-align: middle; }
+.tr-legs .f-select { min-width: 0; padding: 4px 6px; font-size: 13px; }
+.tr-legs .tr-size { width: 56px; }
+.tr-terms { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.tr-terms .f-num { width: 90px; }
+.tr-problem { color: var(--critical, #e5484d); font-size: 13px; margin-top: 8px; }
+.tr-review { border: 1px solid var(--hairline); border-radius: 8px; padding: 10px 12px; margin-top: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; }
+.tr-review .btn-primary { align-self: flex-start; }
+.tr-pos { color: var(--good, #30a46c); font-weight: 650; }
+.tr-neg { color: var(--critical, #e5484d); font-weight: 650; }
+.tr-pnl-head { font-size: 14px; margin-bottom: 10px; }

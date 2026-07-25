@@ -188,6 +188,38 @@ cites the source (and page, for PDFs). `run.bat --kb-list` shows what's been
 ingested. The
 content stays local and, like the rest of `data/`, is gitignored.
 
+## Real trading by voice (tastytrade)
+
+The agent can build and place real multi-leg option orders on the tastytrade
+API — SPX and stock options, /ES and /MES futures options — with live bid/ask,
+a mandatory spoken review before any submit, order cancel, positions, and
+realized/unrealized P&L. The dashboard has a matching **Trading** page (same
+ticket, live DXLink quotes, review/submit/cancel, P&L reports).
+
+Setup — add your tastytrade OAuth credentials to `.env`:
+
+```
+TASTY_CLIENT_SECRET=...   # my.tastytrade.com -> My Profile -> API -> OAuth app
+TASTY_REFRESH_TOKEN=...   # "Create Grant" on the same page (never expires)
+TASTY_ACCOUNT_ID=...
+TASTY_ENV=sandbox         # orders go to the cert sandbox until you set: live
+```
+
+If you already run the Tasty-Web project, point at its `.env` instead of
+copying keys: `TASTY_ENV_FILE=C:\Home\Proj\Tasty-Web\.env` (its
+`CLIENT_SECRET`/`REFRESH_TOKEN`/`TASTYWORKS_ACCOUNT_ID` names are accepted).
+**The safety gate is `TASTY_ENV`**: anything other than exactly `live` uses
+the sandbox, so real money always requires that explicit opt-in.
+
+Then, in conversation: *"set up an iron condor on SPX"* → *"move the put side
+down ten"* → *"price it at mid"* → *"review it"* (the agent speaks cost,
+buying-power effect, fees, warnings) → *"submit it"*. Submission only works
+after a review of that exact ticket and your explicit go-ahead; any edit
+invalidates the review. *"Cancel the order"*, *"what are my positions?"*, and
+*"how much did I make this week on SPX?"* work as expected. Design and API
+research: [TRADING_PLAN.md](TRADING_PLAN.md),
+[TRADING_RESEARCH.md](TRADING_RESEARCH.md).
+
 ## Switching the Claude model by voice
 
 Conversation defaults to **Haiku 4.5** for low latency. Ask for a different model
