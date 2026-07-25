@@ -298,10 +298,15 @@ One physical play/pause button drives everything, listened for on two channels a
 once (keyboard hook for wired/dongle headsets; SMTC for Bluetooth-native ones).
 `ClickGestureDecoder` dedupes across channels and resolves gestures: **1 click =
 mute, 2 = toggle notetaking, 3 = quit**. Every accepted press immediately
-silences output (the "hush" path) because a state-tracking dongle swallows the
-next press if playback continues through it. Voice barge-in is separate: while the
-agent speaks, start talking and `BargeInDetector` stops it and captures your
-words. See `MEDIA_CONTROL.md` for the full hardware story.
+*pauses* output (the "hush" path) because a state-tracking dongle swallows the
+next press if playback continues through it — but pausing, not purging, because
+at press time the gesture hasn't resolved yet. `_hold_for_gesture` then waits for
+it: **mute deafens the microphone at once and lets the reply finish** (muting
+stops listening, not talking), while notetaking and quit end the reply for good.
+A press with no gesture behind it resumes after `GESTURE_VERDICT_TIMEOUT_S`, and
+a backend that can't pause falls back to stopping. Voice barge-in is separate:
+while the agent speaks, start talking and `BargeInDetector` stops it and captures
+your words. See `MEDIA_CONTROL.md` for the full hardware story.
 
 ---
 

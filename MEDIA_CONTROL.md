@@ -54,11 +54,35 @@ pauses/resumes the sound, like an obedient music player) confirmed it: **8 of
 8 presses transmitted.**
 
 The agent therefore behaves like an obedient player: the moment a raw click
-lands it stops the thinking cue, hushes speech immediately (`hush` event —
+lands it stops the thinking cue, **pauses** speech immediately (`hush` event —
 within ~100 ms, *before* the 450 ms multi-click window resolves into a
 command), and ducks the silent keepalive for ~1 s. Otherwise the 2nd/3rd
 clicks of a double/triple gesture, arriving ~250 ms apart while the reply is
 still playing, would be exactly the presses the dongle eats.
+
+### Pause, not purge — so mute can finish the sentence
+
+Playback stopping at press time is what keeps the dongle in sync, but it must
+not decide the reply's fate: at that instant nobody knows yet whether the
+gesture is one click or three. So the press *pauses* (SAPI `Pause`, which
+keeps the utterance intact) and `_hold_for_gesture` waits for the verdict:
+
+| Gesture | Verdict |
+| ------- | ------- |
+| 1 click — mute | microphone goes deaf **immediately**, speech **resumes** and finishes |
+| 2 clicks — notetaking | speech is purged; recording starts |
+| 3 clicks — quit | speech is purged; the agent exits |
+
+Muting means "stop listening to me", not "stop talking" — so the reply plays
+on, with a ~0.5 s hitch where the click landed. The microphone is muted from
+the button thread the moment the gesture resolves, *not* when the main loop
+next drains commands: the reply is still playing at that point, and a live mic
+would leave its tail interruptible by the very person who just asked not to be
+heard. If no gesture ever resolves behind a press (a stray or swallowed
+click), the reply resumes anyway after `GESTURE_VERDICT_TIMEOUT_S` rather than
+hang mid-word; a TTS backend that can't pause (pyttsx3) falls back to the old
+all-or-nothing stop. Firmware-decoded gestures (AirPods Next/Previous) arrive
+already resolved and skip the pause entirely.
 
 A second dongle quirk, observed in live use: presses during the **first few
 seconds after an audio stream starts** are also dropped (radio link / stream

@@ -78,6 +78,9 @@ def make_agent(*, heard, interrupted_remaining=None):
     agent = Agent.__new__(Agent)
     agent.log = logging.getLogger("test")
     agent.interrupt = threading.Event()
+    # Set by note-taking/quit to stop a reply mid-sentence; mute deliberately
+    # doesn't (see test_mute_speech). _drain clears it each pass.
+    agent.silence = threading.Event()
     agent.cmds = queue.Queue()
     agent.audio = FakeAudio(utterances=[np.ones(4, dtype=np.int16)])
     agent.stt = FakeSTT([heard])

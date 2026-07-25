@@ -2,7 +2,8 @@
 
 Conversation mode is the default: listen for an utterance, answer with Claude,
 speak the reply. Hotkeys switch into a silent notetaking mode and back, and
-toggle a global mute. See README.md for setup and the hotkey list.
+toggle a global mute (which stops the microphone, not a reply in progress).
+See README.md for setup and the hotkey list.
 """
 
 import argparse
@@ -135,6 +136,13 @@ class Agent:
         # previous one (see MEDIA_CONTROL.md), so the 2nd/3rd clicks of a
         # gesture would be swallowed if speech played on through the window.
         self.hush = threading.Event()
+        # Set once the gesture behind that click turns out to be one that must
+        # stop the reply for good (note-taking, quit). Mute is deliberately not
+        # one of them: it deafens the microphone, it doesn't gag the agent.
+        self.silence = threading.Event()
+        # ...and set when the gesture was a non-silencing one, releasing the
+        # paused reply to finish.
+        self.resume_speech = threading.Event()
         # Raw button presses (from either listener channel) are decoded into
         # single/double/triple gestures here; see gestures.py.
         self._gesture = ClickGestureDecoder(
@@ -151,25 +159,45 @@ class Agent:
 
     def _drain(self):
         """Process queued hotkey commands. Returns the set of high-level signals
-        ('start_note', 'stop_note', 'quit'); mute is handled inline."""
+        ('start_note', 'stop_note', 'quit'); the mute acknowledgement is spoken
+        inline. Mute itself was already applied when the gesture resolved (see
+        _on_media_gesture) — this only voices it."""
         signals = set()
+        announce = False
         while not self.cmds.empty():
             cmd = self.cmds.get()
-            if cmd == "toggle_mute":
-                if self.audio.muted.is_set():
-                    self.audio.muted.clear()
-                    self.log.info("unmuted — listening")
-                    self.say("Listening.", voice=False, commands=False)
-                else:
-                    self.audio.muted.set()
-                    self.log.info("muted — not listening")
-                    self.say("Muted.", voice=False, commands=False)
+            if cmd == "announce_mute":
+                # Collapsed, not spoken per command: toggling twice while a
+                # reply plays would otherwise announce the same final state
+                # twice.
+                announce = True
             else:
                 signals.add(cmd)
+        if announce:
+            if self.audio.muted.is_set():
+                self.log.info("muted — not listening")
+                self.say("Muted.", voice=False, commands=False)
+            else:
+                self.log.info("unmuted — listening")
+                self.say("Listening.", voice=False, commands=False)
         self.interrupt.clear()
+        self.silence.clear()
         return signals
 
+    def _toggle_mute(self):
+        """Flip the microphone, from the button thread, the instant the gesture
+        resolves — not when the main loop next drains. The reply is still
+        playing (mute no longer cuts it off), and the microphone must already
+        be deaf while it plays: otherwise the tail of the reply stays
+        interruptible by the very person who just asked not to be heard."""
+        if self.audio.muted.is_set():
+            self.audio.muted.clear()
+        else:
+            self.audio.muted.set()
+        self._push("announce_mute")
+
     def _toggle_note(self):
+        self.silence.set()  # a new note (or the end of one) stops the reply
         if self.status == "conversation_mode":
             self.status = "note_taking"
             if self.audio.muted.is_set():
@@ -180,15 +208,22 @@ class Agent:
             self.status = "conversation_mode"
             self._push("stop_note")
 
+    def _quit(self):
+        self.silence.set()
+        self._push("quit")
 
     def _on_media_press(self):
-        """Every accepted click: go silent the moment the press lands — stop the
-        thinking cue here, and flag say() to stop speech on its next poll
-        (~100 ms; hush avoids touching the SAPI COM object cross-thread). Every
-        gesture's action implies silence anyway — and it keeps a state-tracking
-        dongle (Yealink) in sync: the dongle swallows the next press whenever
-        the host keeps playing through a "pause", which is how the 2nd/3rd
-        clicks of a gesture were getting eaten. See MEDIA_CONTROL.md."""
+        """Every accepted click: go quiet the moment the press lands — stop the
+        thinking cue here, and flag say() to *pause* speech on its next poll
+        (~100 ms; hush avoids touching the SAPI COM object cross-thread). This
+        keeps a state-tracking dongle (Yealink) in sync: it swallows the next
+        press whenever the host keeps playing through a "pause", which is how
+        the 2nd/3rd clicks of a gesture were getting eaten (MEDIA_CONTROL.md).
+
+        Pausing rather than purging is what lets a mute click leave the reply
+        intact — at this point the gesture hasn't resolved, so we don't yet
+        know whether the reply should die (note-taking, quit) or pick up where
+        it stopped (mute). _hold_for_gesture waits for that verdict."""
         self.idle.stop()
         self.hush.set()
         # Obediently pause the silent keepalive stream too, so the dongle sees
@@ -200,13 +235,14 @@ class Agent:
     def _on_media_gesture(self, count):
         if count == 1:
             self.log.info("media hotkey: single click -> toggle mute")
-            self._push("toggle_mute")
+            self._toggle_mute()
+            self.resume_speech.set()  # mute stops listening, not speaking
         elif count == 2:
             self.log.info("media hotkey: double click -> toggle note-taking")
             self._toggle_note()
         else:
             self.log.info("media hotkey: triple click -> quit")
-            self._push("quit")
+            self._quit()
 
     def start_hotkeys(self):
         # The button is listened to on BOTH channels at once, because different
@@ -241,7 +277,7 @@ class Agent:
                 # deliver double/triple as Next/Previous — map them to the same
                 # actions as counted double/triple clicks.
                 on_next=self._toggle_note,
-                on_previous=lambda: self._push("quit"),
+                on_previous=self._quit,
                 # Short debounce: real double-clicks arrive ~200 ms apart and
                 # must get through; cross-channel dedupe lives in _media_click.
                 debounce_s=0.08,
@@ -457,8 +493,10 @@ class Agent:
         the main loop to drain).
 
         voice:    stop when the user starts talking (voice barge-in).
-        commands: stop when an action command (mute / note-taking) arrives. Turned
-                  off only for the folder-destination question, so those commands
+        commands: stop when a *silencing* action command (note-taking, quit)
+                  arrives. Mute is not one — it deafens the microphone and
+                  leaves the reply to finish (see _hold_for_gesture). Turned off
+                  only for the folder-destination question, so those commands
                   don't disrupt that exchange — voice barge-in still works there.
         save_resume: remember the unsaid tail for the "continue" command.
 
@@ -484,24 +522,30 @@ class Agent:
                 self._save_interrupted(text, 0.0)
             self.log.info("(you were already talking — holding the reply)")
             return True
-        self.hush.clear()  # only clicks during *this* utterance may hush it
+        # Only clicks during *this* utterance may act on it, and a verdict left
+        # over from an earlier one must not release the first pause of this one.
+        self.hush.clear()
+        self.resume_speech.clear()
         start = time.monotonic()
         self.tts.begin(text)
         detector = BargeInDetector()
 
         while self.tts.is_busy():
-            # A raw click just landed: stop speaking NOW, before the multi-click
-            # window even resolves into a command — the dongle swallows the
-            # gesture's next click if playback runs on (see MEDIA_CONTROL.md).
-            # The command itself arrives via _push/interrupt moments later.
+            # A raw click just landed: pause playback NOW, before the
+            # multi-click window even resolves into a command — the dongle
+            # swallows the gesture's next click if playback runs on (see
+            # MEDIA_CONTROL.md). Whether the reply then dies or carries on
+            # depends on which gesture it turns out to be.
             if commands and self.hush.is_set():
                 self.hush.clear()
+                if not self._hold_for_gesture():
+                    return False
+                continue
+            if commands and self.silence.is_set():
+                # A silencing command with no click behind it — an AirPods
+                # Next/Previous, already decoded in firmware.
                 self.tts.stop()
                 return False
-            if self.interrupt.is_set():   # a hotkey command arrived while speaking
-                if commands:
-                    self.tts.stop()
-                    return False
             res = self.audio.poll_speech(timeout=0.1, return_frame=True)
             if res is None:
                 continue
@@ -515,6 +559,44 @@ class Agent:
 
         detector.log_summary()  # finished uninterrupted; surface tuning numbers
         return False
+
+    def _hold_for_gesture(self) -> bool:
+        """A click landed mid-reply. Pause playback at once — the dongle only
+        transmits the gesture's next click if the host really stops — then wait
+        for the multi-click window to say what the gesture was:
+
+          - mute (single click): the microphone goes deaf, the reply resumes
+            and finishes. Muting means "stop listening to me", not "stop
+            talking", and cutting the sentence off was the old behaviour this
+            replaces;
+          - note-taking / quit (double / triple): the reply ends here.
+
+        Returns True if speech resumed. A pause rather than a purge is the
+        whole trick — SAPI can only continue an utterance it hasn't discarded
+        — so a backend that can't pause falls back to the old all-or-nothing
+        stop."""
+        if not self.tts.pause():
+            self.tts.stop()
+            return False
+        deadline = time.monotonic() + cfg.GESTURE_VERDICT_TIMEOUT_S
+        while time.monotonic() < deadline:
+            if self.silence.is_set():
+                self.tts.stop()
+                self.log.info("(gesture ends the reply)")
+                return False
+            if self.resume_speech.is_set():
+                self.resume_speech.clear()
+                self.tts.resume()
+                self.log.info("(muted — the reply carries on)"
+                              if self.audio.muted.is_set() else
+                              "(unmuted — the reply carries on)")
+                return True
+            time.sleep(0.02)
+        # No gesture resolved behind that press (a stray or swallowed click):
+        # never leave a reply stuck mid-word.
+        self.tts.resume()
+        self.log.info("(no gesture followed the click — resuming the reply)")
+        return True
 
     def _drain_buffered_speech(self):
         """Everything recorded while the model was thinking is sitting in the
@@ -594,7 +676,9 @@ class Agent:
             # use the headset button to mute/unmute or start a new note mid-summary.
             # A voice barge-in leaves the captured speech buffered so the next
             # conversation turn picks it up; a hotkey leaves self.interrupt set so
-            # the main loop drains and acts on it (mute, new note, quit).
+            # the main loop drains and acts on it (mute, new note, quit) — though
+            # only a new note or quit cuts the recap short, since muting stops the
+            # microphone, not the recap.
             # save_resume so a filler "yeah" mid-recap resumes it (and "continue"
             # works) instead of the recap being lost.
             interrupted = self.say(f"Notes saved. {spoken}", save_resume=True)

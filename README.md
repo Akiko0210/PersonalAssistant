@@ -73,6 +73,16 @@ All controls work globally (even when another window is focused).
 | Toggle notetaking            | Double click          |
 | Quit                         | Triple click          |
 
+**Mute stops the microphone, not the agent.** Click it while a reply is
+playing and the reply finishes — you just stop being heard (the agent
+confirms with "Muted." once it's done talking). There's a brief hitch where
+the click landed: playback pauses the instant the button goes down, because
+the wireless dongle only passes on the *next* click of a double/triple if the
+host really stops (see `MEDIA_CONTROL.md`), and the reply picks up again as
+soon as the click turns out to be a single. Double-click (notetaking) and
+triple-click (quit) do end the reply immediately — and to cut a reply short
+without changing anything, just start talking (barge-in, below).
+
 Button presses are listened for on two channels at once (see
 `MEDIA_CONTROL.md`): a keyboard hook (how wired headsets and USB wireless
 dongles deliver presses) and a Windows media session (SMTC — how

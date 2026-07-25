@@ -31,6 +31,7 @@ class _SapiSpeaker:
         import win32com.client  # part of pywin32
         self._voice = win32com.client.Dispatch("SAPI.SpVoice")
         self._voice.Rate = _wpm_to_sapi_rate(cfg.TTS_RATE)
+        self._paused = False
         if cfg.TTS_VOICE:
             self.set_voice(cfg.TTS_VOICE)
 
@@ -54,14 +55,32 @@ class _SapiSpeaker:
         self._voice.Speak(text)  # synchronous, blocks until done
 
     def begin(self, text: str):
+        self.resume()  # never start new speech into a paused voice
         self._voice.Speak(text, _SVSF_ASYNC)  # returns immediately
 
     def is_busy(self) -> bool:
-        # WaitUntilDone(0) returns True if speech has already finished.
+        # WaitUntilDone(0) returns True if speech has already finished. A
+        # paused utterance isn't finished, so this stays True across a pause.
         return not self._voice.WaitUntilDone(0)
+
+    def pause(self):
+        """Suspend playback, keeping the utterance intact so it can resume.
+        Unlike stop(), nothing is discarded — this is what lets a reply
+        survive a button press that turns out to be a mute."""
+        if not self._paused:
+            self._voice.Pause()
+            self._paused = True
+
+    def resume(self):
+        if self._paused:
+            self._voice.Resume()
+            self._paused = False
 
     def stop(self):
         # Purge the current + pending speech, ending playback immediately.
+        # Resume first: a purge issued to a paused voice isn't acted on until
+        # the voice runs again, which would leave the speech hanging.
+        self.resume()
         self._voice.Speak("", _SVSF_ASYNC | _SVSF_PURGE)
 
 
@@ -122,6 +141,29 @@ class Speaker:
 
     def is_busy(self) -> bool:
         return self._backend.is_busy()
+
+    def pause(self) -> bool:
+        """Suspend playback so it can be resumed later. Returns False if the
+        backend can't pause (pyttsx3, or a SAPI voice that refused) — the
+        caller then has only stop() to fall back on."""
+        fn = getattr(self._backend, "pause", None)
+        if fn is None:
+            return False
+        try:
+            fn()
+            return True
+        except Exception:  # noqa: BLE001 - a failed pause must not kill the reply
+            log.exception("TTS pause failed")
+            return False
+
+    def resume(self):
+        fn = getattr(self._backend, "resume", None)
+        if fn is None:
+            return
+        try:
+            fn()
+        except Exception:  # noqa: BLE001 - fall through to stop() at worst
+            log.exception("TTS resume failed")
 
     def stop(self):
         self._backend.stop()

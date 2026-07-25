@@ -130,6 +130,13 @@ MEDIA_CLICK_DEDUPE_S = 0.15
 # (see duck() in media_control.py) so the dongle sees its "pause" honoured and
 # never desyncs. Costs some headset battery (the radio link stays active).
 MEDIA_KEEPALIVE = True
+# A click landing mid-reply pauses playback immediately (the dongle only
+# transmits the gesture's next click if the host really stops), and the reply
+# then waits here for the multi-click window to say what the gesture was:
+# mute resumes it, note-taking/quit end it. Long enough to cover a triple
+# click (two ~250 ms gaps plus the 450 ms window) with room to spare; if no
+# verdict arrives by then the reply resumes rather than hang mid-word.
+GESTURE_VERDICT_TIMEOUT_S = 2.0
 
 # --- Settle before answering ---------------------------------------------------
 # After an utterance endpoints, the agent waits this long — listening, not yet
