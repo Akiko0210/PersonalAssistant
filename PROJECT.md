@@ -78,7 +78,11 @@ unit-tested without a microphone, speakers, or an API key.
 - **`stt.py`** — `Transcriber`: faster-whisper wrapper (`small.en` by default,
   `vad_filter=True` to reject hallucinated text from silence).
 - **`tts.py`** — `Speaker`: Windows SAPI backend (async speak + purge, which is
-  what enables barge-in) with a synchronous pyttsx3 fallback.
+  what enables barge-in; plus pause/resume, which is what lets a mute click
+  leave a reply intact) with a synchronous pyttsx3 fallback. `Announcer` is a
+  deliberately separate second voice — one SpVoice serialises its utterances,
+  so a notice that must be heard *over* a playing reply ("Muted.") needs its
+  own voice object, in its own thread and COM apartment.
 - **`sound.py`** — `IdleSound`: loops a "thinking" WAV while the agent waits on
   the model. Idempotent, thread-safe, never raises (missing file = silence).
 
@@ -303,8 +307,13 @@ next press if playback continues through it — but pausing, not purging, becaus
 at press time the gesture hasn't resolved yet. `_hold_for_gesture` then waits for
 it: **mute deafens the microphone at once and lets the reply finish** (muting
 stops listening, not talking), while notetaking and quit end the reply for good.
-A press with no gesture behind it resumes after `GESTURE_VERDICT_TIMEOUT_S`, and
-a backend that can't pause falls back to stopping. Voice barge-in is separate:
+Mute is also the one command that never abandons a turn — a click while the
+model is still thinking leaves the answer to arrive and be spoken; only
+notetaking and quit abort (the `silence` event marks which is which). The
+acknowledgement rides a second `Announcer` voice so it overlaps the reply
+instead of queueing behind it. A press with no gesture behind it resumes after
+`GESTURE_VERDICT_TIMEOUT_S`, and a backend that can't pause falls back to
+stopping. Voice barge-in is separate:
 while the agent speaks, start talking and `BargeInDetector` stops it and captures
 your words. See `MEDIA_CONTROL.md` for the full hardware story.
 

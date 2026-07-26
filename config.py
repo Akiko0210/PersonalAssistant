@@ -105,6 +105,14 @@ MEMORY_SEARCH_RESULTS = 3            # summaries returned per search
 TTS_RATE = 175                # words per minute
 TTS_VOICE = None              # None = system default; or a SAPI voice id substring
 
+# Spoken notices ("Muted.", "Listening.") are said on a SECOND voice so they can
+# be heard *over* a reply that is still playing — one SAPI voice queues its
+# utterances, so an overlapping notice needs its own. Kept quieter and, where
+# the machine has more than one voice installed, deliberately a different one
+# from the reply's, so two simultaneous voices stay tellable apart.
+ANNOUNCE_VOLUME = 80          # 0-100, against the reply's 100
+ANNOUNCE_RATE = 185           # words per minute; brisk — these are two words
+
 # --- "Thinking" audio cue ----------------------------------------------------
 # Looped whenever the agent is busy with the model and there's nothing to hear —
 # answering you (including tool calls), summarising a note, or deciding its

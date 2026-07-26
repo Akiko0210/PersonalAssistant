@@ -74,6 +74,21 @@ class FakeIdle:
         pass
 
 
+class FakeAnnouncer:
+    """Stands in for the second voice. `available=False` mimics a machine
+    without pywin32, where notices must wait for the main voice."""
+
+    def __init__(self, available=True):
+        self.available = available
+        self.announced = []
+
+    def announce(self, text, avoid_voice=""):
+        if not self.available:
+            return False
+        self.announced.append((text, avoid_voice))
+        return True
+
+
 class FakeAudio:
     def __init__(self):
         self.muted = threading.Event()
@@ -86,7 +101,7 @@ class FakeAudio:
         self.pushed.append(list(frames))
 
 
-def make_agent(**tts_kwargs):
+def make_agent(announcer_available=True, **tts_kwargs):
     agent = Agent.__new__(Agent)
     agent.log = logging.getLogger("test")
     agent.audio = FakeAudio()
@@ -98,6 +113,8 @@ def make_agent(**tts_kwargs):
     agent.resume_speech = threading.Event()
     agent.status = "conversation_mode"
     agent.tts = FakeTTS(**tts_kwargs)
+    agent.announcer = FakeAnnouncer(available=announcer_available)
+    agent._speaking_voice = "Microsoft Zira Desktop"
     return agent
 
 
@@ -200,42 +217,55 @@ class TestMuteTakesEffectImmediately(unittest.TestCase):
     """The microphone must go deaf when the gesture resolves — while the reply
     is still playing — not when the main loop next drains."""
 
-    def test_toggle_mute_applies_at_once_and_queues_the_announcement(self):
+    def test_mute_applies_and_is_announced_on_the_second_voice(self):
         agent = make_agent()
         agent._toggle_mute()
 
         self.assertTrue(agent.audio.muted.is_set())
-        self.assertTrue(agent.interrupt.is_set())
-        self.assertEqual(agent.cmds.get_nowait(), "announce_mute")
+        # Spoken now, over whatever is playing — not queued for later.
+        self.assertEqual(agent.announcer.announced,
+                         [("Muted.", "Microsoft Zira Desktop")])
+        self.assertTrue(agent.cmds.empty())
 
-    def test_drain_announces_without_toggling_a_second_time(self):
+    def test_announcement_avoids_the_voice_the_reply_is_in(self):
         agent = make_agent()
+        agent._speaking_voice = "Microsoft David Desktop"
+        agent._toggle_mute()
+        self.assertEqual(agent.announcer.announced[0][1],
+                         "Microsoft David Desktop")
+
+    def test_unmute_round_trip(self):
+        agent = make_agent()
+        agent._toggle_mute()
+        agent._toggle_mute()
+
+        self.assertFalse(agent.audio.muted.is_set())
+        self.assertEqual([text for text, _ in agent.announcer.announced],
+                         ["Muted.", "Listening."])
+
+    def test_mute_does_not_disturb_the_turn_machinery(self):
+        # Nothing queued and no interrupt: a mute click must not abort the
+        # answer the agent is in the middle of producing.
+        agent = make_agent()
+        agent._toggle_mute()
+        self.assertFalse(agent.interrupt.is_set())
+        self.assertFalse(agent.silence.is_set())
+
+    def test_without_a_second_voice_the_notice_waits_for_the_main_one(self):
+        agent = make_agent(announcer_available=False)
         spoken = []
         agent.say = lambda text, **kw: spoken.append(text)
 
         agent._toggle_mute()
+        self.assertTrue(agent.interrupt.is_set())  # wake the main loop to say it
         signals = agent._drain()
 
         self.assertTrue(agent.audio.muted.is_set())  # still muted, not flipped
         self.assertEqual(spoken, ["Muted."])
         self.assertEqual(signals, set())
-        self.assertFalse(agent.interrupt.is_set())
 
-    def test_unmute_round_trip(self):
-        agent = make_agent()
-        spoken = []
-        agent.say = lambda text, **kw: spoken.append(text)
-
-        agent._toggle_mute()
-        agent._drain()
-        agent._toggle_mute()
-        agent._drain()
-
-        self.assertFalse(agent.audio.muted.is_set())
-        self.assertEqual(spoken, ["Muted.", "Listening."])
-
-    def test_rapid_toggles_announce_the_final_state_once(self):
-        agent = make_agent()
+    def test_fallback_rapid_toggles_announce_the_final_state_once(self):
+        agent = make_agent(announcer_available=False)
         spoken = []
         agent.say = lambda text, **kw: spoken.append(text)
 

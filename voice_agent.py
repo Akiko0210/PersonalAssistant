@@ -31,7 +31,7 @@ from audio import AudioEngine
 from barge_in import BargeInDetector
 from gestures import ClickGestureDecoder
 from stt import Transcriber
-from tts import Speaker
+from tts import Announcer, Speaker
 from notes import NoteStore
 from knowledge import KnowledgeStore
 from llm import Claude
@@ -108,6 +108,11 @@ class Agent:
         t0 = time.monotonic()
         self.audio = AudioEngine()
         self.tts = Speaker()
+        # Second voice, for notices that must be heard over a playing reply.
+        self.announcer = Announcer()
+        # Which voice the reply is in, read on the main thread and cached so the
+        # button thread can pick a contrasting one without touching COM.
+        self._speaking_voice = self.tts.current_voice()
         self.store = NoteStore()
         # Absorb any newly added trading PDFs before we start listening. This is an
         # idempotent scan: unchanged files are skipped by content hash without
@@ -174,12 +179,10 @@ class Agent:
             else:
                 signals.add(cmd)
         if announce:
-            if self.audio.muted.is_set():
-                self.log.info("muted — not listening")
-                self.say("Muted.", voice=False, commands=False)
-            else:
-                self.log.info("unmuted — listening")
-                self.say("Listening.", voice=False, commands=False)
+            # Fallback path only: with a second voice available the notice was
+            # already spoken, over the reply, when the gesture resolved.
+            self.say("Muted." if self.audio.muted.is_set() else "Listening.",
+                     voice=False, commands=False)
         self.interrupt.clear()
         self.silence.clear()
         return signals
@@ -189,12 +192,21 @@ class Agent:
         resolves — not when the main loop next drains. The reply is still
         playing (mute no longer cuts it off), and the microphone must already
         be deaf while it plays: otherwise the tail of the reply stays
-        interruptible by the very person who just asked not to be heard."""
+        interruptible by the very person who just asked not to be heard.
+
+        The acknowledgement goes out on the *second* voice, so it lands with
+        the button press instead of queueing behind a reply that may have
+        twenty seconds left to run. Only if that voice is unavailable does it
+        fall back to the main one, spoken at the next drain."""
         if self.audio.muted.is_set():
             self.audio.muted.clear()
         else:
             self.audio.muted.set()
-        self._push("announce_mute")
+        notice = "Muted." if self.audio.muted.is_set() else "Listening."
+        self.log.info("muted — not listening" if self.audio.muted.is_set()
+                      else "unmuted — listening")
+        if not self.announcer.announce(notice, avoid_voice=self._speaking_voice):
+            self._push("announce_mute")
 
     def _toggle_note(self):
         self.silence.set()  # a new note (or the end of one) stops the reply
@@ -344,11 +356,12 @@ class Agent:
 
         reply = self._converse_with_followups(text)
         if not reply:
-            # Expected only when a hotkey cut the turn short. An empty reply
-            # with NO interrupt means the model produced nothing — that must
-            # never pass silently again (a truncated tool call once died here
-            # unnoticed, and the user heard nothing for 12 minutes).
-            if not self.interrupt.is_set():
+            # Expected only when note-taking or quit cut the turn short. An
+            # empty reply with nothing silencing it means the model produced
+            # nothing — that must never pass silently again (a truncated tool
+            # call once died here unnoticed, and the user heard nothing for 12
+            # minutes).
+            if not self.silence.is_set():
                 self.log.warning("model returned an empty reply for: %r", text)
                 self.say("I came back with an empty reply — something went "
                          "wrong. Try that again.", voice=False, commands=False)
@@ -392,6 +405,7 @@ class Agent:
         self.llm.switch_to(key)
         hat = agents.AGENTS[key]
         self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
+        self._speaking_voice = self.tts.current_voice()
         self.log.info("=== talking to %s ===", hat["name"])
         self.say(f"{hat['name']} here.", voice=False, commands=False)
 
@@ -410,10 +424,12 @@ class Agent:
         each mid-thought pause billed a full model call — see PROJECT.md §4.)"""
         rounds = 0
         while self._await_continuation(cfg.CONTINUATION_SETTLE_MS):
-            if self.interrupt.is_set():
-                # A hotkey command (mute / note-taking / quit) arrived — don't
-                # call the model, but keep the words: the user said them, and
-                # they must not vanish because of a mute click mid-settle.
+            if self.silence.is_set():
+                # Note-taking or quit arrived — abandon the turn without calling
+                # the model, but keep the words: the user said them, and they
+                # must not vanish. Muting is NOT one of these: it stops the
+                # microphone, so the question already asked still gets answered
+                # (and spoken) as normal.
                 self.llm.record_unanswered(text)
                 return ""
             rounds += 1
@@ -429,7 +445,7 @@ class Agent:
             more = self.audio.collect_utterance(
                 interrupt=self.interrupt, endpoint_ms=cfg.CONVO_ENDPOINT_MS
             )
-            if self.interrupt.is_set():
+            if self.silence.is_set():
                 self.llm.record_unanswered(text)
                 return ""
             if more is not None and more.size > 0:
@@ -439,7 +455,7 @@ class Agent:
                     text = f"{text} {addition}"
             # else: a cough / room noise triggered the settle — nothing to add,
             # and (unlike before) nothing was spent. Loop and keep settling.
-        if self.interrupt.is_set():
+        if self.silence.is_set():
             self.llm.record_unanswered(text)
             return ""
         return self.llm.converse(text)

@@ -78,7 +78,12 @@ on, with a ~0.5 s hitch where the click landed. The microphone is muted from
 the button thread the moment the gesture resolves, *not* when the main loop
 next drains commands: the reply is still playing at that point, and a live mic
 would leave its tail interruptible by the very person who just asked not to be
-heard. If no gesture ever resolves behind a press (a stray or swallowed
+heard. For the same reason the "Muted." acknowledgement is spoken on a
+**second voice** (`Announcer` in `tts.py`) laid over the reply: one SpVoice
+serialises everything sent to it, so the notice would otherwise either queue
+behind a reply with twenty seconds left to run or purge it. The notice is
+quieter than the reply and picks a different installed voice where the machine
+has one, so the two remain tellable apart. If no gesture ever resolves behind a press (a stray or swallowed
 click), the reply resumes anyway after `GESTURE_VERDICT_TIMEOUT_S` rather than
 hang mid-word; a TTS backend that can't pause (pyttsx3) falls back to the old
 all-or-nothing stop. Firmware-decoded gestures (AirPods Next/Previous) arrive

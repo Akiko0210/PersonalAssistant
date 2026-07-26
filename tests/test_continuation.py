@@ -61,6 +61,9 @@ def make_agent(*, await_seq=None, stt=None, utterances=None, poll_frames=None):
     agent = Agent.__new__(Agent)
     agent.log = logging.getLogger("test")
     agent.interrupt = threading.Event()
+    # Only note-taking and quit abandon a turn; mute stops the microphone and
+    # leaves the question to be answered (see test_mute_speech).
+    agent.silence = threading.Event()
     agent.audio = FakeAudio(poll_frames=poll_frames, utterances=utterances)
     agent.stt = FakeSTT(stt or [])
     agent.llm = FakeLLM()
@@ -98,21 +101,32 @@ class TestOneConversePerTurn(unittest.TestCase):
         agent._converse_with_followups("hello")
         self.assertEqual(agent.llm.calls, ["hello"])
 
-    def test_hotkey_during_settle_aborts_without_calling_model(self):
+    def test_silencing_hotkey_during_settle_aborts_without_calling_model(self):
         agent = make_agent(await_seq=[False])
-        agent.interrupt.set()  # a mute/note/quit command landed
+        agent.silence.set()  # a note-taking / quit gesture landed
         reply = agent._converse_with_followups("hello")
         self.assertEqual(reply, "")
         self.assertEqual(agent.llm.calls, [])  # nothing billed
 
-    def test_hotkey_during_settle_keeps_the_words(self):
+    def test_silencing_hotkey_during_settle_keeps_the_words(self):
         # The aborted turn's transcript must land in history, not vanish: a
-        # mute click milliseconds after "remember X" must not erase "remember X".
+        # click milliseconds after "remember X" must not erase "remember X".
         agent = make_agent(await_seq=[False])
-        agent.interrupt.set()
+        agent.silence.set()
         agent._converse_with_followups("remember the dentist moved to Friday")
         self.assertEqual(agent.llm.unanswered,
                          ["remember the dentist moved to Friday"])
+
+    def test_mute_during_settle_still_answers(self):
+        # Muting stops the microphone, not the turn: the question already
+        # asked is answered, and the reply spoken, exactly as if the click had
+        # never happened.
+        agent = make_agent(await_seq=[False])
+        agent.interrupt.set()  # a mute click, with nothing silencing the turn
+        reply = agent._converse_with_followups("what did I say about the budget")
+        self.assertEqual(agent.llm.calls, ["what did I say about the budget"])
+        self.assertEqual(reply, "reply::what did I say about the budget")
+        self.assertEqual(agent.llm.unanswered, [])
 
     def test_endless_retriggers_hit_the_cap_and_answer(self):
         # Continuous background speech (a TV) re-triggers the settle window
