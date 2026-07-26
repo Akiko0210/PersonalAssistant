@@ -1,8 +1,8 @@
 """Agent switching: hand the conversation to another persona by tool call.
 
 The regex router in agents.match_address catches explicit addressing ("Bob,
-..." / "switch to Cobe"); this tool covers every other phrasing ("can you put
-Bob on?", "this sounds like a job for Cobe") — the active model recognises the
+..." / "switch to Tom"); this tool covers every other phrasing ("can you put
+Bob on?", "this sounds like a job for Tom") — the active model recognises the
 intent and calls it, which costs nothing extra since that model call was
 already happening. The switch itself is deferred via ctx.pending_switch (same
 pattern as save_conversation_note -> pending_note): the agent performs it

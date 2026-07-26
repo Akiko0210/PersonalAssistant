@@ -344,7 +344,7 @@ class Agent:
         self._interrupted_remaining = None
 
         # Spoken agent addressing: "Bob, what's my last note?" or "switch to
-        # Cobe". Detected on the transcript directly — zero model calls; any
+        # Tom". Detected on the transcript directly — zero model calls; any
         # free-form phrasing the regex misses is covered by the switch_agent
         # tool the active persona can call.
         target, remainder = agents.match_address(text)

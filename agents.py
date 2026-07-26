@@ -1,6 +1,6 @@
 """Named agent personas ("hats") over the one shared conversation.
 
-Alice, Bob, and Cobe are NOT separate agents with separate memories: they are
+Alice, Bob, and Tom are NOT separate agents with separate memories: they are
 per-turn configurations — system-prompt persona, tool allowlist, model, and
 TTS voice — applied to the single conversation loop and its single history.
 Switching hats never fragments context ("I told you five minutes ago" always
@@ -35,7 +35,7 @@ AGENTS = {
             "thinking out loud, the current time, and questions about how this "
             "assistant system itself is designed (use describe_project for "
             "those). You do not manage notes, memories, or trading — Bob and "
-            "Cobe own those; hand over when the user wants real work done "
+            "Tom own those; hand over when the user wants real work done "
             "there."
         ),
         "tools": {"get_current_time", "describe_project",
@@ -85,9 +85,9 @@ AGENTS = {
         "tts_voice": "David",
         "tts_rate": None,
     },
-    "cobe": {
-        "name": "Cobe",
-        "aliases": ("cobe", "kobe", "coby", "cobie", "koby", "cobey", "colby"),
+    "tom": {
+        "name": "Tom",
+        "aliases": ("tom", "thom", "tomm", "tommy"),
         "role": "trading — trade alerts, market analysis, and the trading knowledge base",
         "persona": (
             "You are the trading assistant: you analyse trades and answer "
@@ -107,17 +107,17 @@ AGENTS = {
         ),
         # search_past_conversations is deliberately in EVERY hat's allowlist:
         # the conversation memory is shared, so every persona must be able to
-        # search it — Cobe once couldn't recall a trade structure that had
-        # aged out of the window mid-session because only Bob had the tool
-        # (session_2026-07-20.log 21:07, "Review your memory").
+        # search it — this hat (then named Cobe) once couldn't recall a trade
+        # structure that had aged out of the window mid-session because only
+        # Bob had the tool (session_2026-07-20.log 21:07, "Review your memory").
         "tools": {"get_recent_discord_messages", "search_discord_messages",
                   "get_recent_trades", "search_knowledge", "get_current_time",
                   "search_past_conversations",
                   "set_conversation_model", "switch_agent"},
         "model": "sonnet",      # analysis benefits from the stronger model
-        # Only Zira + David are installed on this machine, so Cobe shares
+        # Only Zira + David are installed on this machine, so Tom shares
         # David's voice at a slower, more deliberate rate; the spoken
-        # "Cobe here." announcement is the primary switch signal.
+        # "Tom here." announcement is the primary switch signal.
         "tts_voice": "David",
         "tts_rate": 155,
     },

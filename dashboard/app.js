@@ -178,7 +178,7 @@ views.overview = async function () {
 
 /* ================= Agents ================= */
 views.agents = async function () {
-  const sub = "The personas you talk to by voice — say a name (\"Bob, …\") or \"switch to Cobe\" to change who answers.";
+  const sub = "The personas you talk to by voice — say a name (\"Bob, …\") or \"switch to Tom\" to change who answers.";
   main.innerHTML = header("Agents", sub);
   let data, voices;
   try {

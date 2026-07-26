@@ -217,7 +217,7 @@ class ConversationMemory:
         verbatim text of messages that fell off the window since the last
         boot. Consolidation only runs at startup, so without this a long
         session has a blind spot: something said two hours ago is neither in
-        the live window nor searchable in the archive (exactly how Cobe lost
+        the live window nor searchable in the archive (exactly how Tom lost
         a trade structure mid-session, 2026-07-20 21:07). No model call, no
         embeddings — the lines are already on disk; just read them."""
         words = {w for w in re.findall(r"[a-z0-9']+", (query or "").lower())

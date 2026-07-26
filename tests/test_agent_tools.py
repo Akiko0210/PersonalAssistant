@@ -20,13 +20,13 @@ class TestSwitchAgent(unittest.TestCase):
 
     def test_forward_travels_with_the_switch(self):
         dispatch(self.ctx, "switch_agent",
-                 {"agent": "cobe", "forward": "what came in on Discord today?"})
+                 {"agent": "tom", "forward": "what came in on Discord today?"})
         self.assertEqual(self.ctx.pending_switch,
-                         ("cobe", "what came in on Discord today?"))
+                         ("tom", "what came in on Discord today?"))
 
     def test_alias_resolution(self):
-        dispatch(self.ctx, "switch_agent", {"agent": "kobe"})
-        self.assertEqual(self.ctx.pending_switch[0], "cobe")
+        dispatch(self.ctx, "switch_agent", {"agent": "thom"})
+        self.assertEqual(self.ctx.pending_switch[0], "tom")
 
     def test_self_switch_is_a_noop(self):
         out = dispatch(self.ctx, "switch_agent", {"agent": "alice"})
@@ -45,14 +45,14 @@ class TestPerAgentToolFiltering(unittest.TestCase):
                                                        "switch_agent"})]
         self.assertEqual(sorted(names), ["get_current_time", "switch_agent"])
 
-    def test_alice_cannot_touch_notes_and_cobe_cannot_save(self):
+    def test_alice_cannot_touch_notes_and_tom_cannot_save(self):
         alice = {t["name"] for t in api_tools(include=agents.AGENTS["alice"]["tools"])}
-        cobe = {t["name"] for t in api_tools(include=agents.AGENTS["cobe"]["tools"])}
+        tom = {t["name"] for t in api_tools(include=agents.AGENTS["tom"]["tools"])}
         bob = {t["name"] for t in api_tools(include=agents.AGENTS["bob"]["tools"])}
         self.assertNotIn("search_notes", alice)
-        self.assertNotIn("save_conversation_note", cobe)
+        self.assertNotIn("save_conversation_note", tom)
         self.assertIn("search_notes", bob)
-        self.assertIn("search_knowledge", cobe)
+        self.assertIn("search_knowledge", tom)
 
     def test_exclude_still_works_alongside_include(self):
         names = [t["name"] for t in

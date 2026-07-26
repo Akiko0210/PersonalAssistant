@@ -58,16 +58,16 @@ class TestHats(unittest.TestCase):
         self.assertEqual(names, set(agents.AGENTS["alice"]["tools"]))
         self.assertIn("You are Alice", call["system"])
 
-    def test_switch_to_cobe_changes_model_tools_and_prompt(self):
+    def test_switch_to_tom_changes_model_tools_and_prompt(self):
         c = make_claude()
-        c.switch_to("cobe")
+        c.switch_to("tom")
         c.converse("how did SPX trades go?")
         call = c.client.messages.calls[0]
         self.assertEqual(call["model"], cfg.CONVO_MODELS["sonnet"])
         names = {t["name"] for t in call["tools"]}
         self.assertIn("search_knowledge", names)
         self.assertNotIn("search_notes", names)
-        self.assertIn("You are Cobe", call["system"])
+        self.assertIn("You are Tom", call["system"])
 
     def test_shared_history_survives_switching(self):
         c = make_claude()
@@ -80,11 +80,11 @@ class TestHats(unittest.TestCase):
 
     def test_model_override_sticks_to_its_hat(self):
         c = make_claude()
-        c.switch_to("cobe")
-        c._ctx.convo_model = cfg.CONVO_MODELS["opus"]  # "make Cobe smarter"
+        c.switch_to("tom")
+        c._ctx.convo_model = cfg.CONVO_MODELS["opus"]  # "make Tom smarter"
         c.switch_to("alice")
         self.assertEqual(c._ctx.convo_model, cfg.CONVO_MODELS["haiku"])
-        c.switch_to("cobe")
+        c.switch_to("tom")
         self.assertEqual(c._ctx.convo_model, cfg.CONVO_MODELS["opus"])
 
     def test_pending_switch_roundtrip(self):

@@ -72,7 +72,7 @@ class Claude:
         agents.load_agents()
         self.active = agents.DEFAULT_AGENT
         # Per-hat snapshots of a mid-session set_conversation_model choice, so
-        # "make Cobe smarter" survives switching away and back but never
+        # "make Tom smarter" survives switching away and back but never
         # bleeds into the other personas.
         self._model_overrides = {}
         # Everything tool handlers may touch (see tools/); also carries the

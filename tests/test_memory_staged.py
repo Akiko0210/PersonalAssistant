@@ -2,8 +2,8 @@
 
 The guarantee under test: text that ages out of the live window MID-SESSION is
 still findable. Consolidation only runs at boot, so staged lines used to be a
-blind spot — neither in the window nor in the archive — which is how Cobe
-couldn't recall a trade structure discussed three hours earlier
+blind spot — neither in the window nor in the archive — which is how the
+trading hat couldn't recall a trade structure discussed three hours earlier
 (session_2026-07-20.log 21:07, "Review your memory" / "we just talked about
 it, forgot it already")."""
 
@@ -30,7 +30,7 @@ class TestSearchStaged(unittest.TestCase):
         self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines])
 
     def test_finds_aged_out_lines_by_keyword(self):
-        # The exact Cobe scenario: the structure aged out, then is asked about.
+        # The exact trading-hat scenario: aged out, then asked about.
         self._stage(
             "put two-thirds into the core thirty-five delta puts, the guts",
             "the kicker is the fifteen delta tail sleeve sixty-five days out",
