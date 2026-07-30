@@ -222,7 +222,14 @@ central list or dispatch chain.
 - **memory** (`memory_tools.py`): `search_past_conversations`.
 - **knowledge** (`knowledge_tools.py`): `search_knowledge`.
 - **model** (`model_tools.py`): `set_conversation_model` — switch the
-  conversation model between Haiku 4.5, Sonnet 5, and Opus 4.8 by voice.
+  conversation model between Haiku 4.5, Sonnet 5, Opus 5, and (when
+  `DEEPSEEK_API_KEY` is set) DeepSeek V4 Flash / Pro by voice. DeepSeek runs
+  through its Anthropic-compatible endpoint via `Claude.client_for`, so every
+  model shares one code path; `config.model_provider` is the routing rule.
+  A mid-session choice is remembered **per persona** (`Claude._model_overrides`),
+  and `Claude.active_model` resolves what the current hat will actually answer
+  with — read by the switch announcement, which speaks it ("Bob here, running on
+  Haiku 4.5") because the model is the one part of a switch you can't hear.
 - **project** (`project_tools.py`): `describe_project` — returns this document so
   the agent can answer questions about its own design.
 

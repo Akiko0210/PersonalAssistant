@@ -205,19 +205,34 @@ cites the source (and page, for PDFs). `run.bat --kb-list` shows what's been
 ingested. The
 content stays local and, like the rest of `data/`, is gitignored.
 
-## Switching the Claude model by voice
+## Switching the model by voice
 
 Conversation defaults to **Haiku 4.5** for low latency. Ask for a different model
 mid-conversation and it switches from that reply onward:
 
-- "switch to Opus" / "use the smartest model" → **Opus 4.8** (most capable, slowest)
+- "switch to Opus" / "use the smartest model" → **Opus 5** (most capable, slowest)
 - "use Sonnet" → **Sonnet 5** (stronger reasoning, a little slower)
 - "go back to the fast one" → **Haiku 4.5**
+- "use the cheap one" / "switch to DeepSeek" → **DeepSeek V4 Flash** (external, by far the cheapest)
+- "use DeepSeek pro" → **DeepSeek V4 Pro** (DeepSeek's strongest)
+
+The DeepSeek options talk to DeepSeek's Anthropic-compatible API through the same
+client code; they require `DEEPSEEK_API_KEY` in `.env` (see `.env.example`) and
+are refused out loud when it's missing. Your conversation history goes to
+DeepSeek's servers while one is active.
 
 The choice lasts for the session and resets to the fast default on restart (so you
 never get silently left on an expensive model). Note summaries always use
 `SUMMARY_MODEL` regardless. The models are defined in `config.py` under
 `CONVO_MODELS`.
+
+**Each persona remembers its own model.** Leave Tom on DeepSeek V4 Pro, switch to
+Bob, and Bob answers on his own model; switch back and Tom is still on DeepSeek.
+The switch announcement says which, since the model is the one thing you can't
+hear:
+
+> "Bob here, running on Haiku 4.5."
+> "Tom here, running on DeepSeek V4 Pro."
 
 ## Asking the agent about itself
 

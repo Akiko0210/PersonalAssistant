@@ -36,6 +36,7 @@ class CapturingMessages:
 def make_claude():
     c = Claude.__new__(Claude)
     c.client = SimpleNamespace(messages=CapturingMessages())
+    c._deepseek = None  # client_for builds it on demand; never in these tests
     c.active = agents.DEFAULT_AGENT
     c._model_overrides = {}
     c._ctx = ToolContext(active_agent=c.active,
@@ -86,6 +87,25 @@ class TestHats(unittest.TestCase):
         self.assertEqual(c._ctx.convo_model, cfg.CONVO_MODELS["haiku"])
         c.switch_to("tom")
         self.assertEqual(c._ctx.convo_model, cfg.CONVO_MODELS["opus"])
+
+    def test_active_model_reports_registry_default_then_override(self):
+        c = make_claude()
+        c.switch_to("tom")
+        self.assertEqual(c.active_model, cfg.CONVO_MODELS["sonnet"])
+        self.assertEqual(c.active_model_label, "Sonnet 5")
+        c._ctx.convo_model = cfg.CONVO_MODELS["deepseek pro"]
+        self.assertEqual(c.active_model_label, "DeepSeek V4 Pro")
+
+    def test_each_hat_reports_its_own_remembered_model(self):
+        # The switch announcement's whole point: leave Tom on DeepSeek, visit
+        # Bob (Haiku), come back to Tom and still be told DeepSeek.
+        c = make_claude()
+        c.switch_to("tom")
+        c._ctx.convo_model = cfg.CONVO_MODELS["deepseek pro"]
+        c.switch_to("bob")
+        self.assertEqual(c.active_model_label, "Haiku 4.5")
+        c.switch_to("tom")
+        self.assertEqual(c.active_model_label, "DeepSeek V4 Pro")
 
     def test_pending_switch_roundtrip(self):
         c = make_claude()

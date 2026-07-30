@@ -1,6 +1,12 @@
-"""Claude integration: conversation (with note-access tools) and summarisation."""
+"""Claude integration: conversation (with note-access tools) and summarisation.
+
+DeepSeek models ride the same code path: their Anthropic-compatible endpoint
+speaks the Messages API, so `client_for` just picks which anthropic-SDK client
+a model id goes to. Nothing downstream — tool loop, history invariants, error
+handling — knows more than one provider exists."""
 
 import logging
+import os
 from datetime import datetime
 
 import anthropic
@@ -44,6 +50,42 @@ Transcript:
 """
 
 
+_CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def cached(history):
+    """Copy of `history` carrying a prompt-cache breakpoint on its last block.
+
+    Prompt caching is a prefix match, so one breakpoint at the end of the history
+    caches everything rendered before it — tool schemas, system prompt, and the
+    whole conversation so far. The breakpoint has to go here rather than on the
+    system block because the static part alone is too small to cache: tools plus
+    system measure 1,967-3,492 tokens depending on the agent, all under Haiku
+    4.5's 4096-token minimum, below which the API caches nothing and says so only
+    by leaving cache_creation_input_tokens at 0.
+
+    This is the payoff for the tool loop in particular: one turn can make up to
+    CONVO_MAX_TOOL_ROUNDS calls that each resend the entire prefix, so rounds 2..n
+    read at a tenth of the input price instead of paying full freight again.
+
+    Returns a copy — self.history is written to disk every turn, and persisting
+    cache_control markers would leave stale breakpoints scattered through the
+    restored history."""
+    if not history:
+        return history
+    content = history[-1].get("content")
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    elif isinstance(content, list):
+        content = [dict(b) if isinstance(b, dict) else b for b in content]
+    else:
+        return history
+    if not content or not isinstance(content[-1], dict):
+        return history  # SDK block objects are immutable; skip rather than crash
+    content[-1] = {**content[-1], "cache_control": _CACHE_CONTROL}
+    return history[:-1] + [{**history[-1], "content": content}]
+
+
 class _NullIdle:
     """No-op stand-in so Claude runs without an idle-sound controller (selftest)."""
 
@@ -57,6 +99,7 @@ class _NullIdle:
 class Claude:
     def __init__(self, store, idle=None, kb=None):
         self.client = anthropic.Anthropic()
+        self._deepseek = None  # lazily built by client_for; needs DEEPSEEK_API_KEY
         self.store = store
         self.discord = DiscordData()
         # The agent shares its single KnowledgeStore (same one used for boot-time
@@ -75,12 +118,22 @@ class Claude:
         # "make Tom smarter" survives switching away and back but never
         # bleeds into the other personas.
         self._model_overrides = {}
+        # Tools that make their own model calls (staged-memory recall,
+        # consolidation) always run on cfg.CONVO_MODEL, so hand them the client
+        # that serves it. If that model's key is missing, fall back to the
+        # Anthropic client rather than refuse to boot — recall then degrades to
+        # its keyword scan instead of taking the whole agent down.
+        try:
+            tool_client = self.client_for(cfg.CONVO_MODEL)
+        except RuntimeError as e:
+            log.warning("memory calls fall back to the Anthropic client: %s", e)
+            tool_client = self.client
         # Everything tool handlers may touch (see tools/); also carries the
         # pending conversation note and the active conversation model (which the
         # set_conversation_model tool can switch mid-session).
         self._ctx = ToolContext(store=self.store, discord=self.discord,
                                 kb=self.kb, memory=self.memory,
-                                client=self.client,
+                                client=tool_client,
                                 convo_model=self._registry_model(self.active),
                                 active_agent=self.active)
         self._write_agent_state()
@@ -89,6 +142,24 @@ class Claude:
         self.history = self._load_history()
         # Looped while we wait on the model, so the user hears the agent thinking.
         self.idle = idle if idle is not None else _NullIdle()
+
+    def client_for(self, model_id):
+        """The API client serving `model_id`: the shared Anthropic client, or a
+        lazily created one for DeepSeek's Anthropic-compatible endpoint. The
+        set_conversation_model tool refuses a DeepSeek switch when the key is
+        missing, so by voice this can't raise; the RuntimeError covers config
+        edits (dashboard model dropdowns) that sidestep the tool."""
+        if cfg.model_provider(model_id) != "deepseek":
+            return self.client
+        if self._deepseek is None:
+            key = os.environ.get("DEEPSEEK_API_KEY")
+            if not key:
+                raise RuntimeError(
+                    "DEEPSEEK_API_KEY is not set — add it to .env to use "
+                    f"{model_id}, or switch back to a Claude model.")
+            self._deepseek = anthropic.Anthropic(
+                base_url=cfg.DEEPSEEK_BASE_URL, api_key=key)
+        return self._deepseek
 
     # Set by the save_conversation_note tool; the agent picks it up after the
     # reply and runs the folder dialogue + save (see voice_agent).
@@ -127,6 +198,19 @@ class Claude:
     def _registry_model(key):
         """The API model id an agent's registry entry names."""
         return cfg.CONVO_MODELS.get(agents.AGENTS[key]["model"], cfg.CONVO_MODEL)
+
+    @property
+    def active_model(self):
+        """API model id the active persona answers with — its registry default
+        unless a mid-session set_conversation_model override is in play. Same
+        expression converse() resolves each call, exposed so callers (the switch
+        announcement) can report the model without reaching into _ctx."""
+        return self._ctx.convo_model or self._registry_model(self.active)
+
+    @property
+    def active_model_label(self):
+        """Spoken name of the active model, e.g. "DeepSeek V4 Pro"."""
+        return cfg.convo_model_label(self.active_model)
 
     def switch_to(self, key):
         """Make `key` the active persona: its system prompt, tool allowlist,
@@ -265,13 +349,13 @@ class Claude:
                     "one, use the set_conversation_model tool."
                 ))
                 try:
-                    resp = self.client.messages.create(
+                    resp = self.client_for(model).messages.create(
                         model=model,
                         max_tokens=cfg.CONVO_MAX_TOKENS,
                         system=system,
                         tools=api_tools(include=hat["tools"]),
-                        thinking={"type": "disabled"},
-                        messages=self.history,
+                        messages=cached(self.history),
+                        **cfg.thinking_kwargs(model),
                     )
                 except anthropic.NotFoundError:
                     # A switched-to model id the API no longer serves must not
@@ -351,11 +435,13 @@ class Claude:
         prompt = SUMMARY_PROMPT.format(categories=self._category_guidance())
         self.idle.start()
         try:
-            resp = self.client.messages.create(
+            # No cache breakpoint: one call per note against a transcript that is
+            # never seen twice, so a write would be paid and never read.
+            resp = self.client_for(cfg.SUMMARY_MODEL).messages.create(
                 model=cfg.SUMMARY_MODEL,
                 max_tokens=cfg.SUMMARY_MAX_TOKENS,
-                thinking={"type": "adaptive"},
                 messages=[{"role": "user", "content": prompt + transcript}],
+                **cfg.thinking_kwargs(cfg.SUMMARY_MODEL, cfg.SUMMARY_EFFORT),
             )
         finally:
             self.idle.stop()
@@ -446,13 +532,14 @@ class Claude:
         try:
             for _ in range(max_turns):
                 self.idle.start()  # thinking; stopped below before we speak/listen
-                resp = self.client.messages.create(
-                    model=self._ctx.convo_model or cfg.CONVO_MODEL,
+                model = self._ctx.convo_model or cfg.CONVO_MODEL
+                resp = self.client_for(model).messages.create(
+                    model=model,
                     max_tokens=cfg.CONVO_MAX_TOKENS,
                     system=system,
                     tools=tools,
-                    thinking={"type": "disabled"},
-                    messages=history,
+                    messages=cached(history),
+                    **cfg.thinking_kwargs(model),
                 )
                 history.append({"role": "assistant", "content": resp.content})
 

@@ -401,13 +401,20 @@ class Agent:
         """Flip the active persona everywhere it shows: model/tools/prompt
         (llm.switch_to), the speaking voice, and a short spoken announcement —
         the announcement is the load-bearing signal on machines where two
-        personas share a SAPI voice."""
+        personas share a SAPI voice.
+
+        The announcement names the model too. Each persona remembers its own
+        mid-session model choice (Claude.switch_to), so switching back to a hat
+        left on an expensive or external model is otherwise silent — and the
+        conversation model is exactly the thing you can't hear."""
         self.llm.switch_to(key)
         hat = agents.AGENTS[key]
         self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
         self._speaking_voice = self.tts.current_voice()
-        self.log.info("=== talking to %s ===", hat["name"])
-        self.say(f"{hat['name']} here.", voice=False, commands=False)
+        model = self.llm.active_model_label
+        self.log.info("=== talking to %s (%s) ===", hat["name"], model)
+        self.say(f"{hat['name']} here, running on {model}.",
+                 voice=False, commands=False)
 
     def _converse_with_followups(self, text: str) -> str:
         """Collect the *whole* turn before calling the model, so a pause

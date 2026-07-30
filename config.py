@@ -212,15 +212,62 @@ BACKCHANNEL_MAX_WORDS = 3     # "oh okay yeah" is a filler; a longer utterance i
 CONVO_MODELS = {
     "haiku": "claude-haiku-4-5",   # fastest, lowest latency — the default
     "sonnet": "claude-sonnet-5",   # stronger reasoning, a bit slower
-    "opus": "claude-opus-4-8",     # most capable, slowest and priciest
+    "opus": "claude-opus-5",       # most capable, slowest and priciest
+    # DeepSeek, served through their Anthropic-compatible endpoint (see
+    # DEEPSEEK_BASE_URL below) — same Messages API, same tool_use/tool_result
+    # blocks, so the whole tool loop and history machinery work unchanged.
+    # Cheapest by far; needs DEEPSEEK_API_KEY in .env or the switch is refused.
+    "deepseek": "deepseek-v4-flash",      # cheap + fast external option
+    "deepseek pro": "deepseek-v4-pro",    # DeepSeek's strongest
 }
 CONVO_MODEL_LABELS = {
     "claude-haiku-4-5": "Haiku 4.5",
     "claude-sonnet-5": "Sonnet 5",
-    "claude-opus-4-8": "Opus 4.8",
+    "claude-opus-5": "Opus 5",
+    "deepseek-v4-flash": "DeepSeek V4 Flash",
+    "deepseek-v4-pro": "DeepSeek V4 Pro",
 }
 CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)
-SUMMARY_MODEL = "claude-sonnet-4-6"   # higher quality for note summaries
+SUMMARY_MODEL = "claude-sonnet-5"     # higher quality for note summaries
+
+# DeepSeek's Anthropic-compatible endpoint: speaks the Messages API (client-side
+# tool use fully supported) so it works through the same anthropic SDK client,
+# just with this base_url and its own key. Known differences, all harmless here:
+# cache_control is ignored (DeepSeek caches automatically server-side, with its
+# own cache-hit pricing), thinking budget_tokens is ignored, and images are
+# unsupported (this app never sends any).
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
+
+
+def model_provider(model_id: str) -> str:
+    """Which API serves a model id: 'anthropic' or 'deepseek'. The single
+    routing rule for client selection — keep any new provider logic here."""
+    return "deepseek" if (model_id or "").startswith("deepseek") else "anthropic"
+
+# --- thinking ----------------------------------------------------------------
+# Effort level for models that support it. Conversation runs low: turns are short
+# spoken answers plus tool calls, not deep reasoning, and effort is the main lever
+# on both latency and token spend. Summaries run a step higher — a note is
+# written once and kept, so quality matters more there than the seconds or cents.
+CONVO_EFFORT = "low"
+SUMMARY_EFFORT = "medium"
+# Models that accept adaptive thinking and the effort parameter. Haiku 4.5
+# accepts neither — it has no adaptive mode, and sending `effort` is rejected
+# outright — so it is deliberately absent and falls through to thinking-off,
+# which suits the low-latency default anyway. DeepSeek models are absent for
+# the same reason: adaptive thinking and output_config are Anthropic-specific,
+# and thinking-off keeps spoken turns snappy there too.
+#
+# Everything else must NOT run with thinking disabled: on Opus 5 a
+# thinking-disabled turn occasionally writes a tool call into its visible text
+# instead of emitting a real tool_use block. The call never runs, no error is
+# raised, and the turn looks successful — the same silent-failure shape as the
+# truncated-tool-call bug behind CONVO_MAX_TOKENS above, and fatal to an agent
+# whose ground rule is "if you did not call a tool, nothing happened".
+ADAPTIVE_THINKING_MODELS = frozenset({
+    "claude-sonnet-5", "claude-opus-5", "claude-fable-5",
+    "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6",
+})
 # Reply budget must cover TOOL CALLS too, not just spoken sentences: a
 # save_conversation_note carrying a full written-up document is one big JSON
 # blob inside the reply. At 1024 a long note was truncated mid-JSON
@@ -239,6 +286,20 @@ CONVO_MAX_TOOL_ROUNDS = 15
 def convo_model_label(model_id: str) -> str:
     """Friendly spoken name for a conversation model id."""
     return CONVO_MODEL_LABELS.get(model_id, model_id)
+
+
+def thinking_kwargs(model_id: str, effort: str = None) -> dict:
+    """Per-model thinking/effort arguments for messages.create().
+
+    The conversation model is switchable by voice mid-session, and the models it
+    switches between disagree about this parameter: sending `effort` to Haiku 4.5
+    errors, while leaving thinking disabled on Opus 5 causes silently-dropped
+    tool calls (see ADAPTIVE_THINKING_MODELS). Deriving the arguments from the
+    model id keeps every call site correct across a switch."""
+    if model_id in ADAPTIVE_THINKING_MODELS:
+        return {"thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort or CONVO_EFFORT}}
+    return {"thinking": {"type": "disabled"}}
 
 # Universal ground rules shared by every persona. Domain guidance (notes,
 # trading) lives in each agent's persona block in agents.py — splitting the

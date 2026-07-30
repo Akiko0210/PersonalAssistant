@@ -32,7 +32,7 @@ Local Windows voice notetaking agent (Python). Two modes: **conversation** and *
 ## OPEN CONCERNS / DECISIONS PENDING
 
 1. **Merge `refactor` → `main`** — the biggest item. Until then the running app still burns credits on mid-thought pauses, has no single-instance guard, and does non-atomic writes. Merge-vs-cherry-pick not yet decided.
-2. **`HISTORY_MAX_MESSAGES = 40` is small** for the user's long technical conversations (~10–20 exchanges once tool calls are counted). Open: raise to ~150–200. Trade-off: per-turn input cost. **Prompt caching** was offered to keep a big window cheap — not implemented.
+2. **`HISTORY_MAX_MESSAGES = 40` is small** for the user's long technical conversations (~10–20 exchanges once tool calls are counted). Open: raise to ~150–200. **Prompt caching is now implemented** (`cached()` in `llm.py`), so the per-turn input cost of a bigger window is ~10% of what it was — the trade-off that kept this at 40 is largely gone.
 3. **Mid-session memory blind spot:** consolidation runs **only at boot**, so content that ages out of the 40-message window during a session isn't searchable until restart. Offered fix: periodic consolidation — not done.
 4. **Long-term memory is lossy** (summaries, not verbatim) and requires the model to *choose* to call `search_past_conversations`. Inherent to the design; the durable path is saving a note.
 5. **Settle latency is tunable:** ~1.4 s of silence before a reply (`CONVO_ENDPOINT_MS` 800 + `CONTINUATION_SETTLE_MS` 600). Suggested trying 800 / 400 — not changed.
@@ -52,4 +52,4 @@ Local Windows voice notetaking agent (Python). Two modes: **conversation** and *
 
 ## Recommended immediate next action
 
-Decide on **merging `refactor` → `main`** (or cherry-picking the settle fix + single-instance lock + atomic writes), so the running app actually benefits. Then optionally bump `HISTORY_MAX_MESSAGES` and add prompt caching.
+Decide on **merging `refactor` → `main`** (or cherry-picking the settle fix + single-instance lock + atomic writes), so the running app actually benefits. Then optionally bump `HISTORY_MAX_MESSAGES` — prompt caching is in, so a wider window is now cheap.
