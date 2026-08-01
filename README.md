@@ -241,6 +241,15 @@ hear:
 > "Bob here, running on Haiku 4.5."
 > "Tom here, running on DeepSeek V4 Pro."
 
+**Asking "what model are you on?" reads the real setting.** The personas share
+one conversation history, so it fills up with model talk that no longer applies
+— a switch Tom made, a choice from an hour ago. Left to answer from that, the
+agent guesses, and it has guessed wrong (claiming Opus while on Haiku, and
+DeepSeek while on Opus). Every persona now has a `get_current_model` tool and a
+hard rule to call it before saying anything about models, so the answer is a
+live read rather than a recollection — and it shows up as a `tool_use` line in
+`logs/` if you want to check.
+
 ## Asking the agent about itself
 
 The agent can answer questions about its own design — "how does barge-in work?",

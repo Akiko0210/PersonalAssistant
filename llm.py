@@ -427,11 +427,9 @@ class Claude:
                 model = self._ctx.convo_model or self._registry_model(self.active)
                 hat = agents.AGENTS[self.active]
                 system = (cfg.CONVO_SYSTEM_BASE + "\n\n" + hat["persona"]
-                          + agents.roster_block(self.active) + (
-                    f"\n\nYou are currently answering as {cfg.convo_model_label(model)}. "
-                    "If the user asks to change models, or for a smarter or faster "
-                    "one, use the set_conversation_model tool."
-                ))
+                          + agents.roster_block(self.active)
+                          + cfg.model_identity_block(
+                              cfg.convo_model_label(model)))
                 try:
                     resp = self.client_for(model).messages.create(
                         model=model,

@@ -254,6 +254,19 @@ central list or dispatch chain.
 - **time** (`time_tools.py`): `get_current_time`.
 - **memory** (`memory_tools.py`): `search_past_conversations`.
 - **knowledge** (`knowledge_tools.py`): `search_knowledge`.
+- **model** (`model_tools.py`): `get_current_model` — a live read of which
+  model and provider are answering, and as which persona. It resolves the same
+  expression `converse()` routes the API call with, so it cannot disagree with
+  reality. It exists because the model answers "which model are you?" from
+  conversation history, and that history is **shared by every persona**: it
+  carries switches other hats made and choices that have since changed. The
+  system prompt has always stated the truth, and the model overrode it from
+  history three times in one session — "I'm Opus" while on Haiku, "DeepSeek V4
+  Flash" while on Opus 5 (session_2026-07-31.log 11:32 / 11:48 / 12:23).
+  `config.model_identity_block` therefore makes it a hard rule: identity
+  questions are answered by this tool or not at all. The tool result lands at
+  the *end* of the context, where it outweighs old turns, and leaves an
+  auditable `tool_use` line in the log.
 - **model** (`model_tools.py`): `set_conversation_model` — switch the
   conversation model between Haiku 4.5, Sonnet 5, Opus 5, and (when
   `DEEPSEEK_API_KEY` is set) DeepSeek V4 Flash / Pro by voice. DeepSeek runs

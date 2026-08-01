@@ -39,7 +39,7 @@ AGENTS = {
             "there."
         ),
         "tools": {"get_current_time", "describe_project",
-                  "search_past_conversations",
+                  "search_past_conversations", "get_current_model",
                   "set_conversation_model", "switch_agent", "ask_agent"},
         "model": "haiku",       # key into cfg.CONVO_MODELS
         "tts_voice": "Zira",    # SAPI voice-name substring; None = default
@@ -80,8 +80,8 @@ AGENTS = {
                   "list_folders", "count_notes", "create_folder",
                   "rename_folder", "delete_folder", "move_note",
                   "save_conversation_note", "search_past_conversations",
-                  "get_current_time", "set_conversation_model", "switch_agent",
-                  "ask_agent"},
+                  "get_current_time", "get_current_model",
+                  "set_conversation_model", "switch_agent", "ask_agent"},
         "model": "haiku",
         "tts_voice": "David",
         "tts_rate": None,
@@ -113,7 +113,7 @@ AGENTS = {
         # Bob had the tool (session_2026-07-20.log 21:07, "Review your memory").
         "tools": {"get_recent_discord_messages", "search_discord_messages",
                   "get_recent_trades", "search_knowledge", "get_current_time",
-                  "search_past_conversations",
+                  "search_past_conversations", "get_current_model",
                   "set_conversation_model", "switch_agent", "ask_agent"},
         "model": "sonnet",      # analysis benefits from the stronger model
         # Only Zira + David are installed on this machine, so Tom shares

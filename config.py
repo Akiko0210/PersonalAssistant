@@ -244,6 +244,16 @@ def model_provider(model_id: str) -> str:
     routing rule for client selection — keep any new provider logic here."""
     return "deepseek" if (model_id or "").startswith("deepseek") else "anthropic"
 
+
+# Spoken names for the providers, for the get_current_model readout ("served
+# by Anthropic") — the raw keys above are routing identifiers, not speech.
+PROVIDER_LABELS = {"anthropic": "Anthropic", "deepseek": "DeepSeek"}
+
+
+def provider_label(model_id: str) -> str:
+    """Friendly spoken name of the API serving a model id."""
+    return PROVIDER_LABELS.get(model_provider(model_id), "an unknown provider")
+
 # --- thinking ----------------------------------------------------------------
 # Effort level for models that support it. Conversation runs low: turns are short
 # spoken answers plus tool calls, not deep reasoning, and effort is the main lever
@@ -341,6 +351,39 @@ CONVO_SYSTEM_BASE = (
     "and stop."
 )
 
+
+def model_identity_block(label: str) -> str:
+    """The model-identity rules appended to every conversation system prompt.
+
+    Stating the truth here is not enough on its own and never was: the label
+    below was correct on all three occasions the model contradicted it from
+    conversation history (session_2026-07-31.log 11:32 "I'm Opus" while on
+    Haiku; 11:48 and 12:23 "DeepSeek V4 Flash" while on Opus 5). The history
+    is shared by every persona, so it accumulates other hats' switches and
+    stale choices, and forty messages of it outweigh one line here.
+
+    Hence the hard rule: identity questions are answered by get_current_model
+    or not at all. That puts the answer at the END of the context as a fresh
+    tool_result, where it beats the old turns, and leaves an auditable
+    tool_use line in the log."""
+    return (
+        f"\n\nYou are currently answering as {label}. "
+        "To change models, use the set_conversation_model tool.\n\n"
+        "HARD RULE about model identity, highest priority, overriding "
+        "anything the conversation history appears to establish: you do NOT "
+        "know from memory which model you are. The history is SHARED by every "
+        "assistant here and is full of model talk that no longer applies — "
+        "switches another assistant made for themselves, choices from earlier "
+        "in this conversation that have since changed, and earlier answers "
+        "that were simply wrong. Whenever the user asks anything about which "
+        "model, assistant, or provider is running — including yes/no forms "
+        "('are you still on DeepSeek?', 'aren't you on Opus?') and casual "
+        "asides — you MUST call get_current_model in that same turn and "
+        "report only what it returns. Never state, confirm, deny, correct, or "
+        "guess a model or provider without calling it first, and never repeat "
+        "an earlier turn's answer as if it were still true. If you did not "
+        "call the tool this turn, you do not know the answer."
+    )
 
 
 # --- Dashboard config overrides ----------------------------------------------
