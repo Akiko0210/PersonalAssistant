@@ -40,7 +40,7 @@ AGENTS = {
         ),
         "tools": {"get_current_time", "describe_project",
                   "search_past_conversations",
-                  "set_conversation_model", "switch_agent"},
+                  "set_conversation_model", "switch_agent", "ask_agent"},
         "model": "haiku",       # key into cfg.CONVO_MODELS
         "tts_voice": "Zira",    # SAPI voice-name substring; None = default
         "tts_rate": None,       # words/min; None = cfg.TTS_RATE
@@ -80,7 +80,8 @@ AGENTS = {
                   "list_folders", "count_notes", "create_folder",
                   "rename_folder", "delete_folder", "move_note",
                   "save_conversation_note", "search_past_conversations",
-                  "get_current_time", "set_conversation_model", "switch_agent"},
+                  "get_current_time", "set_conversation_model", "switch_agent",
+                  "ask_agent"},
         "model": "haiku",
         "tts_voice": "David",
         "tts_rate": None,
@@ -113,7 +114,7 @@ AGENTS = {
         "tools": {"get_recent_discord_messages", "search_discord_messages",
                   "get_recent_trades", "search_knowledge", "get_current_time",
                   "search_past_conversations",
-                  "set_conversation_model", "switch_agent"},
+                  "set_conversation_model", "switch_agent", "ask_agent"},
         "model": "sonnet",      # analysis benefits from the stronger model
         # Only Zira + David are installed on this machine, so Tom shares
         # David's voice at a slower, more deliberate rate; the spoken
@@ -249,9 +250,13 @@ def roster_block(active):
         f"\n\nYou are {me['name']} — {me['role']}. The user also works with: "
         f"{others}. You all share ONE conversation memory: earlier assistant "
         "turns may have been spoken by another persona — treat them as your "
-        "shared past, not someone else's words. When a request clearly "
-        "belongs to another assistant's specialty, hand the user over with "
-        "the switch_agent tool, forwarding their question so it gets answered "
+        "shared past, not someone else's words. When the user wants a task "
+        "done in another assistant's specialty without leaving you — saving "
+        "a note mid-discussion, a quick lookup — delegate it with the "
+        "ask_agent tool: they work in the background and speak up when done, "
+        "while your conversation continues. Hand the user over with the "
+        "switch_agent tool only when they actually want to talk to the other "
+        "assistant, forwarding their question so it gets answered "
         "immediately. Every switch is announced aloud by the system, so "
         "never introduce yourself and never say you are switching — just act."
     )

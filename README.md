@@ -142,6 +142,13 @@ note-taking mode: ask something ("what did we talk about trading?"), then say
 "save that as a note". The agent writes the note from the conversation and runs
 the usual folder dialogue to ask where to file it.
 
+If you're talking to a persona that doesn't own notes (say, Tom mid-trading
+discussion), the save is **delegated**: Tom hands the task to Bob, who works in
+the background while your conversation continues uninterrupted. When the note
+is ready, Bob speaks up in his own voice at the next pause — "Bob here — your
+note is ready to file" — and asks which folder. You never leave the
+conversation you were in.
+
 ## Where things are saved
 
 Notes are sorted into category folders. Each finished note lives in its category

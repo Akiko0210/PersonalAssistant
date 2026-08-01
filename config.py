@@ -281,6 +281,10 @@ SUMMARY_MAX_TOKENS = 2000
 # handful; a model stuck re-calling tools without ever answering would
 # otherwise bill unbounded API calls with no way to stop it by voice.
 CONVO_MAX_TOOL_ROUNDS = 15
+# Same cap for a delegated background task (ask_agent), but tighter: that loop
+# runs out of earshot, so a runaway would bill invisibly — and a real delegated
+# task is one or two tool calls, not a conversation.
+DELEGATION_MAX_TOOL_ROUNDS = 8
 
 
 def convo_model_label(model_id: str) -> str:

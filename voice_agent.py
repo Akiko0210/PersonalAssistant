@@ -156,6 +156,14 @@ class Agent:
         self.running = True
         self._interrupted_reply = None   # full text of the last interrupted reply
         self._interrupted_remaining = None  # unsaid portion after barge-in
+        # Background delegation (ask_agent): finished tasks queue their spoken
+        # result here; it is delivered only at utterance boundaries, in the
+        # working persona's own voice (see _deliver_interjections). The event
+        # is a gentle wake-up for the idle listener — collect_utterance honours
+        # it only between utterances, so a result never cuts the user off.
+        self.interjections: "queue.Queue[dict]" = queue.Queue()
+        self.interject = threading.Event()
+        self._delegation_threads = []
 
     # --- command plumbing ----------------------------------------------------
     def _push(self, cmd):
@@ -304,8 +312,13 @@ class Agent:
 
     # --- modes ---------------------------------------------------------------
     def run_conversation_turn(self):
+        # Background results that arrived while we were away (or that just
+        # ended the idle wait below) go out first — between utterances is
+        # exactly where an interjection belongs.
+        self._deliver_interjections()
         utt = self.audio.collect_utterance(
-            interrupt=self.interrupt, endpoint_ms=cfg.CONVO_ENDPOINT_MS
+            interrupt=self.interrupt, endpoint_ms=cfg.CONVO_ENDPOINT_MS,
+            wake=self.interject,
         )
         signals = self._drain()
         if "quit" in signals:
@@ -368,6 +381,21 @@ class Agent:
             return
         self.log.info("agent: %s", reply)
         interrupted = self.say(reply, save_resume=True)
+        self._after_reply(interrupted)
+
+    def _after_reply(self, interrupted: bool):
+        """Everything a turn leaves behind once its reply is spoken: background
+        delegations to start, a prepared note to file, a persona switch to
+        perform, and queued background results to deliver. One method so every
+        deferred slot is drained in one place, in a fixed order — a note save
+        that ran inside the switch's forwarded turn once escaped this
+        accounting and its folder question fired a turn later, eating the
+        user's next command (session_2026-07-31.log, 11:31)."""
+        # Delegations first: they run in the background, so starting them
+        # before the (possibly slow) note dialogue costs nothing and lets the
+        # work overlap it.
+        for key, task in self.llm.take_pending_delegations():
+            self._start_delegation(key, task)
 
         # The user asked to save something from the conversation as a note: the
         # model prepared it via save_conversation_note; now run the same folder
@@ -375,10 +403,19 @@ class Agent:
         pending = self.llm.take_pending_note()
         if pending:
             self._save_pending_note(pending)
-            if self.llm.take_pending_switch():
+            dropped = self.llm.take_pending_switch()
+            if dropped:
                 # Both in one turn is a model overreach; the note save owns the
-                # turn, and a stale switch must not fire minutes later.
-                self.log.info("dropped pending agent switch (note save took the turn)")
+                # turn, and a stale switch must not fire minutes later. Say so
+                # — a silent drop once left the user talking to the wrong
+                # persona for 16 minutes without knowing it
+                # (session_2026-07-31.log, 11:32).
+                name = agents.AGENTS[dropped[0]]["name"]
+                self.log.info("dropped pending agent switch "
+                              "(note save took the turn)")
+                self.say(f"By the way, I didn't switch you to {name} — "
+                         f"ask again if you still want {name}.",
+                         voice=False, commands=False)
             return
 
         # The model handed the conversation to another persona (switch_agent):
@@ -393,9 +430,30 @@ class Agent:
                 if forwarded:
                     self.log.info("agent: %s", forwarded)
                     interrupted = self.say(forwarded, save_resume=True)
+            # The forwarded turn ran INSIDE this one — past the pending-note
+            # check above. Drain whatever it queued here, where it happened,
+            # instead of letting it leak into the next turn.
+            pending = self.llm.take_pending_note()
+            if pending:
+                self._save_pending_note(pending, saver=agents.AGENTS[key]["name"])
+            for dkey, dtask in self.llm.take_pending_delegations():
+                self._start_delegation(dkey, dtask)
+            if self.llm.take_pending_switch():
+                # A switch queued by the forwarded turn itself. One hand-off
+                # per user turn: honouring a chain here could ping-pong
+                # personas without the user ever speaking. Dropping silently
+                # is safe — the user is exactly where the announced switch
+                # put them.
+                self.log.info("dropped chained agent switch "
+                              "(one hand-off per turn)")
 
         if not interrupted:
             self.audio.flush()
+            # A background result that finished while we were talking goes out
+            # now — right after the reply, before the user takes the floor.
+            # (After a barge-in the user is already talking, so it waits for
+            # the next between-turns gap instead.)
+            self._deliver_interjections()
 
     def _switch_agent(self, key):
         """Flip the active persona everywhere it shows: model/tools/prompt
@@ -415,6 +473,79 @@ class Agent:
         self.log.info("=== talking to %s (%s) ===", hat["name"], model)
         self.say(f"{hat['name']} here, running on {model}.",
                  voice=False, commands=False)
+
+    # --- background delegation (ask_agent) ------------------------------------
+    def _start_delegation(self, key, task):
+        """Run a task as another persona on a worker thread (see
+        llm.run_delegated_task); the user keeps talking to the active persona
+        meanwhile. The result — or an honest failure — is queued as an
+        interjection and spoken at the next utterance boundary; the worker
+        pokes self.interject so an idle wait ends promptly."""
+        hat = agents.AGENTS[key]
+        self.log.info("delegating to %s: %.120s", hat["name"], task)
+
+        def work():
+            try:
+                text, note = self.llm.run_delegated_task(key, task)
+                self.interjections.put({"agent": key, "text": text,
+                                        "note": note})
+            except Exception as e:  # noqa: BLE001 - a lost task must be reported, not raised
+                self.log.exception("delegated task for %s failed", hat["name"])
+                self.interjections.put({
+                    "agent": key, "note": None,
+                    "text": ("I couldn't finish the task that was sent to "
+                             "me. " + explain_error(e)),
+                })
+            finally:
+                self.interject.set()
+
+        t = threading.Thread(target=work, daemon=True, name=f"delegate-{key}")
+        self._delegation_threads.append(t)
+        t.start()
+
+    def _deliver_interjections(self):
+        """Speak queued background-task results, each in its own persona's
+        voice. Called only at utterance boundaries — after a reply finishes,
+        or when a finished worker ends the idle wait — and it stands down
+        whenever the user already holds the floor: buffered speech or a muted
+        microphone leaves the queue untouched for the next boundary."""
+        self.interject.clear()
+        if self.audio.muted.is_set() or self.audio.has_buffered_speech():
+            return
+        while True:
+            try:
+                item = self.interjections.get_nowait()
+            except queue.Empty:
+                return
+            self._speak_interjection(item)
+
+    def _speak_interjection(self, item):
+        """One background result, spoken as the persona that produced it; the
+        active persona's voice is restored afterwards. The announcement is
+        deliberately NOT voice-interruptible: it is one or two short
+        sentences, and it is the single moment the background work has to
+        reach the user — a barge-in here would strand the result (or a
+        prepared note) invisibly."""
+        hat = agents.AGENTS[item["agent"]]
+        active = agents.AGENTS[self.llm.active]
+        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
+        self._speaking_voice = self.tts.current_voice()
+        try:
+            note = item.get("note")
+            if note:
+                self.say(f"{hat['name']} here — your note is ready to file.",
+                         voice=False, commands=False)
+                self._save_pending_note(note, saver=hat["name"])
+            else:
+                self.say(f"{hat['name']} here — {item['text']}",
+                         voice=False, commands=False)
+                self.llm.record_tool_event(
+                    f"{hat['name']} finished a background task (ask_agent) "
+                    f"and told the user: {item['text']}")
+                self.llm.flush_tool_events(persist=True)
+        finally:
+            self.tts.set_voice(active["tts_voice"], active["tts_rate"])
+            self._speaking_voice = self.tts.current_voice()
 
     def _converse_with_followups(self, text: str) -> str:
         """Collect the *whole* turn before calling the model, so a pause
@@ -710,10 +841,12 @@ class Agent:
         if not interrupted:
             self.audio.flush()
 
-    def _save_pending_note(self, pending: dict):
+    def _save_pending_note(self, pending: dict, saver: str = None):
         """Save a note the model prepared from the conversation (via the
         save_conversation_note tool): confirm the folder through the usual spoken
-        dialogue, then file it exactly like a recorded note."""
+        dialogue, then file it exactly like a recorded note. `saver` names the
+        persona that prepared it when that wasn't the active one (a delegated
+        background save), so the shared history records who actually did it."""
         title = pending["title"]
         content = pending["content"]
         spoken = pending.get("spoken") or f"I've saved a note called {title}."
@@ -739,8 +872,11 @@ class Agent:
         # model still thinks the note is "pending" (the placeholder the tool
         # returned mid-turn). Record what actually happened and fold it in.
         display = categories.NOTE_CATEGORIES[category]["display"]
+        actor = (f"{saver} (working in the background) completed a note save"
+                 if saver else
+                 "Completed the note the user asked me to save")
         self.llm.record_tool_event(
-            f"Completed the note the user asked me to save (save_conversation_note): "
+            f"{actor} (save_conversation_note): "
             f"after a spoken folder-choice dialogue it was filed into the {display} "
             f"folder and saved as note {note_id} — titled '{title}'."
         )
@@ -816,10 +952,44 @@ class Agent:
         except KeyboardInterrupt:
             pass
         finally:
+            self._rescue_background_notes()
             self.audio.stop()
             if getattr(self, "_media", None) is not None:
                 self._media.stop()
             self.log.info("shut down")
+
+    def _rescue_background_notes(self):
+        """Quit safety: a note a background task prepared but never got to ask
+        about must not evaporate with the process — file it into its suggested
+        folder silently (we're shutting down; there is no one to ask). Tasks
+        still mid-flight can't be rescued; their loss is at least logged."""
+        alive = [t.name for t in self._delegation_threads if t.is_alive()]
+        if alive:
+            self.log.warning("quitting with background task(s) still running "
+                             "(%s) — their results are lost",
+                             ", ".join(alive))
+        while True:
+            try:
+                item = self.interjections.get_nowait()
+            except queue.Empty:
+                return
+            note = item.get("note")
+            if not note:
+                continue
+            category = (self.store._match_category(note.get("category"))
+                        or categories.DEFAULT_CATEGORY)
+            note_id = self.store.new_session()
+            self.store.append_transcript(
+                note_id,
+                "(Saved at shutdown from a background task — quit arrived "
+                "before the folder question could be asked)\n\n"
+                + note["content"],
+            )
+            self.store.save_summary(note_id, note["title"], note["content"],
+                                    category)
+            self.log.info("rescued background note '%s' -> %s "
+                          "(quit before the folder question)",
+                          note["title"], category)
 
 
 def selftest():

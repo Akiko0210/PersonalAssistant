@@ -181,10 +181,42 @@ unit-tested without a microphone, speakers, or an API key.
    `BargeInDetector`; if it fires, TTS stops, the captured speech is pushed back
    for the next turn, and (optionally) the unsaid tail is remembered for a
    "continue" command.
-6. History is saved to `data/history.json` after the turn.
+6. `_after_reply` drains, in fixed order, everything the reply's tool calls
+   deferred: background delegations start (`ask_agent`), a prepared note runs
+   the folder-choice dialogue and is filed (`save_conversation_note`), and a
+   persona hand-off is performed (`switch_agent`, answering any forwarded
+   question in the new voice). A note prepared *inside* a forwarded turn is
+   drained right there — deferred work must never outlive the turn that
+   created it (that leak once ate a "switch me back" command).
+7. History is saved to `data/history.json` after the turn.
 
-If the reply's tool calls included `save_conversation_note`, the agent then runs
-the folder-choice dialogue and files the note.
+### Personas and background delegation
+
+Alice (general), Bob (notes/memory), and Tom (trading) are per-turn
+configurations — system prompt, tool allowlist, model, TTS voice — over ONE
+shared conversation (`agents.py`). Switching never fragments memory.
+
+A request can move between personas two ways, and the difference is the core
+of the design:
+
+- **`switch_agent` — the user moves.** They talk to the other persona from now
+  on. Announced aloud with the persona's model ("Bob here, running on Haiku
+  4.5") because the model is the one part of a switch you can't hear.
+- **`ask_agent` — a task moves.** The other persona runs it in the background
+  (`Claude.run_delegated_task`: an isolated mini tool-loop on its own thread,
+  its own message list and `ToolContext` — the shared history never sees it),
+  while the user keeps talking to the persona they were with. The result is
+  queued as a spoken **interjection**, delivered in the worker persona's own
+  voice at the next utterance boundary: after the current reply finishes, or
+  immediately if the agent is idle (a `wake` event ends the listening wait,
+  but never mid-utterance — the user is never cut off, and never spoken
+  over). The delivery announcement is deliberately not interruptible: it is
+  the one moment the background work has to reach the user. If the task
+  prepared a note, the interjection runs the normal folder-choice dialogue —
+  so it is the *worker* persona's voice asking "which folder?". What happened
+  is folded back into the shared history via `record_tool_event`, and a note
+  still waiting for its folder question at quit is rescued into its suggested
+  folder rather than lost.
 
 ---
 
@@ -200,7 +232,8 @@ def my_tool(ctx, args):
 ```
 
 - **`ctx`** is the shared `ToolContext` (the stores: `store`, `discord`, `kb`,
-  `memory`; plus mutable session state: `pending_note`, `convo_model`).
+  `memory`; plus mutable session state: `pending_note`, `pending_switch`,
+  `pending_delegations`, `convo_model`, `active_agent`).
 - **`args`** is the raw input dict from the model.
 - The return string becomes the `tool_result` fed back to the model.
 
@@ -232,6 +265,10 @@ central list or dispatch chain.
   Haiku 4.5") because the model is the one part of a switch you can't hear.
 - **project** (`project_tools.py`): `describe_project` — returns this document so
   the agent can answer questions about its own design.
+- **agents** (`agent_tools.py`): `switch_agent` — hand the user over to another
+  persona (deferred via `pending_switch`, so the goodbye finishes in the old
+  voice); `ask_agent` — delegate a task to another persona in the background
+  (deferred via `pending_delegations`; result spoken as an interjection — §4).
 
 ---
 

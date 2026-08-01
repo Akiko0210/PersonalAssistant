@@ -49,6 +49,14 @@ Categories (choose exactly one slug for CATEGORY):
 Transcript:
 """
 
+DELEGATION_PROMPT = """You are {name} — {role}. Another assistant handed you the task below to do in \
+the BACKGROUND: the user is still talking to them and cannot hear you work. Complete the task with \
+your tools, then reply with one or two short plain sentences reporting the outcome — the system \
+speaks them to the user, as you, at the next pause in their conversation, so write them to be read \
+aloud (no markdown). Do not greet or introduce yourself; the system announces you. If the task is \
+to save a note, call save_conversation_note and reply with a brief acknowledgement — the system \
+will ask the user which folder itself, so never mention folders."""
+
 
 _CACHE_CONTROL = {"type": "ephemeral"}
 
@@ -192,6 +200,82 @@ class Claude:
         Returns (agent_key, forward_text) or None."""
         pending, self._ctx.pending_switch = self._ctx.pending_switch, None
         return pending
+
+    def take_pending_delegations(self):
+        """Hand over (and clear) the background tasks ask_agent queued this
+        turn, as a list of (agent_key, task_text)."""
+        pending, self._ctx.pending_delegations = self._ctx.pending_delegations, []
+        return pending
+
+    # --- background delegation ------------------------------------------------
+    def run_delegated_task(self, key, task):
+        """Run `task` as persona `key` in an isolated mini-conversation, for
+        the ask_agent tool. This runs on a worker thread while the main
+        conversation continues, so it must not touch shared mutable state: it
+        gets its own ToolContext (same stores, fresh pending/event slots) and
+        its own message list. The shared history never sees this exchange —
+        the agent folds the outcome back in when the result is finally spoken
+        (see voice_agent's interjection delivery).
+
+        Returns (spoken_text, pending_note): the persona's short spoken
+        report, plus the prepared note dict when the task ended in
+        save_conversation_note (the caller owns the folder dialogue, exactly
+        as for a foreground save).
+
+        Deliberately runs on the persona's registry-default model: a
+        mid-session set_conversation_model choice belongs to the audible
+        conversation, and a background task must never silently bill whatever
+        expensive model a hat happens to be parked on. No idle "thinking"
+        sound either — the user may be mid-sentence with the foreground
+        persona."""
+        hat = agents.AGENTS[key]
+        model = self._registry_model(key)
+        client = self.client_for(model)
+        sub_ctx = ToolContext(store=self.store, discord=self.discord,
+                              kb=self.kb, memory=self.memory,
+                              client=self._ctx.client,
+                              convo_model=model, active_agent=key)
+        system = (DELEGATION_PROMPT.format(name=hat["name"], role=hat["role"])
+                  + "\n\n" + hat["persona"])
+        # No switching tools in the background: the worker has no user to hand
+        # over or re-route, and a nested delegation could chain unboundedly.
+        tools = api_tools(include=hat["tools"] - {
+            "switch_agent", "ask_agent", "set_conversation_model"})
+        messages = [{"role": "user", "content": task}]
+        log.info("delegated task -> %s (%s)", key, model)
+        for _ in range(cfg.DELEGATION_MAX_TOOL_ROUNDS):
+            resp = client.messages.create(
+                model=model,
+                max_tokens=cfg.CONVO_MAX_TOKENS,
+                system=system,
+                tools=tools,
+                messages=cached(messages),
+                **cfg.thinking_kwargs(model),
+            )
+            messages.append(
+                {"role": "assistant",
+                 "content": [self._dump_block(b) for b in resp.content]})
+            if resp.stop_reason == "tool_use":
+                results = []
+                for block in resp.content:
+                    if block.type == "tool_use":
+                        log.info("delegated tool_use %s %s",
+                                 block.name, block.input)
+                        results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": dispatch(sub_ctx, block.name,
+                                                block.input),
+                        })
+                messages.append({"role": "user", "content": results})
+                continue
+            text = "".join(b.text for b in resp.content
+                           if b.type == "text").strip()
+            return (text or "the task is done.", sub_ctx.pending_note)
+        log.warning("delegated task hit DELEGATION_MAX_TOOL_ROUNDS (%d); "
+                    "reporting as incomplete", cfg.DELEGATION_MAX_TOOL_ROUNDS)
+        return ("I ran out of steps before finishing that task — it may be "
+                "incomplete.", sub_ctx.pending_note)
 
     # --- personas ("hats") ----------------------------------------------------
     @staticmethod
@@ -521,12 +605,12 @@ class Claude:
         }
         # save_conversation_note is excluded (we're already filing a note, so a
         # second pending note mid-dialogue would be circular); so are
-        # set_conversation_model and switch_agent — switching models or
-        # personas is out of scope for the focused "where does this go"
-        # exchange.
+        # set_conversation_model, switch_agent, and ask_agent — switching
+        # models or personas, or spawning background work, is out of scope for
+        # the focused "where does this go" exchange.
         tools = api_tools(exclude={"save_conversation_note",
                                    "set_conversation_model",
-                                   "switch_agent"}) + [choose_tool]
+                                   "switch_agent", "ask_agent"}) + [choose_tool]
         history = [{"role": "user",
                     "content": "I just finished recording a note. Where should it go?"}]
         try:
