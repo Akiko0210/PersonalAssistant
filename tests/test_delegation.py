@@ -171,20 +171,54 @@ class _Shell:
 
 
 class TestInterjectionDelivery(unittest.TestCase):
-    def test_text_result_speaks_as_the_worker_persona_uninterruptibly(self):
+    def test_text_result_is_read_by_the_active_persona_interruptibly(self):
+        # A lookup result can be a whole note read aloud — the active persona
+        # delivers it as a normal reply: its own voice, barge-in working,
+        # "continue" available after one.
         shell = _Shell(active="tom")
         shell.interjections.put({"agent": "bob", "text": "found 3 notes.",
                                  "note": None})
         Agent._deliver_interjections(shell)
         text, kw = shell.spoken[0]
-        self.assertIn("Bob here", text)
+        self.assertIn("Bob", text)              # attribution stays audible
         self.assertIn("found 3 notes.", text)
-        self.assertIs(kw.get("voice"), False)  # barge-in proof by design
-        # Bob's voice for the report, the active persona's restored after.
-        self.assertEqual(shell.voices[0][0], agents.AGENTS["bob"]["tts_voice"])
-        self.assertEqual(shell.voices[-1][0], agents.AGENTS["tom"]["tts_voice"])
+        self.assertIsNot(kw.get("voice"), False)      # voice barge-in works
+        self.assertIs(kw.get("save_resume"), True)    # so does "continue"
+        self.assertEqual(shell.voices, [])  # no voice switch — Tom reads it
         # The shared conversation learns what happened.
         self.assertTrue(any("Bob" in e for e in shell.events))
+
+    def test_text_result_reaches_history_before_it_is_spoken(self):
+        # A barge-in one word in must not strand the result — by the time
+        # anything is audible it is already folded into the shared history.
+        shell = _Shell()
+        order = []
+        shell.llm.record_tool_event = lambda t: order.append("recorded")
+        shell.say = lambda text, **kw: (order.append("spoke"), False)[1]
+        shell.interjections.put({"agent": "bob", "text": "x", "note": None})
+        Agent._deliver_interjections(shell)
+        self.assertEqual(order, ["recorded", "spoke"])
+
+    def test_interrupted_delivery_leaves_the_rest_queued(self):
+        # The user's voice takes the floor: later results wait for the next
+        # utterance boundary instead of talking over them.
+        shell = _Shell()
+        shell.say = lambda text, **kw: True  # user barges in immediately
+        shell.interjections.put({"agent": "bob", "text": "one", "note": None})
+        shell.interjections.put({"agent": "bob", "text": "two", "note": None})
+        Agent._deliver_interjections(shell)
+        self.assertEqual(shell.interjections.qsize(), 1)  # "two" still queued
+
+    def test_note_result_still_speaks_as_the_worker_uninterruptibly(self):
+        # The folder dialogue is a real exchange with the worker persona —
+        # that path keeps its voice switch and its barge-in proofing.
+        shell = _Shell(active="tom")
+        note = {"title": "T", "content": "b"}
+        shell.interjections.put({"agent": "bob", "text": "ready", "note": note})
+        Agent._deliver_interjections(shell)
+        self.assertIs(shell.spoken[0][1].get("voice"), False)
+        self.assertEqual(shell.voices[0][0], agents.AGENTS["bob"]["tts_voice"])
+        self.assertEqual(shell.voices[-1][0], agents.AGENTS["tom"]["tts_voice"])
 
     def test_note_result_announces_then_runs_the_folder_flow(self):
         shell = _Shell()

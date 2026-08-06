@@ -51,11 +51,11 @@ Transcript:
 
 DELEGATION_PROMPT = """You are {name} — {role}. Another assistant handed you the task below to do in \
 the BACKGROUND: the user is still talking to them and cannot hear you work. Complete the task with \
-your tools, then reply with one or two short plain sentences reporting the outcome — the system \
-speaks them to the user, as you, at the next pause in their conversation, so write them to be read \
-aloud (no markdown). Do not greet or introduce yourself; the system announces you. If the task is \
-to save a note, call save_conversation_note and reply with a brief acknowledgement — the system \
-will ask the user which folder itself, so never mention folders."""
+your tools, then reply with the outcome in plain sentences — the assistant the user is talking to \
+reads your report to them aloud at the next pause in their conversation, so write it to be read \
+aloud (no markdown). Do not greet or introduce yourself; the report is announced as yours. If the \
+task is to save a note, call save_conversation_note and reply with a brief acknowledgement — the \
+system will ask the user which folder itself, so never mention folders."""
 
 
 _CACHE_CONTROL = {"type": "ephemeral"}

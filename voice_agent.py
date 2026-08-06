@@ -508,11 +508,12 @@ class Agent:
         t.start()
 
     def _deliver_interjections(self):
-        """Speak queued background-task results, each in its own persona's
-        voice. Called only at utterance boundaries — after a reply finishes,
-        or when a finished worker ends the idle wait — and it stands down
-        whenever the user already holds the floor: buffered speech or a muted
-        microphone leaves the queue untouched for the next boundary."""
+        """Speak queued background-task results. Called only at utterance
+        boundaries — after a reply finishes, or when a finished worker ends
+        the idle wait — and it stands down whenever the user already holds
+        the floor: buffered speech or a muted microphone leaves the queue
+        untouched for the next boundary. A voice barge-in mid-delivery does
+        the same: the user took the floor, the rest of the queue waits."""
         self.interject.clear()
         if self.audio.muted.is_set() or self.audio.has_buffered_speech():
             return
@@ -521,35 +522,50 @@ class Agent:
                 item = self.interjections.get_nowait()
             except queue.Empty:
                 return
-            self._speak_interjection(item)
+            if self._speak_interjection(item):
+                return  # barged in — remaining items wait for the next gap
 
-    def _speak_interjection(self, item):
-        """One background result, spoken as the persona that produced it; the
-        active persona's voice is restored afterwards. The announcement is
-        deliberately NOT voice-interruptible: it is one or two short
-        sentences, and it is the single moment the background work has to
-        reach the user — a barge-in here would strand the result (or a
-        prepared note) invisibly."""
+    def _speak_interjection(self, item) -> bool:
+        """One background result. Returns True when the user's voice cut it
+        short. The two item shapes get deliberately different treatment:
+
+        - A prepared note (`note` set): the worker persona takes the floor —
+          its voice, a one-line announcement, then the folder dialogue, which
+          is a real exchange with that persona. NOT voice-interruptible: the
+          announcement is a single sentence, and a barge-in would strand the
+          prepared note invisibly.
+
+        - A plain text result: the delegate hands the report back and the
+          ACTIVE persona reads it, in its own voice, as a normal reply —
+          barge-in and "continue" both work. This used to run in the worker's
+          voice with barge-in disabled, on the theory that the report is
+          short and delivery is its only chance to reach the user; a note
+          read aloud broke both halves of that — minutes of unstoppable
+          speech, with everything the user said meanwhile piling up as
+          buffered input for the next turn. Now the result is folded into the
+          shared history BEFORE speaking, so an interruption can never strand
+          it: the conversation already knows, even if the user never hears
+          the end."""
         hat = agents.AGENTS[item["agent"]]
-        active = agents.AGENTS[self.llm.active]
-        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
-        self._speaking_voice = self.tts.current_voice()
-        try:
-            note = item.get("note")
-            if note:
+        note = item.get("note")
+        if note:
+            active = agents.AGENTS[self.llm.active]
+            self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
+            self._speaking_voice = self.tts.current_voice()
+            try:
                 self.say(f"{hat['name']} here — your note is ready to file.",
                          voice=False, commands=False)
                 self._save_pending_note(note, saver=hat["name"])
-            else:
-                self.say(f"{hat['name']} here — {item['text']}",
-                         voice=False, commands=False)
-                self.llm.record_tool_event(
-                    f"{hat['name']} finished a background task (ask_agent) "
-                    f"and told the user: {item['text']}")
-                self.llm.flush_tool_events(persist=True)
-        finally:
-            self.tts.set_voice(active["tts_voice"], active["tts_rate"])
-            self._speaking_voice = self.tts.current_voice()
+            finally:
+                self.tts.set_voice(active["tts_voice"], active["tts_rate"])
+                self._speaking_voice = self.tts.current_voice()
+            return False
+        self.llm.record_tool_event(
+            f"{hat['name']} finished a background task (ask_agent) and "
+            f"reported: {item['text']}")
+        self.llm.flush_tool_events(persist=True)
+        return self.say(f"{hat['name']} came back — {item['text']}",
+                        save_resume=True)
 
     def _converse_with_followups(self, text: str) -> str:
         """Collect the *whole* turn before calling the model, so a pause
