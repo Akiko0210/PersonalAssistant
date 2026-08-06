@@ -118,9 +118,13 @@ class Agent:
         # idempotent scan: unchanged files are skipped by content hash without
         # loading the embedding model, so it's near-instant unless there's a genuinely
         # new book (which is embedded once, here, blocking startup that one time).
+        # Video/audio is excluded: a lecture takes ~20 min per hour to transcribe,
+        # which is too long to hold startup open from in here. run.bat does that
+        # pass as a separate `--ingest` process first, where the console can show
+        # progress; this scan just names anything still waiting.
         self.kb = KnowledgeStore()
         self.log.info("scanning knowledge base...")
-        self.log.info(self.kb.ingest_folder())
+        self.log.info(self.kb.ingest_folder(include_media=False))
         self.idle = IdleSound()  # "thinking" cue, looped during model calls
         self.llm = Claude(self.store, self.idle, self.kb)
         # Fold any conversation text that aged out of the rolling window into
@@ -875,10 +879,19 @@ class Agent:
         actor = (f"{saver} (working in the background) completed a note save"
                  if saver else
                  "Completed the note the user asked me to save")
+        # Deliberately no note id here. flush_tool_events files this sentence
+        # under role=assistant, so whatever it contains becomes a pattern the
+        # model reproduces in its *spoken* replies — and it reproduces the shape,
+        # not the value. With an id in the template the model emitted invented
+        # ids mid-turn, before the save had even run (2026-08-02 log: it spoke
+        # note_2026-08-02_202012 sixty-six seconds before note_2026-08-02_202355
+        # was minted), which TTS then read out digit by digit. Title and folder
+        # are what the model actually needs to answer "did that save?"; when it
+        # genuinely needs an id it has list_recent_notes.
         self.llm.record_tool_event(
             f"{actor} (save_conversation_note): "
             f"after a spoken folder-choice dialogue it was filed into the {display} "
-            f"folder and saved as note {note_id} — titled '{title}'."
+            f"folder, titled '{title}'."
         )
         self.llm.flush_tool_events(persist=True)
         interrupted = self.say(f"Notes saved. {spoken}", save_resume=True)
@@ -1055,7 +1068,9 @@ def main():
     parser.add_argument("--miccheck", action="store_true",
                         help="Print mic loudness to tune barge-in thresholds, then exit")
     parser.add_argument("--ingest", action="store_true",
-                        help="Ingest PDFs/text from the knowledge/ folder into the knowledge base, then exit")
+                        help="Ingest PDFs/text/video from the knowledge/ folder into "
+                             "the knowledge base, then exit (video is transcribed, "
+                             "which can take minutes per hour of material)")
     parser.add_argument("--kb-list", action="store_true",
                         help="List ingested knowledge sources, then exit")
     parser.add_argument("--resync", action="store_true",

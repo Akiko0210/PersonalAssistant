@@ -119,9 +119,17 @@ unit-tested without a microphone, speakers, or an API key.
 ### Stores
 - **`notes.py`** — `NoteStore`: note storage, retrieval, semantic search, folder
   management (create/rename/delete/move), and a `resync` repair pass.
-- **`knowledge.py`** — `KnowledgeStore`: ingests reference PDFs/text into a Chroma
-  `knowledge` collection (idempotent, content-hashed via `manifest.json`) and
-  searches it.
+- **`knowledge.py`** — `KnowledgeStore`: ingests reference PDFs/text/video into a
+  Chroma `knowledge` collection (idempotent, content-hashed via `manifest.json`)
+  and searches it. Video/audio is transcribed by Whisper first and chunked with
+  timestamps, so hits cite a moment rather than a page; because that costs ~20 min
+  per hour of recording, the agent's boot scan passes `include_media=False` and
+  only reports new media. `run.bat` covers the gap by running `--ingest` as a
+  separate process *before* launching the agent, so a plain double-click still
+  absorbs everything — with console progress, and with the single-instance lock
+  released before the agent asks for it. Encrypted PDFs need `cryptography`
+  (in requirements.txt); without it pypdf fails with "AES algorithm" and the
+  scan reports the file as failed.
 - **`discord_data.py`** — `DiscordData`: read-only view over a sibling "Discord
   Notifier" project's captured messages and trade alerts.
 - **`categories.py`** — the note-folder registry: seed folders, the
@@ -140,10 +148,26 @@ unit-tested without a microphone, speakers, or an API key.
   (`python dashboard.py`, or `dashboard.bat`; http://127.0.0.1:8765). Browse
   notes/folders/transcripts, inspect the live conversation history, memory
   staging, the knowledge base, Discord captures, and session logs — and edit
-  the tunable config values from a form. Stdlib-only (no chromadb import, so
-  it starts instantly and never loads a second embedding model); read-only
-  except for `data/config_overrides.json`, written atomically. Its search is
-  a plain substring scan — semantic search stays a voice feature.
+  the tunable config values from a form. Stdlib-only and read-mostly: it writes
+  `data/config_overrides.json` (atomically) and accepts knowledge uploads. Its
+  search is a plain substring scan — semantic search stays a voice feature.
+  - The **Knowledge page is laid out for a user with tunnel vision**: a single
+    ~560px column, numbered steps, 17px+ text, full-width 54px buttons, and
+    stacked rows instead of a multi-column table (horizontal scanning is the
+    pattern to avoid). A `@media (max-width: 620px)` rule tightens padding so
+    the same layout survives heavy browser zoom. Keep new UI here to that shape.
+  - **Knowledge upload/ingest** is the one heavyweight path. Files dropped on
+    the Knowledge page stream to `knowledge/` via a `.part` rename, and
+    "Ingest" runs a real ingest on a background thread. Pending (not-yet-
+    ingested) files can be deleted from the page; ingested ones cannot, since
+    their chunks live in Chroma — `remove_pending` refuses anything the manifest
+    claims. That thread imports
+    `KnowledgeStore` *inside itself*, so a dashboard that never ingests still
+    starts instantly and loads no embedding model, and it holds the agent's
+    single-instance lock for the duration — embedding writes the same Chroma
+    store the agent has open, so an ingest and a live agent are mutually
+    exclusive by design. The UI disables the button and says so while the agent
+    runs; the server re-checks the lock regardless.
 
 ### Tools package
 - **`tools/`** — the tool registry (§5). `__init__.py` holds the `@tool`
@@ -327,7 +351,7 @@ data/index.json      ordered record of every note (title, date, category)
 data/categories.json voice-created/renamed folders overlaid on the seed defaults
 data/history.json    live conversation window (sanitized on every save)
 data/memory_pending.json  staged text awaiting consolidation
-knowledge/           reference PDFs/text you ingest + manifest.json
+knowledge/           reference PDFs/text/video you ingest + manifest.json
 logs/                dated session logs
 ```
 

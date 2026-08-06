@@ -162,7 +162,7 @@ data/General/        everything else
 data/pending/        transient: live transcript while a session is recording
 data/chroma/         semantic search index (note + knowledge collections)
 data/index.json      ordered record of every note (title, date, category)
-knowledge/           reference PDFs/text you ingest + manifest.json (see below)
+knowledge/           reference PDFs/text/video you ingest + manifest.json (see below)
 logs/                dated session logs of everything that happened
 ```
 
@@ -190,27 +190,84 @@ manage folders **by voice** in conversation mode:
 Voice-created and renamed folders are persisted to `data/categories.json` and
 overlaid on the defaults at startup.
 
-## Trading knowledge base (PDF)
+## Trading knowledge base (PDFs and course videos)
 
-You can give the agent reference material to draw on — e.g. a trading book — so it
-can answer questions from it without you pasting anything into the conversation.
+You can give the agent reference material to draw on — a trading book, or a
+recorded course — so it can answer questions from it without you pasting anything
+into the conversation.
 
-1. Drop one or more `.pdf`, `.txt`, or `.md` files into the `knowledge/` folder
-   (at the project root, next to `run.bat`).
-2. Run `run.bat --ingest` (or just start the agent — it auto-scans on boot).
+Two ways in — the dashboard, or the folder plus a command:
+
+**From the dashboard** (easiest): open the Knowledge page, which walks through
+three numbered steps in a single narrow column:
+
+1. **Add files** — press **Upload files** (or drag them onto the box below it).
+2. **Waiting to add** — everything uploaded but not yet in the knowledge base.
+   Each file has a **Remove** button for undoing a wrong upload; it asks once
+   before deleting, since there's no undo. Press **Ingest** to process the list.
+3. **In the knowledge base** — what the agent can already search.
+
+A file that's already been ingested has no Remove button, and the server refuses
+to delete it even if asked directly: its chunks live in Chroma, so deleting the
+file alone would leave the agent citing a source that no longer exists. Ask the
+agent to *forget* it instead.
+
+**From the folder:**
+1. Drop files into the `knowledge/` folder (at the project root, next to
+   `run.bat`). Documents: `.pdf`, `.txt`, `.md`. Video/audio: `.mp4`, `.mkv`,
+   `.mov`, `.webm`, `.m4a`, `.mp3`, `.wav`.
+2. Just launch with `run.bat`. A plain launch ingests everything new — video
+   included — before starting the agent, printing progress as it goes. Launches
+   with nothing new cost a couple of seconds.
+
+`run.bat --ingest` still does the ingest alone. Note that the pre-launch pass is
+skipped whenever you pass arguments, so `run.bat --selftest` and friends start
+immediately.
 
 Each file is chunked and embedded **once** into a persistent `knowledge` collection
 in `data/chroma`. Ingestion is idempotent: files are identified by content hash and
 recorded in `knowledge/manifest.json`, so re-scanning an unchanged folder is
-near-instant and never re-embeds. On boot the agent runs the same scan
-automatically — nothing new means no delay; a genuinely new book is embedded once
-before the agent starts listening.
+near-instant and never re-embeds.
 
-After that, ask trading questions in conversation ("what does my trading book say
-about iron condors?"). The agent uses the `search_knowledge` tool on demand and
-cites the source (and page, for PDFs). `run.bat --kb-list` shows what's been
-ingested. The
-content stays local and, like the rest of `data/`, is gitignored.
+**Video and audio are transcribed on the way in** by the same local Whisper model
+the agent uses for dictation (decoding is handled by PyAV, bundled with
+faster-whisper — no ffmpeg install needed). Each chunk keeps the timestamp it was
+spoken at, so a citation points you at the moment to rewatch.
+
+Transcription is slow — on this machine `small.en` runs about 3.3× faster than
+real time, so budget **roughly 20 minutes per hour of recording** (more with a
+bigger `KB_MEDIA_MODEL`). You pay it exactly once per file, and progress is
+printed every few seconds so a long run never looks like a hang.
+
+That is far too long to hold the agent's own startup open, so **the agent process
+never transcribes**: its boot scan takes documents only and just names any video
+still waiting. `run.bat` does the media pass first, as a separate `--ingest`
+process, then launches the agent. Same end result — everything searchable by the
+time the agent is listening — but the wait is visible and attributable rather
+than a half-started agent that looks wedged.
+
+**An ingest and a running agent are mutually exclusive.** Embedding writes the
+same Chroma index the agent has open, and two writers corrupt it — so the
+dashboard's ingest takes the agent's single-instance lock. If the agent is
+running, close it, ingest, then start it again. (The same lock is why `--ingest`
+refuses to run beside a live agent.) While an ingest is in flight, leave the
+dashboard running; closing it cancels the job. Cancelling is safe — the manifest
+is written per file and chunk ids derive from the file hash, so a re-run
+overwrites rather than duplicates.
+
+Two knobs in `config.py`: `KB_MEDIA_MODEL` (default `small.en`; `medium.en` is
+noticeably better on jargon and, as a one-time cost, usually worth it) and
+`KB_MEDIA_EXTS`. `KB_MEDIA_MODEL` is also settable from the dashboard.
+
+After that, ask trading questions in conversation ("what does my course say about
+iron condors?"). The agent uses the `search_knowledge` tool on demand and cites the
+source — a page for books, a timestamp like `14:32` for video. `run.bat --kb-list`
+shows what's been ingested, with page count or running time. The content stays
+local and, like the rest of `data/`, is gitignored.
+
+One limitation worth knowing: only the spoken audio is captured. Whatever is drawn
+on a chart or slide is lost, so an instructor saying "as you can see here" ingests
+as exactly that.
 
 ## Switching the model by voice
 

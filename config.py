@@ -89,11 +89,17 @@ WHISPER_COMPUTE = "int8"      # int8 is a good CPU default; float16 for GPU
 EMBED_MODEL = "all-MiniLM-L6-v2"
 SEARCH_RESULTS = 5
 
-# --- Knowledge base (ingested PDFs) ------------------------------------------
+# --- Knowledge base (ingested PDFs, text, and video/audio) --------------------
 KNOWLEDGE_COLLECTION = "knowledge"   # Chroma collection, separate from "notes"
 KB_CHUNK_CHARS = 1000                # target characters per embedded chunk
 KB_CHUNK_OVERLAP = 150               # characters shared between adjacent chunks
 KB_SEARCH_RESULTS = 5                # chunks returned per search_knowledge call
+# Recorded lecture material, transcribed by Whisper on the way in. Decoding is
+# handled by PyAV (bundled with faster-whisper), so no ffmpeg install is needed.
+KB_MEDIA_EXTS = (".mp4", ".m4a", ".mp3", ".mkv", ".mov", ".wav", ".webm")
+# Transcription is a one-time cost per file, so it can afford a bigger model than
+# live dictation: medium.en is noticeably better on jargon and worth it here.
+KB_MEDIA_MODEL = "small.en"
 
 # --- Long-term conversation memory --------------------------------------------
 MEMORY_COLLECTION = "conversations"  # Chroma collection of archived summaries
@@ -423,6 +429,7 @@ OVERRIDABLE = {
     "SUMMARY_MAX_TOKENS": int, "CONVO_MAX_TOOL_ROUNDS": int,
     # speech engines
     "WHISPER_MODEL": str, "TTS_RATE": int, "TTS_VOICE": _cast_optional_str,
+    "KB_MEDIA_MODEL": str,
     # memory / search
     "HISTORY_MAX_MESSAGES": int, "SEARCH_RESULTS": int, "KB_SEARCH_RESULTS": int,
     "MEMORY_SEARCH_RESULTS": int,

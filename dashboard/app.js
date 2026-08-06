@@ -707,20 +707,271 @@ views.knowledge = async function () {
   try { data = await api("/api/knowledge"); }
   catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
 
-  const rows = data.docs.map(d => `
-    <tr><td>${esc(d.title)}</td><td>${esc(d.source)}</td>
-    <td class="num">${d.chunks}</td><td class="num">${esc(fmtDate(d.ingested))}</td></tr>`).join("");
+  let jobTimer = null;
+  let confirming = null;   // name of the pending file asking "remove?"
 
-  main.innerHTML = header("Knowledge",
-    "Reference books and documents ingested into the searchable knowledge base. " +
-    "Drop files into the knowledge folder and run --ingest to add more.") + `
-    <div class="card">
-      <table class="table">
-        <thead><tr><th>Title</th><th>Source file</th><th>Chunks</th><th>Ingested</th></tr></thead>
-        <tbody>${rows || '<tr><td colspan="4" class="empty">Nothing ingested yet</td></tr>'}</tbody>
-      </table>
-      <div class="card-sub" style="margin-top:10px">folder: <code>${esc(data.dir)}</code></div>
-    </div>`;
+  /* Laid out for a narrow visual field: one column, big targets, each control
+     next to the thing it acts on. Steps read top to bottom — add, then the
+     waiting list with its own Ingest button, then what's already in. */
+  function render() {
+    const job = data.job || {};
+    const running = job.state === "running";
+    const pending = data.pending || [];
+    const hasMedia = pending.some(p => p.media);
+
+    const pendingRows = pending.map(p => confirming === p.name ? `
+      <div class="kb-row confirm" data-name="${esc(p.name)}">
+        <div class="kb-row-main">
+          <div class="kb-row-name">Remove this file?</div>
+          <div class="kb-row-meta">${esc(p.name)}</div>
+        </div>
+        <div class="kb-row-actions">
+          <button class="btn-danger" data-remove="${esc(p.name)}">Yes, remove</button>
+          <button class="btn-ghost-lg" data-cancel="1">Keep</button>
+        </div>
+      </div>` : `
+      <div class="kb-row" data-name="${esc(p.name)}">
+        <div class="kb-row-main">
+          <div class="kb-row-name">${esc(p.name)}</div>
+          <div class="kb-row-meta">${p.media ? "Video / audio — will be transcribed"
+                                             : "Document"} · ${esc(fmtBytes(p.bytes))}</div>
+        </div>
+        <div class="kb-row-actions">
+          <button class="btn-ghost-lg" data-ask="${esc(p.name)}"
+                  ${running ? "disabled" : ""}>Remove</button>
+        </div>
+      </div>`).join("");
+
+    const docRows = data.docs.map(d => {
+      const extent = d.pages ? `${d.pages} pages` : (d.duration ? d.duration : "text");
+      return `<div class="kb-row done">
+        <div class="kb-row-main">
+          <div class="kb-row-name">${esc(d.title)}</div>
+          <div class="kb-row-meta">${esc(extent)} · ${d.chunks} chunk${d.chunks === 1 ? "" : "s"}
+            · added ${esc(fmtDate(d.ingested))}</div>
+        </div>
+      </div>`;
+    }).join("");
+
+    // Why Ingest might be unavailable, in the order these actually bite.
+    let blocked = "";
+    if (running) blocked = "";
+    else if (!pending.length) blocked = "Nothing waiting.";
+    else if (data.agent_running)
+      blocked = "Close the voice agent first — it has the search index open.";
+
+    main.innerHTML = header("Knowledge",
+      "Books, documents, and course videos your agent can search.") + `
+      <div class="kb-narrow">
+
+        <div class="card kb-step">
+          <h2><span class="kb-num">1</span> Add files</h2>
+          <button class="btn-big" id="kb-upload">Upload files</button>
+          <div class="dropzone" id="kb-drop" tabindex="0" role="button"
+               aria-label="Drop knowledge files here">
+            …or drag files here
+          </div>
+          <input type="file" id="kb-file" multiple hidden
+                 accept="${esc((data.accept || []).join(","))}">
+          <div id="kb-uploads"></div>
+          <div class="kb-hint">Audio, video, PDF, or text.</div>
+        </div>
+
+        <div class="card kb-step">
+          <h2><span class="kb-num">2</span> Waiting to add${pending.length ? ` (${pending.length})` : ""}</h2>
+          ${pending.length ? pendingRows
+            : '<div class="kb-none">Nothing waiting. Upload a file above.</div>'}
+
+          <button class="btn-big ${running ? "busy" : ""}" id="kb-ingest"
+                  ${running || blocked ? "disabled" : ""}>
+            ${running ? "Working…" : "Ingest"}</button>
+          <div class="kb-status ${job.state === "error" ? "err" : (job.state === "done" ? "ok" : "")}"
+               id="kb-job">${esc(blocked || job.message || "")}</div>
+          ${running ? `<div class="ingest-note">Leave this page open until it finishes.${
+            hasMedia ? " Video takes roughly 20–40 minutes per hour." : ""}</div>` : ""}
+        </div>
+
+        <div class="card kb-step">
+          <h2><span class="kb-num">3</span> In the knowledge base${data.docs.length ? ` (${data.docs.length})` : ""}</h2>
+          ${docRows || '<div class="kb-none">Nothing added yet.</div>'}
+        </div>
+
+      </div>`;
+
+    wire();
+    if (running) pollJob();
+  }
+
+  function wire() {
+    const dz = $("#kb-drop"), picker = $("#kb-file");
+    const browse = () => picker.click();
+    $("#kb-upload").onclick = browse;
+    dz.onclick = browse;
+    dz.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); browse(); } };
+    picker.onchange = () => { upload([...picker.files]); picker.value = ""; };
+
+    // dragover must be cancelled or the browser navigates to the dropped file.
+    dz.ondragover = e => { e.preventDefault(); dz.classList.add("over"); };
+    dz.ondragleave = () => dz.classList.remove("over");
+    dz.ondrop = e => {
+      e.preventDefault();
+      dz.classList.remove("over");
+      upload([...(e.dataTransfer?.files || [])]);
+    };
+
+    const btn = $("#kb-ingest");
+    if (btn && !btn.disabled) btn.onclick = ingest;
+
+    // Removing is two taps: ask, then confirm. A file can represent a long
+    // upload, and there is no undo once it's off disk.
+    main.querySelectorAll("[data-ask]").forEach(b => {
+      b.onclick = () => { confirming = b.dataset.ask; render(); };
+    });
+    main.querySelectorAll("[data-cancel]").forEach(b => {
+      b.onclick = () => { confirming = null; render(); };
+    });
+    main.querySelectorAll("[data-remove]").forEach(b => {
+      b.onclick = () => remove(b.dataset.remove, b);
+    });
+  }
+
+  async function remove(name, btn) {
+    btn.disabled = true;
+    btn.textContent = "Removing…";
+    try {
+      const r = await fetch("/api/knowledge/remove", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const body = await r.json();
+      confirming = null;
+      data = await api("/api/knowledge");
+      render();
+      if (!body.ok) {
+        const msg = $("#kb-job");
+        msg.className = "kb-status err";
+        msg.textContent = body.error || "Could not remove that file.";
+      }
+    } catch (e) {
+      confirming = null;
+      render();
+      const msg = $("#kb-job");
+      msg.className = "kb-status err";
+      msg.textContent = e.message;
+    }
+  }
+
+  /* Uploads go one at a time over XHR — fetch() gives no upload progress, and a
+     two-gigabyte course deserves a bar rather than a frozen page. */
+  function upload(files) {
+    if (!files.length) return;
+    const box = $("#kb-uploads");
+    let queue = Promise.resolve();
+    for (const file of files) {
+      const row = document.createElement("div");
+      row.className = "up-row";
+      row.innerHTML = `<div class="up-head"><span class="up-name"></span>
+        <span class="up-pct">waiting…</span></div>
+        <div class="bar-track"><div class="bar-fill" style="width:0"></div></div>`;
+      row.querySelector(".up-name").textContent = file.name;  // never as HTML
+      box.appendChild(row);
+      queue = queue.then(() => sendOne(file, row));
+    }
+    queue.then(async () => {
+      data = await api("/api/knowledge");
+      render();
+    });
+  }
+
+  function sendOne(file, row) {
+    return new Promise(resolve => {
+      const pct = row.querySelector(".up-pct");
+      const fill = row.querySelector(".bar-fill");
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", "/api/knowledge/upload?name=" + encodeURIComponent(file.name));
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = e => {
+        if (!e.lengthComputable) return;
+        const p = Math.round(e.loaded / e.total * 100);
+        fill.style.width = p + "%";
+        pct.textContent = p + "%";
+      };
+      xhr.onload = () => {
+        let body = {};
+        try { body = JSON.parse(xhr.responseText); } catch { /* keep the status */ }
+        if (xhr.status === 200 && body.ok) {
+          row.classList.add("ok");
+          pct.textContent = "uploaded";
+          fill.style.width = "100%";
+        } else {
+          row.classList.add("err");
+          pct.textContent = body.error || `failed (${xhr.status})`;
+          fill.style.width = "0";
+        }
+        resolve();
+      };
+      xhr.onerror = () => {
+        row.classList.add("err");
+        pct.textContent = "upload failed";
+        resolve();
+      };
+      xhr.send(file);
+    });
+  }
+
+  async function ingest() {
+    const btn = $("#kb-ingest"), msg = $("#kb-job");
+    btn.disabled = true;
+    btn.classList.add("busy");
+    btn.textContent = "Working…";
+    msg.className = "kb-status";
+    msg.textContent = "Starting…";
+    try {
+      const r = await fetch("/api/knowledge/ingest", { method: "POST" });
+      const body = await r.json();
+      if (!body.ok) {
+        msg.className = "kb-status err";
+        msg.textContent = body.error || "Could not start.";
+        btn.disabled = false;
+        btn.classList.remove("busy");
+        btn.textContent = "Ingest";
+        return;
+      }
+      pollJob();
+    } catch (e) {
+      msg.className = "kb-status err";
+      msg.textContent = e.message;
+      btn.disabled = false;
+      btn.classList.remove("busy");
+      btn.textContent = "Ingest";
+    }
+  }
+
+  /* Poll while the background job runs. Cleared on the first non-running state
+     so a finished ingest doesn't keep the timer (and the view) alive. */
+  function pollJob() {
+    clearTimeout(jobTimer);
+    jobTimer = setTimeout(async () => {
+      if (location.hash !== "#/knowledge") return;  // navigated away; stop
+      try {
+        const job = await api("/api/knowledge/job");
+        const msg = $("#kb-job");
+        if (job.state === "running") {
+          if (msg) { msg.className = "kb-status"; msg.textContent = job.message || "Working…"; }
+          pollJob();
+          return;
+        }
+        data = await api("/api/knowledge");
+        data.job = job;
+        render();
+      } catch {
+        pollJob();  // server busy mid-ingest; try again
+      }
+    }, 1500);
+  }
+
+  render();
 };
 
 /* ================= Discord ================= */
