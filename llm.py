@@ -298,8 +298,21 @@ class Claude:
 
     def switch_to(self, key):
         """Make `key` the active persona: its system prompt, tool allowlist,
-        and model apply from the next converse() on. The one shared history is
-        untouched — hats share memory by design."""
+        and model apply from the next converse() on. The history carries over
+        whole — hats share memory by design — with one marker appended naming
+        who took over.
+
+        That marker is the ONLY record of who spoke what. A message carries
+        just {role, content}, and role is only ever user/assistant, so an
+        assistant turn is anonymous; nothing else about a switch reaches the
+        model either — the spoken "Tom here." announcement goes to the TTS and
+        never to history, agent_state.json is write-only telemetry, and a
+        regex-routed switch (agents.match_address) leaves no tool call behind
+        the way switch_agent does. Without this, "was that Tom or Bob?" can
+        only be guessed at, and the model guesses confidently: it claimed
+        Haiku while Cobe was on Sonnet, off nothing but stale history
+        (session_2026-07-25.log 18:08). Same failure the model-identity rules
+        in cfg.model_identity_block were written for."""
         if key == self.active:
             return
         # Preserve a mid-session "switch to opus" for the hat it was made in.
@@ -309,6 +322,17 @@ class Claude:
         self._ctx.convo_model = (self._model_overrides.get(key)
                                  or self._registry_model(key))
         self._write_agent_state()
+        # An assistant turn, like flush_tool_events' self-notes: the system's
+        # own record of what it did, never a fabricated user utterance.
+        # sanitize() folds it into the preceding reply so roles keep
+        # alternating; a marker left leading after a trim is dropped by
+        # hist.trim, which is correct — there is no prior speaker to attribute.
+        self.history.append(
+            {"role": "assistant",
+             "content": f"({agents.AGENTS[key]['name']} took over the "
+                        f"conversation here.)"})
+        self.history = hist.sanitize(self.history)
+        self._save_history()
         log.info("active agent -> %s (%s)", key, self._ctx.convo_model)
 
     def _write_agent_state(self):

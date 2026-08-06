@@ -124,7 +124,9 @@ class TestGetCurrentModelAcrossPersonas(unittest.TestCase):
         c._model_overrides = {}
         c._ctx = ToolContext(active_agent="alice",
                              convo_model=cfg.CONVO_MODELS["haiku"])
-        c._write_agent_state = lambda: None  # no disk writes from tests
+        c.history = []  # switch_to appends its took-over marker here
+        c._save_history = lambda: None       # no disk writes from tests
+        c._write_agent_state = lambda: None
         return c
 
     def test_toms_opus_does_not_leak_into_alice(self):

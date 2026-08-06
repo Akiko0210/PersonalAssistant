@@ -21,7 +21,9 @@ def make_llm():
     c._model_overrides = {}
     c._ctx = ToolContext(active_agent=c.active,
                          convo_model=cfg.CONVO_MODELS["haiku"])
-    c._write_agent_state = lambda: None  # no disk writes from tests
+    c.history = []  # switch_to appends its took-over marker here
+    c._save_history = lambda: None       # no disk writes from tests
+    c._write_agent_state = lambda: None
     return c
 
 

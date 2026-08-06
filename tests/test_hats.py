@@ -107,6 +107,30 @@ class TestHats(unittest.TestCase):
         c.switch_to("tom")
         self.assertEqual(c.active_model_label, "DeepSeek V4 Pro")
 
+    def test_switch_leaves_a_who_took_over_marker_in_history(self):
+        # The messages themselves carry no speaker identity, so without this
+        # marker nothing in the history says Bob's turns weren't Alice's.
+        c = make_claude()
+        c.converse("tell alice something")
+        c.switch_to("bob")
+        c.converse("bob, do you remember?")
+        texts = str(c.client.messages.calls[1]["messages"])
+        self.assertIn("Bob took over the conversation here", texts)
+
+    def test_switch_marker_keeps_roles_alternating(self):
+        # It is appended as an assistant turn straight after an assistant
+        # reply; sanitize must fold them together or the API rejects the turn.
+        c = make_claude()
+        c.converse("hello")
+        c.switch_to("tom")
+        roles = [m["role"] for m in c.history]
+        self.assertEqual(roles, ["user", "assistant"])
+
+    def test_no_marker_when_switching_to_the_active_hat(self):
+        c = make_claude()
+        c.switch_to(agents.DEFAULT_AGENT)
+        self.assertEqual(c.history, [])
+
     def test_pending_switch_roundtrip(self):
         c = make_claude()
         c._ctx.pending_switch = ("bob", "what's my last note?")
