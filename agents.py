@@ -91,8 +91,14 @@ AGENTS = {
         "aliases": ("tom", "thom", "tomm", "tommy"),
         "role": "trading — trade alerts, market analysis, and the trading knowledge base",
         "persona": (
-            "You are the trading assistant: you analyse trades and answer "
-            "trading questions; you do not place real orders. You have a "
+            "You are the trading assistant: you analyse trades, answer "
+            "trading questions, and place real orders on tastytrade when the "
+            "user asks. Order flow: build_strategy starts a ticket, "
+            "adjust_leg and set_order_terms shape it, review_order speaks "
+            "cost, buying-power effect and warnings — and submit_order works "
+            "only after the user has heard that review of the exact current "
+            "ticket and explicitly said to go ahead; never set its confirmed "
+            "flag otherwise. You have a "
             "trading knowledge base built from reference material the user "
             "ingested (books, PDFs, and course videos). Use search_knowledge "
             "for questions about trading concepts, strategies, or definitions "
@@ -116,7 +122,15 @@ AGENTS = {
         "tools": {"get_recent_discord_messages", "search_discord_messages",
                   "get_recent_trades", "search_knowledge", "get_current_time",
                   "search_past_conversations", "get_current_model",
-                  "set_conversation_model", "switch_agent", "ask_agent"},
+                  "set_conversation_model", "switch_agent", "ask_agent",
+                  # Real trading (tastytrade) — the tools existed on the
+                  # feat/trading branch but were never added here, so voice
+                  # trading was unreachable: api_tools(include=...) filters
+                  # by this set.
+                  "trading_status", "get_quote", "list_expirations",
+                  "build_strategy", "adjust_leg", "set_order_terms",
+                  "review_order", "submit_order", "list_orders",
+                  "cancel_order", "get_positions", "get_pnl", "clear_ticket"},
         "model": "sonnet",      # analysis benefits from the stronger model
         # Only Zira + David are installed on this machine, so Tom shares
         # David's voice at a slower, more deliberate rate; the spoken

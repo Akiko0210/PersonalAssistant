@@ -239,8 +239,13 @@ class Claude:
                   + "\n\n" + hat["persona"])
         # No switching tools in the background: the worker has no user to hand
         # over or re-route, and a nested delegation could chain unboundedly.
+        # No order mutation either — review-before-submit means the USER hears
+        # the review and says go, and a background worker is out of earshot by
+        # definition; it could otherwise satisfy the review gate by talking to
+        # itself. Read-only trading tools stay available.
         tools = api_tools(include=hat["tools"] - {
-            "switch_agent", "ask_agent", "set_conversation_model"})
+            "switch_agent", "ask_agent", "set_conversation_model",
+            "submit_order", "cancel_order"})
         messages = [{"role": "user", "content": task}]
         log.info("delegated task -> %s (%s)", key, model)
         for _ in range(cfg.DELEGATION_MAX_TOOL_ROUNDS):

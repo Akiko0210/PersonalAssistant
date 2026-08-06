@@ -68,6 +68,11 @@ class TestHats(unittest.TestCase):
         names = {t["name"] for t in call["tools"]}
         self.assertIn("search_knowledge", names)
         self.assertNotIn("search_notes", names)
+        # The trading tools must actually reach the API call — they existed
+        # on feat/trading but were missing from this allowlist, so voice
+        # trading was silently unreachable.
+        self.assertIn("build_strategy", names)
+        self.assertIn("submit_order", names)
         self.assertIn("You are Tom", call["system"])
 
     def test_shared_history_survives_switching(self):

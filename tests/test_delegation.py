@@ -102,6 +102,18 @@ class TestRunDelegatedTask(unittest.TestCase):
         self.assertNotIn("ask_agent", names)
         self.assertNotIn("set_conversation_model", names)
 
+    def test_background_loop_cannot_mutate_orders(self):
+        # Review-before-submit means the user HEARS the review; a background
+        # worker is out of earshot, so it must never submit or cancel — while
+        # read-only trading lookups stay delegable.
+        c = make_claude([text_reply("done")])
+        c.run_delegated_task("tom", "check my positions")
+        names = {t["name"] for t in c.client.messages.calls[0]["tools"]}
+        self.assertIn("get_positions", names)
+        self.assertIn("get_pnl", names)
+        self.assertNotIn("submit_order", names)
+        self.assertNotIn("cancel_order", names)
+
     def test_round_cap_reports_honestly(self):
         c = make_claude([tool_reply("get_current_time", {}, f"tu_{i}")
                          for i in range(cfg.DELEGATION_MAX_TOOL_ROUNDS)])
