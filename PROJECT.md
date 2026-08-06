@@ -78,7 +78,11 @@ unit-tested without a microphone, speakers, or an API key.
 - **`stt.py`** — `Transcriber`: faster-whisper wrapper (`small.en` by default,
   `vad_filter=True` to reject hallucinated text from silence).
 - **`tts.py`** — `Speaker`: Windows SAPI backend (async speak + purge, which is
-  what enables barge-in) with a synchronous pyttsx3 fallback.
+  what enables barge-in; plus pause/resume, which is what lets a mute click
+  leave a reply intact) with a synchronous pyttsx3 fallback. `Announcer` is a
+  deliberately separate second voice — one SpVoice serialises its utterances,
+  so a notice that must be heard *over* a playing reply ("Muted.") needs its
+  own voice object, in its own thread and COM apartment.
 - **`sound.py`** — `IdleSound`: loops a "thinking" WAV while the agent waits on
   the model. Idempotent, thread-safe, never raises (missing file = silence).
 
@@ -115,9 +119,17 @@ unit-tested without a microphone, speakers, or an API key.
 ### Stores
 - **`notes.py`** — `NoteStore`: note storage, retrieval, semantic search, folder
   management (create/rename/delete/move), and a `resync` repair pass.
-- **`knowledge.py`** — `KnowledgeStore`: ingests reference PDFs/text into a Chroma
-  `knowledge` collection (idempotent, content-hashed via `manifest.json`) and
-  searches it.
+- **`knowledge.py`** — `KnowledgeStore`: ingests reference PDFs/text/video into a
+  Chroma `knowledge` collection (idempotent, content-hashed via `manifest.json`)
+  and searches it. Video/audio is transcribed by Whisper first and chunked with
+  timestamps, so hits cite a moment rather than a page; because that costs ~20 min
+  per hour of recording, the agent's boot scan passes `include_media=False` and
+  only reports new media. `run.bat` covers the gap by running `--ingest` as a
+  separate process *before* launching the agent, so a plain double-click still
+  absorbs everything — with console progress, and with the single-instance lock
+  released before the agent asks for it. Encrypted PDFs need `cryptography`
+  (in requirements.txt); without it pypdf fails with "AES algorithm" and the
+  scan reports the file as failed.
 - **`discord_data.py`** — `DiscordData`: read-only view over a sibling "Discord
   Notifier" project's captured messages and trade alerts.
 - **`categories.py`** — the note-folder registry: seed folders, the
@@ -136,10 +148,26 @@ unit-tested without a microphone, speakers, or an API key.
   (`python dashboard.py`, or `dashboard.bat`; http://127.0.0.1:8765). Browse
   notes/folders/transcripts, inspect the live conversation history, memory
   staging, the knowledge base, Discord captures, and session logs — and edit
-  the tunable config values from a form. Stdlib-only (no chromadb import, so
-  it starts instantly and never loads a second embedding model); read-only
-  except for `data/config_overrides.json`, written atomically. Its search is
-  a plain substring scan — semantic search stays a voice feature.
+  the tunable config values from a form. Stdlib-only and read-mostly: it writes
+  `data/config_overrides.json` (atomically) and accepts knowledge uploads. Its
+  search is a plain substring scan — semantic search stays a voice feature.
+  - The **Knowledge page is laid out for a user with tunnel vision**: a single
+    ~560px column, numbered steps, 17px+ text, full-width 54px buttons, and
+    stacked rows instead of a multi-column table (horizontal scanning is the
+    pattern to avoid). A `@media (max-width: 620px)` rule tightens padding so
+    the same layout survives heavy browser zoom. Keep new UI here to that shape.
+  - **Knowledge upload/ingest** is the one heavyweight path. Files dropped on
+    the Knowledge page stream to `knowledge/` via a `.part` rename, and
+    "Ingest" runs a real ingest on a background thread. Pending (not-yet-
+    ingested) files can be deleted from the page; ingested ones cannot, since
+    their chunks live in Chroma — `remove_pending` refuses anything the manifest
+    claims. That thread imports
+    `KnowledgeStore` *inside itself*, so a dashboard that never ingests still
+    starts instantly and loads no embedding model, and it holds the agent's
+    single-instance lock for the duration — embedding writes the same Chroma
+    store the agent has open, so an ingest and a live agent are mutually
+    exclusive by design. The UI disables the button and says so while the agent
+    runs; the server re-checks the lock regardless.
 
 ### Tools package
 - **`tools/`** — the tool registry (§5). `__init__.py` holds the `@tool`
@@ -193,10 +221,42 @@ unit-tested without a microphone, speakers, or an API key.
    `BargeInDetector`; if it fires, TTS stops, the captured speech is pushed back
    for the next turn, and (optionally) the unsaid tail is remembered for a
    "continue" command.
-6. History is saved to `data/history.json` after the turn.
+6. `_after_reply` drains, in fixed order, everything the reply's tool calls
+   deferred: background delegations start (`ask_agent`), a prepared note runs
+   the folder-choice dialogue and is filed (`save_conversation_note`), and a
+   persona hand-off is performed (`switch_agent`, answering any forwarded
+   question in the new voice). A note prepared *inside* a forwarded turn is
+   drained right there — deferred work must never outlive the turn that
+   created it (that leak once ate a "switch me back" command).
+7. History is saved to `data/history.json` after the turn.
 
-If the reply's tool calls included `save_conversation_note`, the agent then runs
-the folder-choice dialogue and files the note.
+### Personas and background delegation
+
+Alice (general), Bob (notes/memory), and Tom (trading) are per-turn
+configurations — system prompt, tool allowlist, model, TTS voice — over ONE
+shared conversation (`agents.py`). Switching never fragments memory.
+
+A request can move between personas two ways, and the difference is the core
+of the design:
+
+- **`switch_agent` — the user moves.** They talk to the other persona from now
+  on. Announced aloud with the persona's model ("Bob here, running on Haiku
+  4.5") because the model is the one part of a switch you can't hear.
+- **`ask_agent` — a task moves.** The other persona runs it in the background
+  (`Claude.run_delegated_task`: an isolated mini tool-loop on its own thread,
+  its own message list and `ToolContext` — the shared history never sees it),
+  while the user keeps talking to the persona they were with. The result is
+  queued as a spoken **interjection**, delivered in the worker persona's own
+  voice at the next utterance boundary: after the current reply finishes, or
+  immediately if the agent is idle (a `wake` event ends the listening wait,
+  but never mid-utterance — the user is never cut off, and never spoken
+  over). The delivery announcement is deliberately not interruptible: it is
+  the one moment the background work has to reach the user. If the task
+  prepared a note, the interjection runs the normal folder-choice dialogue —
+  so it is the *worker* persona's voice asking "which folder?". What happened
+  is folded back into the shared history via `record_tool_event`, and a note
+  still waiting for its folder question at quit is rescued into its suggested
+  folder rather than lost.
 
 ---
 
@@ -212,7 +272,8 @@ def my_tool(ctx, args):
 ```
 
 - **`ctx`** is the shared `ToolContext` (the stores: `store`, `discord`, `kb`,
-  `memory`; plus mutable session state: `pending_note`, `convo_model`).
+  `memory`; plus mutable session state: `pending_note`, `pending_switch`,
+  `pending_delegations`, `convo_model`, `active_agent`).
 - **`args`** is the raw input dict from the model.
 - The return string becomes the `tool_result` fed back to the model.
 
@@ -233,10 +294,34 @@ central list or dispatch chain.
 - **time** (`time_tools.py`): `get_current_time`.
 - **memory** (`memory_tools.py`): `search_past_conversations`.
 - **knowledge** (`knowledge_tools.py`): `search_knowledge`.
+- **model** (`model_tools.py`): `get_current_model` — a live read of which
+  model and provider are answering, and as which persona. It resolves the same
+  expression `converse()` routes the API call with, so it cannot disagree with
+  reality. It exists because the model answers "which model are you?" from
+  conversation history, and that history is **shared by every persona**: it
+  carries switches other hats made and choices that have since changed. The
+  system prompt has always stated the truth, and the model overrode it from
+  history three times in one session — "I'm Opus" while on Haiku, "DeepSeek V4
+  Flash" while on Opus 5 (session_2026-07-31.log 11:32 / 11:48 / 12:23).
+  `config.model_identity_block` therefore makes it a hard rule: identity
+  questions are answered by this tool or not at all. The tool result lands at
+  the *end* of the context, where it outweighs old turns, and leaves an
+  auditable `tool_use` line in the log.
 - **model** (`model_tools.py`): `set_conversation_model` — switch the
-  conversation model between Haiku 4.5, Sonnet 5, and Opus 4.8 by voice.
+  conversation model between Haiku 4.5, Sonnet 5, Opus 5, and (when
+  `DEEPSEEK_API_KEY` is set) DeepSeek V4 Flash / Pro by voice. DeepSeek runs
+  through its Anthropic-compatible endpoint via `Claude.client_for`, so every
+  model shares one code path; `config.model_provider` is the routing rule.
+  A mid-session choice is remembered **per persona** (`Claude._model_overrides`),
+  and `Claude.active_model` resolves what the current hat will actually answer
+  with — read by the switch announcement, which speaks it ("Bob here, running on
+  Haiku 4.5") because the model is the one part of a switch you can't hear.
 - **project** (`project_tools.py`): `describe_project` — returns this document so
   the agent can answer questions about its own design.
+- **agents** (`agent_tools.py`): `switch_agent` — hand the user over to another
+  persona (deferred via `pending_switch`, so the goodbye finishes in the old
+  voice); `ask_agent` — delegate a task to another persona in the background
+  (deferred via `pending_delegations`; result spoken as an interjection — §4).
 - **trading** (`trading_tools.py`): `trading_status`, `get_quote`,
   `list_expirations`, `build_strategy`, `adjust_leg`, `set_order_terms`,
   `review_order`, `submit_order` (requires review + explicit confirmation),
@@ -287,7 +372,7 @@ data/index.json      ordered record of every note (title, date, category)
 data/categories.json voice-created/renamed folders overlaid on the seed defaults
 data/history.json    live conversation window (sanitized on every save)
 data/memory_pending.json  staged text awaiting consolidation
-knowledge/           reference PDFs/text you ingest + manifest.json
+knowledge/           reference PDFs/text/video you ingest + manifest.json
 logs/                dated session logs
 ```
 
@@ -319,10 +404,20 @@ One physical play/pause button drives everything, listened for on two channels a
 once (keyboard hook for wired/dongle headsets; SMTC for Bluetooth-native ones).
 `ClickGestureDecoder` dedupes across channels and resolves gestures: **1 click =
 mute, 2 = toggle notetaking, 3 = quit**. Every accepted press immediately
-silences output (the "hush" path) because a state-tracking dongle swallows the
-next press if playback continues through it. Voice barge-in is separate: while the
-agent speaks, start talking and `BargeInDetector` stops it and captures your
-words. See `MEDIA_CONTROL.md` for the full hardware story.
+*pauses* output (the "hush" path) because a state-tracking dongle swallows the
+next press if playback continues through it — but pausing, not purging, because
+at press time the gesture hasn't resolved yet. `_hold_for_gesture` then waits for
+it: **mute deafens the microphone at once and lets the reply finish** (muting
+stops listening, not talking), while notetaking and quit end the reply for good.
+Mute is also the one command that never abandons a turn — a click while the
+model is still thinking leaves the answer to arrive and be spoken; only
+notetaking and quit abort (the `silence` event marks which is which). The
+acknowledgement rides a second `Announcer` voice so it overlaps the reply
+instead of queueing behind it. A press with no gesture behind it resumes after
+`GESTURE_VERDICT_TIMEOUT_S`, and a backend that can't pause falls back to
+stopping. Voice barge-in is separate:
+while the agent speaks, start talking and `BargeInDetector` stops it and captures
+your words. See `MEDIA_CONTROL.md` for the full hardware story.
 
 ---
 

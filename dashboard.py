@@ -8,16 +8,25 @@ models, ...) from a form instead of editing config.py.
 
 Design constraints:
 - Zero new dependencies: stdlib http.server only. Deliberately does NOT import
-  notes.py / chromadb — everything is read straight from the JSON/markdown
-  files on disk, so the dashboard starts instantly and can run alongside the
-  agent without loading a second embedding model. Semantic search stays a
-  voice feature; the dashboard's search is a plain substring scan.
-- Read-mostly: the only thing it writes is data/config_overrides.json (via
-  atomic_io, same as every other state file). Config changes are picked up by
-  config.py at the agent's next start — the dashboard never reaches into a
-  live process.
+  notes.py / chromadb at module level — everything is read straight from the
+  JSON/markdown files on disk, so the dashboard starts instantly and can run
+  alongside the agent without loading a second embedding model. Semantic search
+  stays a voice feature; the dashboard's search is a plain substring scan.
+- Read-mostly: it writes data/config_overrides.json (via atomic_io, same as
+  every other state file), and accepts uploads into knowledge/. Config changes
+  are picked up by config.py at the agent's next start — the dashboard never
+  reaches into a live process.
 - Localhost only: binds 127.0.0.1; this is a private control panel, not a web
   service.
+
+The one deliberate exception to "read-mostly" and "no chromadb": knowledge
+ingestion. Uploading a course video is useless if you then have to open a
+terminal, so /api/knowledge/ingest runs a real ingest in a background thread.
+It imports KnowledgeStore *inside* that thread, so the constraints above still
+hold for every session that doesn't ingest, and it holds the agent's
+single-instance lock for the duration, because embedding writes the same Chroma
+store the agent has open and two writers would corrupt it. That means an ingest
+and a running agent are mutually exclusive by design, not by oversight.
 
 Run:  python dashboard.py [--port 8765] [--no-browser]
 """
@@ -29,6 +38,7 @@ import threading
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import agents as agents_registry
@@ -42,6 +52,13 @@ DEFAULT_PORT = 8765
 
 NOTE_ID_RE = re.compile(r"^note_[\w.-]+$")
 LOG_NAME_RE = re.compile(r"^session_[\w.-]+\.log$")
+
+# What may be dropped on the Knowledge page. Documents plus whatever config
+# currently counts as media, so the two stay in step automatically.
+DOC_EXTS = (".pdf", ".txt", ".md")
+UPLOAD_EXTS = frozenset(DOC_EXTS + tuple(cfg.KB_MEDIA_EXTS))
+UPLOAD_BLOCK = 1 << 20        # 1 MiB; uploads stream, never buffer whole
+MAX_UPLOAD_BYTES = 4 << 30    # 4 GiB — a sanity bound, not a real-world limit
 
 # --- Tunables metadata --------------------------------------------------------
 # The UI is generated from this table: one entry per adjustable config value,
@@ -589,7 +606,162 @@ def api_knowledge():
     manifest = _read_json(cfg.KNOWLEDGE_MANIFEST, {})
     docs = [{"hash": h[:12], **info} for h, info in manifest.items()]
     docs.sort(key=lambda d: d.get("ingested", ""), reverse=True)
-    return {"docs": docs, "dir": str(cfg.KNOWLEDGE_DIR)}
+    ingested = {d.get("source") for d in docs}
+    # Files sitting in the folder that no manifest entry claims — uploaded but
+    # not yet embedded. Matched by name, not hash: this is a directory listing,
+    # not a correctness check, and re-hashing gigabytes on every page load would
+    # make the view crawl.
+    pending = []
+    for path in sorted(cfg.KNOWLEDGE_DIR.glob("*")):
+        if (path.is_file() and path.name not in ingested
+                and path.suffix.lower() in UPLOAD_EXTS):
+            pending.append({
+                "name": path.name,
+                "bytes": path.stat().st_size,
+                "media": path.suffix.lower() in cfg.KB_MEDIA_EXTS,
+            })
+    return {"docs": docs, "dir": str(cfg.KNOWLEDGE_DIR), "pending": pending,
+            "accept": sorted(UPLOAD_EXTS), "agent_running": agent_running(),
+            "job": job_status()}
+
+
+# --- Knowledge ingestion job --------------------------------------------------
+# The only heavy work the dashboard does. It runs on a background thread holding
+# the agent's single-instance lock: embedding writes the same Chroma store the
+# agent has open, and two writers corrupt it. KnowledgeStore (and with it
+# chromadb, sentence-transformers, and Whisper) is imported inside the thread so
+# a dashboard that never ingests still starts instantly.
+
+_job_lock = threading.Lock()
+_job = {"state": "idle", "message": "", "file": "", "started": None, "finished": None}
+
+
+def job_status():
+    with _job_lock:
+        return dict(_job)
+
+
+def _set_job(**fields):
+    with _job_lock:
+        _job.update(fields)
+
+
+def _run_ingest():
+    try:
+        lock = SingleInstance(cfg.LOCK_PATH).acquire()
+    except AlreadyRunning:
+        # Re-checked here rather than trusted from the UI: the agent may have
+        # started in the seconds between the page render and the click.
+        return _set_job(
+            state="error", file="",
+            message=("The voice agent is running. Close it first — ingesting "
+                     "writes the same search index the agent has open."),
+            finished=datetime.now().isoformat(timespec="seconds"))
+    except OSError as e:
+        return _set_job(state="error", file="", message=f"Could not take the lock: {e}",
+                        finished=datetime.now().isoformat(timespec="seconds"))
+    try:
+        from knowledge import KnowledgeStore  # heavy; only for a real job
+
+        _set_job(message="Loading models…")
+        store = KnowledgeStore()
+        summary = store.ingest_folder(
+            include_media=True,
+            on_progress=lambda name, pct=None: _set_job(
+                file=name,
+                message=(f"Ingesting {name}…" if pct is None
+                         else f"Transcribing {name} — {pct}%")),
+        )
+        _set_job(state="done", file="", message=summary)
+    except Exception as e:  # a failed ingest must not take the server down
+        _set_job(state="error", file="", message=str(e))
+    finally:
+        _set_job(finished=datetime.now().isoformat(timespec="seconds"))
+        lock.release()
+
+
+def start_ingest():
+    """Kick off a background ingest unless one is already in flight."""
+    with _job_lock:
+        if _job["state"] == "running":
+            return {"ok": False, "error": "An ingest is already running."}
+        _job.update(state="running", message="Starting…", file="", finished=None,
+                    started=datetime.now().isoformat(timespec="seconds"))
+    # Daemon: Ctrl+C on the dashboard should still exit promptly rather than
+    # block for the rest of a half-hour transcription. Interrupting is safe --
+    # the manifest is written per file, and chunk ids derive from the file hash,
+    # so a re-run overwrites rather than duplicates.
+    threading.Thread(target=_run_ingest, daemon=True).start()
+    return {"ok": True}
+
+
+def save_upload(name, reader, length):
+    """Stream an uploaded file into knowledge/. Returns (status, body).
+
+    Written to a `.part` file and renamed only once every byte has arrived, so a
+    cancelled upload can never be picked up by an ingest as a truncated video."""
+    name = (name or "").strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return 400, {"ok": False, "error": "bad filename"}
+    suffix = Path(name).suffix.lower()
+    if suffix not in UPLOAD_EXTS:
+        return 400, {"ok": False, "error": f"{suffix or name} isn't a supported type"}
+    if length <= 0:
+        return 400, {"ok": False, "error": "empty upload"}
+    if length > MAX_UPLOAD_BYTES:
+        return 413, {"ok": False, "error": "file is larger than the 4 GiB limit"}
+
+    dest = cfg.KNOWLEDGE_DIR / name
+    if dest.exists():
+        return 409, {"ok": False, "error": f"'{name}' is already in the folder"}
+
+    part = dest.with_suffix(dest.suffix + ".part")
+    remaining = length
+    try:
+        with part.open("wb") as f:
+            while remaining > 0:
+                block = reader.read(min(UPLOAD_BLOCK, remaining))
+                if not block:
+                    break
+                f.write(block)
+                remaining -= len(block)
+        if remaining:
+            part.unlink(missing_ok=True)
+            return 400, {"ok": False, "error": "upload ended early"}
+        part.replace(dest)
+    except OSError as e:
+        part.unlink(missing_ok=True)
+        return 500, {"ok": False, "error": f"could not save: {e}"}
+    return 200, {"ok": True, "name": name, "bytes": length,
+                 "media": suffix in cfg.KB_MEDIA_EXTS}
+
+
+def remove_pending(name):
+    """Delete a not-yet-ingested file from knowledge/. Returns (status, body).
+
+    Refuses anything the manifest already claims. An ingested source's chunks
+    live in Chroma, so deleting just the file would leave the agent quoting a
+    book that no longer exists — those come out via the store's `forget`, not
+    here."""
+    name = (name or "").strip()
+    if not name or "/" in name or "\\" in name or ".." in name:
+        return 400, {"ok": False, "error": "bad filename"}
+    if Path(name).suffix.lower() not in UPLOAD_EXTS:
+        # Keeps manifest.json (and anything else living in the folder) safe.
+        return 400, {"ok": False, "error": "not a knowledge file"}
+    path = cfg.KNOWLEDGE_DIR / name
+    if not path.is_file():
+        return 404, {"ok": False, "error": f"'{name}' is no longer in the folder"}
+    manifest = _read_json(cfg.KNOWLEDGE_MANIFEST, {})
+    if any(entry.get("source") == name for entry in manifest.values()):
+        return 409, {"ok": False,
+                     "error": f"'{name}' is already in the knowledge base — "
+                              "ask the agent to forget it instead"}
+    try:
+        path.unlink()
+    except OSError as e:
+        return 500, {"ok": False, "error": f"could not delete: {e}"}
+    return 200, {"ok": True, "name": name}
 
 
 def _tail_lines(path, n):
@@ -696,6 +868,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, api_memory())
             if route == "/api/knowledge":
                 return self._send(200, api_knowledge())
+            if route == "/api/knowledge/job":
+                return self._send(200, job_status())
             if route == "/api/discord":
                 return self._send(200, api_discord())
             if route == "/api/logs":
@@ -739,6 +913,29 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         url = urlparse(self.path)
+        # Uploads carry raw file bytes, not JSON, and are streamed to disk —
+        # so they're handled before the read-the-whole-body routes below.
+        if url.path == "/api/knowledge/upload":
+            try:
+                name = parse_qs(url.query).get("name", [""])[0]
+                length = int(self.headers.get("Content-Length", "0"))
+                status, body = save_upload(name, self.rfile, length)
+                return self._send(status, body)
+            except ValueError as e:
+                return self._send(400, {"ok": False, "error": f"bad request: {e}"})
+            except Exception as e:
+                return self._send(500, {"ok": False, "error": str(e)})
+        if url.path == "/api/knowledge/ingest":
+            result = start_ingest()
+            return self._send(200 if result["ok"] else 409, result)
+        if url.path == "/api/knowledge/remove":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+                status, body = remove_pending(payload.get("name", ""))
+                return self._send(status, body)
+            except (ValueError, TypeError) as e:
+                return self._send(400, {"ok": False, "error": f"bad request: {e}"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")

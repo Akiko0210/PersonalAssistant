@@ -53,6 +53,18 @@ Query: {query}
 Staged conversation:
 """
 
+# The staged read is a needle-in-a-haystack job over the entire staged buffer
+# (~90k characters in a long session), and the conversation default is picked
+# for latency, not for that. Measured against a real staged file, Haiku 4.5
+# answered NOTHING_RELEVANT for every one of three topics that were plainly in
+# the text (the keyword scan found 10-12 matching lines for each); Sonnet found
+# all three on the same prompt and still correctly rejected two control queries
+# about things never discussed. Softening the prompt did not rescue Haiku — the
+# model is the variable that matters here, so recall pins its own rather than
+# following the conversation's. It runs only when the user explicitly asks
+# about past conversations, so the cost lands on the turns that need it.
+RECALL_MODEL = cfg.CONVO_MODELS["sonnet"]
+
 
 class ConversationMemory:
     def __init__(self):
@@ -196,7 +208,7 @@ class ConversationMemory:
         staged = "\n".join(reversed(text))
         try:
             resp = client.messages.create(
-                model=cfg.CONVO_MODEL,
+                model=RECALL_MODEL,
                 max_tokens=cfg.MEMORY_MAX_TOKENS,
                 thinking={"type": "disabled"},
                 messages=[{"role": "user",
@@ -217,7 +229,7 @@ class ConversationMemory:
         verbatim text of messages that fell off the window since the last
         boot. Consolidation only runs at startup, so without this a long
         session has a blind spot: something said two hours ago is neither in
-        the live window nor searchable in the archive (exactly how Cobe lost
+        the live window nor searchable in the archive (exactly how Tom lost
         a trade structure mid-session, 2026-07-20 21:07). No model call, no
         embeddings — the lines are already on disk; just read them."""
         words = {w for w in re.findall(r"[a-z0-9']+", (query or "").lower())
@@ -232,6 +244,51 @@ class ConversationMemory:
                     hits.append(f"[{ts}] {' '.join(line.split())[:300]}")
         return hits[-max_lines:]  # most recent matches win the budget
 
+    def _archive_section(self, query: str, n: int):
+        """(section text or None, record count or None, error text or None)
+        from the Chroma archive. Never raises.
+
+        A broken archive must not cost the caller the staged results it has
+        already gathered: this used to be one bare query() whose exception
+        unwound search() entirely, so a Chroma fault came back to the model as
+        a lone "Tool error: ..." with every same-session hit discarded
+        (2026-07-27 08:12, "Error creating hnsw segment reader: Nothing found
+        on disk" against index files that were demonstrably present).
+
+        The first failure drops the cached collection and retries once, since
+        a long-lived process can be left holding a handle the store no longer
+        honours while a freshly built client reads the very same files. That
+        is best-effort — Chroma may hand back the same underlying system — so
+        the caller still gets a clean error to report if it doesn't take."""
+        error = None
+        for attempt in (1, 2):
+            try:
+                self._ensure_chroma()
+                count = self._col.count()
+                if not count:
+                    return None, 0, None
+                res = self._col.query(query_texts=[query],
+                                      n_results=min(n, count))
+                docs = res.get("documents", [[]])[0]
+                metas = res.get("metadatas", [[]])[0]
+                archived = [f"[{(meta or {}).get('date', 'unknown date')}] "
+                            f"{' '.join(doc.split())[:800]}"
+                            for doc, meta in zip(docs, metas)]
+                if not archived:
+                    return None, count, None
+                return ("From archived conversations:\n"
+                        + "\n\n".join(archived)), count, None
+            except Exception as e:  # noqa: BLE001 - reported, never raised
+                error = str(e)
+                if attempt == 1:
+                    log.warning("archive search failed (%s); rebuilding the "
+                                "collection and retrying once", e)
+                    self._col = None
+                else:
+                    log.error("archive search still failing after a "
+                              "reconnect: %s", e)
+        return None, None, error
+
     def search(self, query: str, n: int = None, client=None) -> str:
         n = n or cfg.MEMORY_SEARCH_RESULTS
         sections = []
@@ -239,34 +296,43 @@ class ConversationMemory:
         # Same-session recall first: staged lines are newer than any archive
         # record and verbatim, so when both match, these are the better answer.
         # Preferred path is the LLM read (handles queries the literal words
-        # can't match); the keyword scan is the offline/no-client fallback.
-        # recalled == "" means the model read everything and found nothing —
-        # that's an answer, not a failure, so no fallback then.
+        # can't match); the keyword scan backs it up.
         recalled = self.recall_staged(client, query) if client is not None else None
         if recalled:
             sections.append("From earlier in this session (not yet archived):\n"
                             + recalled)
-        elif recalled is None:
+        else:
+            # No content from the read — the call failed (None) or it reported
+            # nothing relevant (""). Neither verdict ends the search any more.
+            # "Nothing relevant" used to be trusted as final, which made a
+            # false negative fatal: it suppressed this scan even though the
+            # literal words were sitting in the staged lines. The scan is free
+            # (no model call), so it runs either way and its hits are labelled
+            # by how much they can be trusted.
             staged = self.search_staged(query)
             if staged:
-                sections.append("From earlier in this session (not yet archived):\n"
-                                + "\n".join(staged))
+                header = ("From earlier in this session (not yet archived)"
+                          if recalled is None else
+                          "Lines from earlier in this session that mention "
+                          "this (keyword matches — a closer read judged them "
+                          "irrelevant, so weigh them yourself)")
+                sections.append(header + ":\n" + "\n".join(staged))
 
-        self._ensure_chroma()
-        count = self._col.count()
-        if count:
-            res = self._col.query(query_texts=[query], n_results=min(n, count))
-            docs = res.get("documents", [[]])[0]
-            metas = res.get("metadatas", [[]])[0]
-            archived = [f"[{(meta or {}).get('date', 'unknown date')}] "
-                        f"{' '.join(doc.split())[:800]}"
-                        for doc, meta in zip(docs, metas)]
-            if archived:
-                sections.append("From archived conversations:\n"
-                                + "\n\n".join(archived))
+        archive, count, error = self._archive_section(query, n)
+        if archive:
+            sections.append(archive)
 
         if sections:
+            if error:
+                sections.append("(The archived-conversation index could not be "
+                                "read just now, so only same-session memory was "
+                                "searched.)")
             return "\n\n".join(sections)
+        if error:
+            return ("The archived-conversation index could not be read "
+                    f"({error}). Nothing in same-session memory matched "
+                    "either, so this isn't proof the topic never came up — "
+                    "the archive simply wasn't searchable.")
         if count == 0:
             return ("No archived conversations yet — long-term memory only fills "
                     "up as older conversations age out of the recent window.")

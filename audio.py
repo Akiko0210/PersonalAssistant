@@ -69,6 +69,13 @@ class AudioEngine:
         the user's opening words aren't dropped from the captured utterance."""
         self._pushback.extendleft(reversed(list(frames)))
 
+    def has_buffered_speech(self) -> bool:
+        """True when pushed-back speech frames are waiting — the user's words
+        are already captured and the next collect_utterance starts from them.
+        Callers check this to avoid speaking over the user (only detected
+        speech is ever pushed back; plain noise is discarded)."""
+        return bool(self._pushback)
+
     def _next_frame(self, timeout):
         """Next frame, preferring pushed-back audio over the live queue. Raises
         queue.Empty if nothing arrives within `timeout`."""
@@ -81,11 +88,17 @@ class AudioEngine:
     def _to_array(frames):
         return np.frombuffer(b"".join(frames), dtype=np.int16)
 
-    def collect_utterance(self, interrupt=None, endpoint_ms=None):
+    def collect_utterance(self, interrupt=None, endpoint_ms=None, wake=None):
         """Block until one spoken utterance is captured, then return it as an
         int16 numpy array. Returns None if interrupted before/at speech start,
         or while muted. If `interrupt` fires mid-utterance, the partial audio
         captured so far is returned.
+
+        `wake` (an Event) also ends the wait with None, but ONLY while no
+        speech has started: it lets the caller break out for housekeeping (a
+        finished background task waiting to speak) without ever truncating an
+        utterance in progress — once speech triggers, wake is ignored and the
+        utterance completes normally. The caller owns clearing the event.
         """
         endpoint_ms = endpoint_ms or cfg.CONVO_ENDPOINT_MS
         pad_frames = max(1, cfg.SPEECH_PAD_MS // cfg.FRAME_MS)
@@ -98,6 +111,8 @@ class AudioEngine:
         while True:
             if interrupt is not None and interrupt.is_set():
                 return self._to_array(voiced) if (triggered and voiced) else None
+            if wake is not None and not triggered and wake.is_set():
+                return None
 
             try:
                 frame = self._next_frame(0.1)

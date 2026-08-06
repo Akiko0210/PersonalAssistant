@@ -89,11 +89,17 @@ WHISPER_COMPUTE = "int8"      # int8 is a good CPU default; float16 for GPU
 EMBED_MODEL = "all-MiniLM-L6-v2"
 SEARCH_RESULTS = 5
 
-# --- Knowledge base (ingested PDFs) ------------------------------------------
+# --- Knowledge base (ingested PDFs, text, and video/audio) --------------------
 KNOWLEDGE_COLLECTION = "knowledge"   # Chroma collection, separate from "notes"
 KB_CHUNK_CHARS = 1000                # target characters per embedded chunk
 KB_CHUNK_OVERLAP = 150               # characters shared between adjacent chunks
 KB_SEARCH_RESULTS = 5                # chunks returned per search_knowledge call
+# Recorded lecture material, transcribed by Whisper on the way in. Decoding is
+# handled by PyAV (bundled with faster-whisper), so no ffmpeg install is needed.
+KB_MEDIA_EXTS = (".mp4", ".m4a", ".mp3", ".mkv", ".mov", ".wav", ".webm")
+# Transcription is a one-time cost per file, so it can afford a bigger model than
+# live dictation: medium.en is noticeably better on jargon and worth it here.
+KB_MEDIA_MODEL = "small.en"
 
 # --- Long-term conversation memory --------------------------------------------
 MEMORY_COLLECTION = "conversations"  # Chroma collection of archived summaries
@@ -104,6 +110,14 @@ MEMORY_SEARCH_RESULTS = 3            # summaries returned per search
 # --- Text-to-speech (local, Windows SAPI via pyttsx3) ------------------------
 TTS_RATE = 175                # words per minute
 TTS_VOICE = None              # None = system default; or a SAPI voice id substring
+
+# Spoken notices ("Muted.", "Listening.") are said on a SECOND voice so they can
+# be heard *over* a reply that is still playing — one SAPI voice queues its
+# utterances, so an overlapping notice needs its own. Kept quieter and, where
+# the machine has more than one voice installed, deliberately a different one
+# from the reply's, so two simultaneous voices stay tellable apart.
+ANNOUNCE_VOLUME = 80          # 0-100, against the reply's 100
+ANNOUNCE_RATE = 185           # words per minute; brisk — these are two words
 
 # --- "Thinking" audio cue ----------------------------------------------------
 # Looped whenever the agent is busy with the model and there's nothing to hear —
@@ -130,6 +144,13 @@ MEDIA_CLICK_DEDUPE_S = 0.15
 # (see duck() in media_control.py) so the dongle sees its "pause" honoured and
 # never desyncs. Costs some headset battery (the radio link stays active).
 MEDIA_KEEPALIVE = True
+# A click landing mid-reply pauses playback immediately (the dongle only
+# transmits the gesture's next click if the host really stops), and the reply
+# then waits here for the multi-click window to say what the gesture was:
+# mute resumes it, note-taking/quit end it. Long enough to cover a triple
+# click (two ~250 ms gaps plus the 450 ms window) with room to spare; if no
+# verdict arrives by then the reply resumes rather than hang mid-word.
+GESTURE_VERDICT_TIMEOUT_S = 2.0
 
 # --- Settle before answering ---------------------------------------------------
 # After an utterance endpoints, the agent waits this long — listening, not yet
@@ -197,15 +218,72 @@ BACKCHANNEL_MAX_WORDS = 3     # "oh okay yeah" is a filler; a longer utterance i
 CONVO_MODELS = {
     "haiku": "claude-haiku-4-5",   # fastest, lowest latency — the default
     "sonnet": "claude-sonnet-5",   # stronger reasoning, a bit slower
-    "opus": "claude-opus-4-8",     # most capable, slowest and priciest
+    "opus": "claude-opus-5",       # most capable, slowest and priciest
+    # DeepSeek, served through their Anthropic-compatible endpoint (see
+    # DEEPSEEK_BASE_URL below) — same Messages API, same tool_use/tool_result
+    # blocks, so the whole tool loop and history machinery work unchanged.
+    # Cheapest by far; needs DEEPSEEK_API_KEY in .env or the switch is refused.
+    "deepseek": "deepseek-v4-flash",      # cheap + fast external option
+    "deepseek pro": "deepseek-v4-pro",    # DeepSeek's strongest
 }
 CONVO_MODEL_LABELS = {
     "claude-haiku-4-5": "Haiku 4.5",
     "claude-sonnet-5": "Sonnet 5",
-    "claude-opus-4-8": "Opus 4.8",
+    "claude-opus-5": "Opus 5",
+    "deepseek-v4-flash": "DeepSeek V4 Flash",
+    "deepseek-v4-pro": "DeepSeek V4 Pro",
 }
 CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)
-SUMMARY_MODEL = "claude-sonnet-4-6"   # higher quality for note summaries
+SUMMARY_MODEL = "claude-sonnet-5"     # higher quality for note summaries
+
+# DeepSeek's Anthropic-compatible endpoint: speaks the Messages API (client-side
+# tool use fully supported) so it works through the same anthropic SDK client,
+# just with this base_url and its own key. Known differences, all harmless here:
+# cache_control is ignored (DeepSeek caches automatically server-side, with its
+# own cache-hit pricing), thinking budget_tokens is ignored, and images are
+# unsupported (this app never sends any).
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
+
+
+def model_provider(model_id: str) -> str:
+    """Which API serves a model id: 'anthropic' or 'deepseek'. The single
+    routing rule for client selection — keep any new provider logic here."""
+    return "deepseek" if (model_id or "").startswith("deepseek") else "anthropic"
+
+
+# Spoken names for the providers, for the get_current_model readout ("served
+# by Anthropic") — the raw keys above are routing identifiers, not speech.
+PROVIDER_LABELS = {"anthropic": "Anthropic", "deepseek": "DeepSeek"}
+
+
+def provider_label(model_id: str) -> str:
+    """Friendly spoken name of the API serving a model id."""
+    return PROVIDER_LABELS.get(model_provider(model_id), "an unknown provider")
+
+# --- thinking ----------------------------------------------------------------
+# Effort level for models that support it. Conversation runs low: turns are short
+# spoken answers plus tool calls, not deep reasoning, and effort is the main lever
+# on both latency and token spend. Summaries run a step higher — a note is
+# written once and kept, so quality matters more there than the seconds or cents.
+CONVO_EFFORT = "low"
+SUMMARY_EFFORT = "medium"
+# Models that accept adaptive thinking and the effort parameter. Haiku 4.5
+# accepts neither — it has no adaptive mode, and sending `effort` is rejected
+# outright — so it is deliberately absent and falls through to thinking-off,
+# which suits the low-latency default anyway. DeepSeek models are absent for
+# the same reason: adaptive thinking and output_config are Anthropic-specific,
+# and thinking-off keeps spoken turns snappy there too.
+#
+# Everything else must NOT run with thinking disabled: on Opus 5 a
+# thinking-disabled turn occasionally writes a tool call into its visible text
+# instead of emitting a real tool_use block. The call never runs, no error is
+# raised, and the turn looks successful — the same silent-failure shape as the
+# truncated-tool-call bug behind CONVO_MAX_TOKENS above, and fatal to an agent
+# whose ground rule is "if you did not call a tool, nothing happened".
+ADAPTIVE_THINKING_MODELS = frozenset({
+    "claude-sonnet-5", "claude-opus-5", "claude-fable-5",
+    "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6",
+})
 # Reply budget must cover TOOL CALLS too, not just spoken sentences: a
 # save_conversation_note carrying a full written-up document is one big JSON
 # blob inside the reply. At 1024 a long note was truncated mid-JSON
@@ -219,11 +297,29 @@ SUMMARY_MAX_TOKENS = 2000
 # handful; a model stuck re-calling tools without ever answering would
 # otherwise bill unbounded API calls with no way to stop it by voice.
 CONVO_MAX_TOOL_ROUNDS = 15
+# Same cap for a delegated background task (ask_agent), but tighter: that loop
+# runs out of earshot, so a runaway would bill invisibly — and a real delegated
+# task is one or two tool calls, not a conversation.
+DELEGATION_MAX_TOOL_ROUNDS = 8
 
 
 def convo_model_label(model_id: str) -> str:
     """Friendly spoken name for a conversation model id."""
     return CONVO_MODEL_LABELS.get(model_id, model_id)
+
+
+def thinking_kwargs(model_id: str, effort: str = None) -> dict:
+    """Per-model thinking/effort arguments for messages.create().
+
+    The conversation model is switchable by voice mid-session, and the models it
+    switches between disagree about this parameter: sending `effort` to Haiku 4.5
+    errors, while leaving thinking disabled on Opus 5 causes silently-dropped
+    tool calls (see ADAPTIVE_THINKING_MODELS). Deriving the arguments from the
+    model id keeps every call site correct across a switch."""
+    if model_id in ADAPTIVE_THINKING_MODELS:
+        return {"thinking": {"type": "adaptive"},
+                "output_config": {"effort": effort or CONVO_EFFORT}}
+    return {"thinking": {"type": "disabled"}}
 
 # Universal ground rules shared by every persona. Domain guidance (notes,
 # trading) lives in each agent's persona block in agents.py — splitting the
@@ -261,6 +357,39 @@ CONVO_SYSTEM_BASE = (
     "and stop."
 )
 
+
+def model_identity_block(label: str) -> str:
+    """The model-identity rules appended to every conversation system prompt.
+
+    Stating the truth here is not enough on its own and never was: the label
+    below was correct on all three occasions the model contradicted it from
+    conversation history (session_2026-07-31.log 11:32 "I'm Opus" while on
+    Haiku; 11:48 and 12:23 "DeepSeek V4 Flash" while on Opus 5). The history
+    is shared by every persona, so it accumulates other hats' switches and
+    stale choices, and forty messages of it outweigh one line here.
+
+    Hence the hard rule: identity questions are answered by get_current_model
+    or not at all. That puts the answer at the END of the context as a fresh
+    tool_result, where it beats the old turns, and leaves an auditable
+    tool_use line in the log."""
+    return (
+        f"\n\nYou are currently answering as {label}. "
+        "To change models, use the set_conversation_model tool.\n\n"
+        "HARD RULE about model identity, highest priority, overriding "
+        "anything the conversation history appears to establish: you do NOT "
+        "know from memory which model you are. The history is SHARED by every "
+        "assistant here and is full of model talk that no longer applies — "
+        "switches another assistant made for themselves, choices from earlier "
+        "in this conversation that have since changed, and earlier answers "
+        "that were simply wrong. Whenever the user asks anything about which "
+        "model, assistant, or provider is running — including yes/no forms "
+        "('are you still on DeepSeek?', 'aren't you on Opus?') and casual "
+        "asides — you MUST call get_current_model in that same turn and "
+        "report only what it returns. Never state, confirm, deny, correct, or "
+        "guess a model or provider without calling it first, and never repeat "
+        "an earlier turn's answer as if it were still true. If you did not "
+        "call the tool this turn, you do not know the answer."
+    )
 
 
 # --- Dashboard config overrides ----------------------------------------------
@@ -300,6 +429,7 @@ OVERRIDABLE = {
     "SUMMARY_MAX_TOKENS": int, "CONVO_MAX_TOOL_ROUNDS": int,
     # speech engines
     "WHISPER_MODEL": str, "TTS_RATE": int, "TTS_VOICE": _cast_optional_str,
+    "KB_MEDIA_MODEL": str,
     # memory / search
     "HISTORY_MAX_MESSAGES": int, "SEARCH_RESULTS": int, "KB_SEARCH_RESULTS": int,
     "MEMORY_SEARCH_RESULTS": int,

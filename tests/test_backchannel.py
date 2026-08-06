@@ -39,11 +39,14 @@ class FakeAudio:
         self._utterances = list(utterances or [])
         self.flushed = 0
 
-    def collect_utterance(self, interrupt=None, endpoint_ms=None):
+    def collect_utterance(self, interrupt=None, endpoint_ms=None, wake=None):
         return self._utterances.pop(0) if self._utterances else None
 
     def flush(self):
         self.flushed += 1
+
+    def has_buffered_speech(self):
+        return False
 
 
 class FakeSTT:
@@ -73,13 +76,22 @@ class FakeLLM:
     def take_pending_switch(self):
         return None
 
+    def take_pending_delegations(self):
+        return []
+
 
 def make_agent(*, heard, interrupted_remaining=None):
     agent = Agent.__new__(Agent)
     agent.log = logging.getLogger("test")
     agent.interrupt = threading.Event()
+    # Set by note-taking/quit to stop a reply mid-sentence; mute deliberately
+    # doesn't (see test_mute_speech). _drain clears it each pass.
+    agent.silence = threading.Event()
     agent.cmds = queue.Queue()
+    agent.interject = threading.Event()
+    agent.interjections = queue.Queue()
     agent.audio = FakeAudio(utterances=[np.ones(4, dtype=np.int16)])
+    agent.audio.muted = threading.Event()
     agent.stt = FakeSTT([heard])
     agent.llm = FakeLLM()
     agent._interrupted_reply = "the full reply"

@@ -41,6 +41,11 @@ class ToolContext:
     # after the reply and performs the actual switch + optional forwarded
     # question (see voice_agent) — the same deferred pattern as pending_note.
     pending_switch: tuple = field(default=None)
+    # Appended to by ask_agent: [(agent_key, task_text), ...]. Unlike a switch,
+    # a delegation never moves the user: the agent starts each task on a
+    # background thread as that persona (Claude.run_delegated_task) and the
+    # result comes back as a spoken interjection between utterances.
+    pending_delegations: list = field(default_factory=list)
     # Factual notes about work a tool did *beyond* the string it returned — a
     # deferred save, or a sub-dialogue that ran in its own model memory. Only
     # a tool's return value lands in history automatically; anything that

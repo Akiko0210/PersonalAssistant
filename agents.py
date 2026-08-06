@@ -1,6 +1,6 @@
 """Named agent personas ("hats") over the one shared conversation.
 
-Alice, Bob, and Cobe are NOT separate agents with separate memories: they are
+Alice, Bob, and Tom are NOT separate agents with separate memories: they are
 per-turn configurations — system-prompt persona, tool allowlist, model, and
 TTS voice — applied to the single conversation loop and its single history.
 Switching hats never fragments context ("I told you five minutes ago" always
@@ -35,12 +35,12 @@ AGENTS = {
             "thinking out loud, the current time, and questions about how this "
             "assistant system itself is designed (use describe_project for "
             "those). You do not manage notes, memories, or trading — Bob and "
-            "Cobe own those; hand over when the user wants real work done "
+            "Tom own those; hand over when the user wants real work done "
             "there."
         ),
         "tools": {"get_current_time", "describe_project",
-                  "search_past_conversations",
-                  "set_conversation_model", "switch_agent"},
+                  "search_past_conversations", "get_current_model",
+                  "set_conversation_model", "switch_agent", "ask_agent"},
         "model": "haiku",       # key into cfg.CONVO_MODELS
         "tts_voice": "Zira",    # SAPI voice-name substring; None = default
         "tts_rate": None,       # words/min; None = cfg.TTS_RATE
@@ -80,22 +80,25 @@ AGENTS = {
                   "list_folders", "count_notes", "create_folder",
                   "rename_folder", "delete_folder", "move_note",
                   "save_conversation_note", "search_past_conversations",
-                  "get_current_time", "set_conversation_model", "switch_agent"},
+                  "get_current_time", "get_current_model",
+                  "set_conversation_model", "switch_agent", "ask_agent"},
         "model": "haiku",
         "tts_voice": "David",
         "tts_rate": None,
     },
-    "cobe": {
-        "name": "Cobe",
-        "aliases": ("cobe", "kobe", "coby", "cobie", "koby", "cobey", "colby"),
+    "tom": {
+        "name": "Tom",
+        "aliases": ("tom", "thom", "tomm", "tommy"),
         "role": "trading — trade alerts, market analysis, and the trading knowledge base",
         "persona": (
             "You are the trading assistant: you analyse trades and answer "
             "trading questions; you do not place real orders. You have a "
             "trading knowledge base built from reference material the user "
-            "ingested (books and PDFs). Use search_knowledge for questions "
-            "about trading concepts, strategies, or definitions that such "
-            "material would cover, and cite the source and page when it helps. "
+            "ingested (books, PDFs, and course videos). Use search_knowledge "
+            "for questions about trading concepts, strategies, or definitions "
+            "that such material would cover, and cite the source when it helps "
+            "— the page for a book, the timestamp for a video, so the user can "
+            "go straight to it. "
             "You can also answer questions about the user's captured Discord "
             "notifications and trade alerts. Use get_recent_trades for the "
             "latest trade lines; for time-based questions like 'what trades "
@@ -107,17 +110,17 @@ AGENTS = {
         ),
         # search_past_conversations is deliberately in EVERY hat's allowlist:
         # the conversation memory is shared, so every persona must be able to
-        # search it — Cobe once couldn't recall a trade structure that had
-        # aged out of the window mid-session because only Bob had the tool
-        # (session_2026-07-20.log 21:07, "Review your memory").
+        # search it — this hat (then named Cobe) once couldn't recall a trade
+        # structure that had aged out of the window mid-session because only
+        # Bob had the tool (session_2026-07-20.log 21:07, "Review your memory").
         "tools": {"get_recent_discord_messages", "search_discord_messages",
                   "get_recent_trades", "search_knowledge", "get_current_time",
-                  "search_past_conversations",
-                  "set_conversation_model", "switch_agent"},
+                  "search_past_conversations", "get_current_model",
+                  "set_conversation_model", "switch_agent", "ask_agent"},
         "model": "sonnet",      # analysis benefits from the stronger model
-        # Only Zira + David are installed on this machine, so Cobe shares
+        # Only Zira + David are installed on this machine, so Tom shares
         # David's voice at a slower, more deliberate rate; the spoken
-        # "Cobe here." announcement is the primary switch signal.
+        # "Tom here." announcement is the primary switch signal.
         "tts_voice": "David",
         "tts_rate": 155,
     },
@@ -249,9 +252,13 @@ def roster_block(active):
         f"\n\nYou are {me['name']} — {me['role']}. The user also works with: "
         f"{others}. You all share ONE conversation memory: earlier assistant "
         "turns may have been spoken by another persona — treat them as your "
-        "shared past, not someone else's words. When a request clearly "
-        "belongs to another assistant's specialty, hand the user over with "
-        "the switch_agent tool, forwarding their question so it gets answered "
+        "shared past, not someone else's words. When the user wants a task "
+        "done in another assistant's specialty without leaving you — saving "
+        "a note mid-discussion, a quick lookup — delegate it with the "
+        "ask_agent tool: they work in the background and speak up when done, "
+        "while your conversation continues. Hand the user over with the "
+        "switch_agent tool only when they actually want to talk to the other "
+        "assistant, forwarding their question so it gets answered "
         "immediately. Every switch is announced aloud by the system, so "
         "never introduce yourself and never say you are switching — just act."
     )

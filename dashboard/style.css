@@ -332,6 +332,115 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
   max-height: 200px; overflow-y: auto;
 }
 
+/* ---------- Knowledge ----------
+   Built for a narrow visual field: one column well inside the page width, large
+   type, big targets, and every control sitting next to what it acts on. No wide
+   tables here — horizontal scanning is the thing to avoid. */
+.kb-narrow { max-width: 560px; }
+
+.kb-step { padding: 22px 24px 24px; }
+.kb-step h2 {
+  display: flex; align-items: center; gap: 11px;
+  font-size: 20px; margin: 0 0 16px;
+}
+.kb-num {
+  flex: none; width: 30px; height: 30px; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent);
+  font-size: 15px; font-weight: 750;
+  display: flex; align-items: center; justify-content: center;
+}
+
+/* Buttons are deliberately full width: an edge-to-edge target inside a narrow
+   column can't be missed, and there's only ever one primary action per step. */
+.btn-big {
+  display: block; width: 100%; min-height: 54px;
+  background: var(--accent); color: #fff; border: none; border-radius: 10px;
+  font-size: 18px; font-weight: 700; cursor: pointer; padding: 12px 18px;
+}
+.btn-big:hover:not(:disabled) { filter: brightness(1.12); }
+.btn-big:disabled { opacity: .38; cursor: default; }
+.btn-big.busy { background: var(--warning); color: #191919; opacity: 1; }
+.btn-big:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+
+.btn-danger {
+  min-height: 46px; padding: 10px 20px;
+  background: var(--critical); color: #fff; border: none; border-radius: 9px;
+  font-size: 16px; font-weight: 700; cursor: pointer;
+}
+.btn-danger:hover { filter: brightness(1.12); }
+.btn-ghost-lg {
+  min-height: 46px; padding: 10px 20px;
+  background: none; border: 1.5px solid var(--muted); color: var(--ink);
+  border-radius: 9px; font-size: 16px; font-weight: 650; cursor: pointer;
+}
+.btn-ghost-lg:hover:not(:disabled) { border-color: var(--ink); }
+.btn-ghost-lg:disabled { opacity: .38; cursor: default; }
+
+.dropzone {
+  border: 2px dashed var(--grid); border-radius: var(--radius);
+  padding: 18px; margin-top: 12px; text-align: center; cursor: pointer;
+  color: var(--ink-2); font-size: 16px;
+  background: var(--page); transition: border-color .12s, background .12s;
+}
+.dropzone:hover, .dropzone:focus-visible { border-color: var(--muted); outline: none; }
+.dropzone.over { border-color: var(--accent); background: var(--accent-soft); color: var(--ink); }
+.kb-hint { color: var(--muted); font-size: 14.5px; margin-top: 12px; }
+
+/* One file, stacked: name on its own line, everything else under it. */
+.kb-row {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 14px 0; border-bottom: 1px solid var(--grid);
+}
+.kb-row:last-of-type { border-bottom: none; }
+.kb-row-main { flex: 1 1 240px; min-width: 0; }
+.kb-row-name {
+  font-size: 17px; font-weight: 650; color: var(--ink);
+  word-break: break-word; line-height: 1.35;
+}
+.kb-row-meta { color: var(--ink-2); font-size: 14.5px; margin-top: 3px; }
+.kb-row-actions { display: flex; gap: 10px; flex: none; }
+.kb-row.confirm {
+  background: rgba(208, 59, 59, .10);
+  border: 2px solid var(--critical); border-radius: 10px;
+  padding: 14px 16px; margin: 10px 0;
+}
+.kb-row.confirm .kb-row-name { color: var(--ink); }
+.kb-row.done .kb-row-name { font-weight: 600; }
+
+.kb-none { color: var(--muted); font-size: 15.5px; padding: 6px 0 4px; }
+.kb-status { font-size: 16px; color: var(--ink-2); margin-top: 12px; line-height: 1.45; }
+.kb-status.ok { color: var(--good); font-weight: 650; }
+.kb-status.err { color: var(--critical); font-weight: 650; }
+.kb-step .btn-big { margin-top: 18px; }
+
+.up-row { margin-top: 14px; }
+.up-head {
+  display: flex; justify-content: space-between; gap: 12px;
+  font-size: 15px; margin-bottom: 6px;
+}
+.up-row .up-name { color: var(--ink); font-weight: 600; word-break: break-all; }
+.up-row .up-pct { color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.up-row.ok .up-pct { color: var(--good); font-weight: 700; }
+.up-row.err .up-pct { color: var(--critical); font-weight: 700; }
+.up-row.err .bar-track { background: transparent; }
+.up-row .bar-track { height: 22px; }
+
+.ingest-note {
+  margin-top: 12px; color: var(--warning); font-size: 15px; line-height: 1.5;
+  background: rgba(250, 178, 25, .10); border-left: 4px solid var(--warning);
+  border-radius: 0 6px 6px 0; padding: 11px 14px;
+}
+
+/* Heavy browser zoom narrows the viewport the same way a small screen does, and
+   this page is likely to be read zoomed in. Claw back the side padding so the
+   buttons stay wide enough to hit, and let a wrapped action row span the card. */
+@media (max-width: 620px) {
+  .main { padding: 18px 14px 44px; }
+  .kb-step { padding: 16px 15px 18px; }
+  .kb-row-actions { width: 100%; }
+  .kb-row-actions button { flex: 1 1 0; }
+}
+
 /* ---------- Logs ---------- */
 .log-view {
   background: var(--page); border: 1px solid var(--grid); border-radius: 8px;
@@ -367,7 +476,7 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 }
 .agent-alice { background: #b57edc; }
 .agent-bob   { background: var(--accent); }
-.agent-cobe  { background: var(--warning); }
+.agent-tom   { background: var(--warning); }
 .agent-chip {
   display: inline-flex; align-items: center; gap: 7px;
   font-size: 20px; font-weight: 700;
@@ -378,7 +487,7 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 }
 .agent-chip.agent-alice::before { background: #b57edc; }
 .agent-chip.agent-bob::before   { background: var(--accent); }
-.agent-chip.agent-cobe::before  { background: var(--warning); }
+.agent-chip.agent-tom::before   { background: var(--warning); }
 .t-muted { color: var(--muted); font-size: 16px; font-weight: 600; }
 .badge.live {
   background: rgba(12, 163, 12, 0.16); color: var(--good);

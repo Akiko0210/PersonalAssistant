@@ -36,11 +36,11 @@ class TestRegistryIntegrity(unittest.TestCase):
     def test_roster_mentions_the_others_and_shared_memory(self):
         block = agents.roster_block("alice")
         self.assertIn("Bob", block)
-        self.assertIn("Cobe", block)
+        self.assertIn("Tom", block)
         self.assertIn("share", block.lower())
 
     def test_resolve_tolerates_aliases_and_case(self):
-        self.assertEqual(agents.resolve("Kobe"), "cobe")
+        self.assertEqual(agents.resolve("Thom"), "tom")
         self.assertEqual(agents.resolve("BOB"), "bob")
         self.assertEqual(agents.resolve("alice"), "alice")
         self.assertIsNone(agents.resolve("nobody"))
@@ -54,13 +54,13 @@ class TestMatchAddress(unittest.TestCase):
         self.assertEqual(rest, "what was my last note?")
 
     def test_misheard_alias_with_filler(self):
-        key, rest = agents.match_address("hey kobe check trades")
-        self.assertEqual(key, "cobe")
+        key, rest = agents.match_address("hey thom check trades")
+        self.assertEqual(key, "tom")
         self.assertEqual(rest, "check trades")
 
     def test_explicit_switch_phrases(self):
         self.assertEqual(agents.match_address("switch to bob"), ("bob", ""))
-        self.assertEqual(agents.match_address("I wanna talk to Cobe")[0], "cobe")
+        self.assertEqual(agents.match_address("I wanna talk to Tom")[0], "tom")
         self.assertEqual(agents.match_address("let me talk to alice")[0], "alice")
 
     def test_bare_name(self):
