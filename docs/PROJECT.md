@@ -441,16 +441,47 @@ your words. See `MEDIA_CONTROL.md` for the full hardware story.
 
 ## 10. Extending the project
 
-- **New tool / capability** — add one decorated function under `tools/` and import
-  the module in `tools/__init__.py`. Nothing else to wire.
-- **New note folder** — created by voice at runtime, or seed one in
-  `stores/categories.py`.
-- **Swap an engine** — STT/TTS/embedding choices are isolated behind `speech/stt.py` /
-  `speech/tts.py` / the stores; a new backend is a drop-in.
-- **Tuning** — audio thresholds, models, endpointing, and barge-in sensitivity
-  are all constants in `config.py`, adjustable visually via the dashboard
-  (`dashboard.bat`) — its edits persist to `data/config_overrides.json` and
-  apply on the agent's next start.
+### Where each kind of addition goes
+
+Each row is meant to be the ONLY place you touch. If a change starts spreading
+past its row, that is the signal to stop and look for the seam you're missing
+rather than to keep editing — see the duplication rule in `CLAUDE.md`.
+
+| To add… | Edit | Notes |
+| --- | --- | --- |
+| **A voice tool** | one decorated function under `tools/`, plus its module import at the bottom of `tools/__init__.py` | the `@tool` schema IS the content; the body should be a call into a store (§5) |
+| **A dashboard control** (button that acts on the live agent) | one handler in `CONTROL_ACTIONS` (`web/server.py`), one public `Agent` method, one front-end button POSTing `/api/control/<name>` | never the dispatch or routing — they are generic and carry the one provenance log line |
+| **A persona** | one entry in `brain/agents.py`'s `AGENTS` (`name, role, persona, aliases, model, tools, tts_voice, tts_rate`) | aliases must stay globally unique or `match_address` becomes ambiguous |
+| **A note folder** | created by voice at runtime; or seed one in `stores/categories.py` | |
+| **A tunable** | the constant in `config.py` (with its rationale comment), its type in `OVERRIDABLE`, and a `TUNABLES` row in `web/server.py` | the row generates the Config-page control AND its server-side validation |
+| **A dashboard page** | a `views.<name>` function in `web/static/app.js`, a nav link in `index.html`, and its read-only API route | 12 views exist; copy the nearest one's shape |
+| **A different speech/embedding engine** | `speech/stt.py`, `speech/tts.py`, or the store's `_ensure_chroma` | orchestration never names a backend |
+| **A shared test fake** | `tests/agent_fixtures.py`, `tests/llm_fixtures.py`, `tests/trading_fixtures.py` | extend these; a fourth copy of a fake is the bug this convention exists to stop |
+
+### Limits, and the number that triggers each
+
+None of these are bugs — they are deliberate bounds. They are written down
+because code that *assumes* a limit away breaks quietly: the dashboard's chat
+box first shipped watching the history message count grow, which a full
+history never does.
+
+| Limit | Now | What happens past it |
+| --- | --- | --- |
+| Conversation history | **40 messages** (`HISTORY_MAX_MESSAGES`, adjustable 4–200 on the Config page) | oldest turns fall off the window and are staged into long-term memory (§7) — the count stops growing, it does not grow forever |
+| Dashboard note search | every note file opened per query (**291 notes** when this was written — check the Overview page for today's count) | linear; fine at hundreds, slow in the low thousands. Deliberately a substring scan — semantic search stays a voice feature (Chroma), so this path never loads the embedding model |
+| Turns | **one at a time** | the loop is blocking. A typed message waits for an utterance boundary; during note-taking it waits for the note to end. Background delegations (`ask_agent`) are the exception — they run on threads and speak their result at the next gap |
+| Tool rounds per turn | **15** conversation, **8** delegated | the loop bails with a spoken "I got stuck repeating tool calls" rather than billing forever |
+| Knowledge ingest | mutually exclusive with a running agent | both write the same Chroma store; the single-instance lock enforces it, so the dashboard's Ingest button is dead while the agent runs |
+| Agent instances | **one** | the lock (`lib/single_instance.py`). A second would double the Whisper + embedding memory and race on history and the index |
+| Typed message | **4000 chars** (`MAX_MESSAGE_CHARS`) | rejected with a 400; a message is a question, not a document |
+| One utterance | **30 s** (`MAX_UTTERANCE_S`) | capture is cut and transcribed as-is |
+
+### Tuning
+
+Audio thresholds, models, endpointing, barge-in sensitivity, and the history
+window are constants in `config.py`, adjustable visually on the dashboard's
+Config page — edits persist to `data/config_overrides.json` and apply at the
+agent's next start.
 
 ### Roadmap (not yet built)
 - **Event-driven core** — replace the blocking loop with actors (Ears, Mouth,
