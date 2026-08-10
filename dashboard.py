@@ -458,8 +458,15 @@ def api_agents():
     agents_registry.load_agents()  # pick up saved edits fresh, like folder_registry
     overlay = _read_json(cfg.AGENTS_PATH, {})
     defaults = agents_registry.defaults()
+    # What each persona is ACTUALLY answering with right now. The "model" field
+    # below is the configured default; a mid-session "switch to DeepSeek" lives
+    # only in the agent process, which publishes it here (llm._write_agent_state).
+    # Without this the page confidently showed Haiku during a DeepSeek
+    # conversation — same stale-by-construction problem as model identity.
+    live_models = talking_to().get("models") or {}
     out = []
     for key, agent in agents_registry.AGENTS.items():
+        live = live_models.get(key)
         out.append({
             "key": key,
             "name": agent["name"],
@@ -467,6 +474,13 @@ def api_agents():
             "persona": agent["persona"],
             "aliases": list(agent["aliases"]),
             "model": agent["model"],
+            "live_model": live,
+            "live_model_label": cfg.convo_model_label(live) if live else None,
+            # Compared here, not in the page: "model" is a registry KEY
+            # ("haiku") and the published live value is a model ID
+            # ("claude-haiku-4-5").
+            "live_differs": bool(
+                live and live != cfg.CONVO_MODELS.get(agent["model"])),
             "tts_voice": agent["tts_voice"],
             "tts_rate": agent["tts_rate"],
             "tools": sorted(agent["tools"]),

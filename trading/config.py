@@ -61,6 +61,14 @@ CHAIN_CACHE_TTL_S = 15 * 60
 # period start so opens that precede the period are matched (see pnl.py).
 PNL_OPEN_LOOKBACK_DAYS = 370
 
+# How far back "recent orders" reaches when no start date is given. The broker's
+# order list is date-ranged, and this defaulted to *today* — so a working order
+# silently vanished from both the dashboard and "any working orders?" the moment
+# the date rolled over, while it was still live at the broker (two working SPX
+# orders placed 2026-08-06 were invisible on 08-09). Working orders rest for
+# days, so the default window has to outlive a weekend by a wide margin.
+ORDERS_LOOKBACK_DAYS = 30
+
 
 def _fallback_env(key):
     """Read one key from TASTY_ENV_FILE (a foreign .env, e.g. Tasty-Web's)
@@ -133,6 +141,13 @@ def credentials_problem():
     return ("Trading is not configured: missing " + ", ".join(missing) +
             ". Add the keys to .env, or set TASTY_ENV_FILE to a .env that "
             "has them (for example the Tasty-Web project's).")
+
+
+def default_orders_start():
+    """ISO date the order list reaches back to when the caller gives none.
+    Shared by the voice tool and the dashboard so both show the same set."""
+    from datetime import date, timedelta
+    return (date.today() - timedelta(days=ORDERS_LOOKBACK_DAYS)).isoformat()
 
 
 def ensure_dirs():

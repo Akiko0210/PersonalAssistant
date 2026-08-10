@@ -17,6 +17,7 @@ Design rules:
 from datetime import date, timedelta
 
 from tools import tool
+from trading import config as tcfg
 from trading import strategies as tstrat
 from trading import symbols as tsym
 from trading import ticket as tticket
@@ -432,7 +433,10 @@ def submit_order(ctx, args):
         "type": "object",
         "properties": {
             "start_date": {"type": "string",
-                           "description": "ISO date; default today."},
+                           "description": ("ISO date to search from. Omit for "
+                                           "the default recent window, which "
+                                           "covers orders still working from "
+                                           "earlier days.")},
             "working_only": {"type": "boolean"},
         },
     },
@@ -441,7 +445,9 @@ def list_orders(ctx, args):
     eng, err = _engine()
     if err:
         return err
-    start = args.get("start_date") or date.today().isoformat()
+    # Defaulting to today made "any working orders?" answer "no" while orders
+    # were live at the broker — they were simply older than midnight.
+    start = args.get("start_date") or tcfg.default_orders_start()
     try:
         orders = eng.orders.list_orders(start_date=start)
     except Exception as e:

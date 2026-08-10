@@ -1,6 +1,9 @@
 import tempfile
 import time
 import unittest
+from datetime import date, timedelta
+
+from trading import config as tcfg
 from pathlib import Path
 
 from tests.trading_fixtures import spx_chain
@@ -182,3 +185,17 @@ class TestCancelAndList(OrdersBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDefaultOrdersWindow(unittest.TestCase):
+    """Two working SPX orders placed 2026-08-06 were invisible on 08-09 in both
+    the dashboard and "any working orders?" — the default start date was today,
+    so a resting order dropped off the moment the date rolled over."""
+
+    def test_default_start_reaches_back_past_a_weekend(self):
+        start = date.fromisoformat(tcfg.default_orders_start())
+        self.assertLessEqual(start, date.today() - timedelta(days=7),
+                             "a Friday order must still be listed on Monday")
+
+    def test_default_start_is_not_today(self):
+        self.assertNotEqual(tcfg.default_orders_start(), date.today().isoformat())

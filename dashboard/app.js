@@ -225,7 +225,13 @@ views.agents = async function () {
         <div class="ac-grid">
           <label class="ac-field"><span>Role (one line)</span>
             <input class="f-text" data-agent-field="role" value="${esc(agentVal(a, "role"))}"></label>
-          <label class="ac-field"><span>Model</span>
+          <label class="ac-field"><span>Model${
+            // The dropdown is the configured DEFAULT. A voice "switch to
+            // DeepSeek" changes only the running conversation, so say so
+            // rather than letting the default read as current fact.
+            data.agent_running && a.live_differs
+              ? ` <span class="live-model">now on ${esc(a.live_model_label)}</span>`
+              : ""}</span>
             <select class="f-select" data-agent-field="model">
               ${data.models.map(m => `<option value="${esc(m.value)}"
                 ${m.value === agentVal(a, "model") ? "selected" : ""}>${esc(m.label)}</option>`).join("")}

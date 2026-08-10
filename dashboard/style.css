@@ -493,6 +493,12 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
   background: rgba(12, 163, 12, 0.16); color: var(--good);
   border-color: rgba(12, 163, 12, 0.4);
 }
+/* "now on DeepSeek V4 Pro" beside the Model label: the dropdown is the saved
+   default, this is what the running conversation actually uses. */
+.live-model {
+  color: var(--good); font-weight: 700; text-transform: none;
+  letter-spacing: 0;
+}
 .ac-grid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px 16px; margin-bottom: 12px;

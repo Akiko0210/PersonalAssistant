@@ -11,7 +11,7 @@ it the DXLink url+token and the page opens the websocket directly (the
 same pattern Tasty-Web uses), so the dashboard process never streams.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 from trading import config as tcfg
 from trading import strategies as tstrat
@@ -227,8 +227,10 @@ def orders_list(start_date=None):
     if err:
         return _err(err)
     try:
+        # Not today: a still-working order placed yesterday must not drop off
+        # the page (tcfg.ORDERS_LOOKBACK_DAYS).
         orders = eng.orders.list_orders(
-            start_date=start_date or date.today().isoformat())
+            start_date=start_date or tcfg.default_orders_start())
     except Exception as e:
         return _err(e)
     return {"orders": [{

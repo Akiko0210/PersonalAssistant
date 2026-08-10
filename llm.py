@@ -144,6 +144,7 @@ class Claude:
                                 client=tool_client,
                                 convo_model=self._registry_model(self.active),
                                 active_agent=self.active)
+        self._active_since = datetime.now()
         self._write_agent_state()
         # Conversation memory: restore the last conversation (trimmed) so the agent
         # remembers it across restarts; saved back to disk after every turn.
@@ -326,6 +327,7 @@ class Claude:
         self._ctx.active_agent = key
         self._ctx.convo_model = (self._model_overrides.get(key)
                                  or self._registry_model(key))
+        self._active_since = datetime.now()
         self._write_agent_state()
         # An assistant turn, like flush_tool_events' self-notes: the system's
         # own record of what it did, never a fabricated user utterance.
@@ -341,13 +343,28 @@ class Claude:
         log.info("active agent -> %s (%s)", key, self._ctx.convo_model)
 
     def _write_agent_state(self):
-        """Tell the dashboard who is talking. Telemetry only — never read back,
-        and never allowed to break a switch."""
+        """Tell the dashboard who is talking and what each persona will answer
+        with. Telemetry only — never read back, and never allowed to break a
+        switch or a turn.
+
+        The models have to be published because they live ONLY in this
+        process: a mid-session set_conversation_model lands in
+        _ctx.convo_model, and the per-hat memory of it in _model_overrides.
+        The dashboard can otherwise see just the configured default (registry
+        + agents.json), so its Agents page said Haiku while the conversation
+        was going to DeepSeek. `since` tracks the last persona change, not
+        this write, so a per-turn refresh doesn't keep resetting it."""
         try:
+            live = {}
+            for key in agents.AGENTS:
+                chosen = (self._ctx.convo_model if key == self.active
+                          else self._model_overrides.get(key))
+                live[key] = chosen or self._registry_model(key)
             write_json_atomic(cfg.AGENT_STATE_PATH, {
                 "active": self.active,
                 "name": agents.AGENTS[self.active]["name"],
-                "since": datetime.now().isoformat(timespec="seconds"),
+                "since": self._active_since.isoformat(timespec="seconds"),
+                "models": live,
             })
         except OSError as e:
             log.warning("could not write agent state: %s", e)
@@ -533,6 +550,11 @@ class Claude:
             # with persist=True, since they finish after this point.
             self.flush_tool_events()
             self._save_history()  # every turn — survives crashes and quits alike
+            # set_conversation_model changes _ctx.convo_model without going
+            # through switch_to, so the state file would otherwise go stale the
+            # moment the user says "switch to DeepSeek". One atomic write a
+            # turn, next to the history save that already happens here.
+            self._write_agent_state()
 
     # --- summarisation -------------------------------------------------------
     @staticmethod

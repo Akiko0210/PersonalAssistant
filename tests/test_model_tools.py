@@ -1,7 +1,11 @@
 """Unit tests for the model tools (read + switch) and provider routing."""
 
+import json
 import os
+import tempfile
 import unittest
+from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import agents
@@ -199,3 +203,63 @@ class TestModelProvider(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPublishedAgentState(unittest.TestCase):
+    """The dashboard can only ever show the CONFIGURED model unless the agent
+    publishes what it is really using — the Agents page said Haiku through a
+    whole DeepSeek conversation because this map did not exist."""
+
+    def make_claude(self, tmp):
+        c = Claude.__new__(Claude)
+        c.active = "alice"
+        c._model_overrides = {}
+        c._ctx = ToolContext(active_agent="alice",
+                             convo_model=cfg.CONVO_MODELS["haiku"])
+        c.history = []
+        c._save_history = lambda: None
+        c._active_since = datetime(2026, 8, 9, 11, 37, 57)
+        self._path = tmp / "agent_state.json"
+        self._patch = patch.object(cfg, "AGENT_STATE_PATH", self._path)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+        return c
+
+    def _state(self):
+        return json.loads(self._path.read_text(encoding="utf-8"))
+
+    def test_publishes_every_personas_live_model(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.make_claude(Path(d))
+            c._write_agent_state()
+            models = self._state()["models"]
+            self.assertEqual(set(models), set(agents.AGENTS))
+            # Untouched hats report their registry default.
+            self.assertEqual(models["tom"], cfg.CONVO_MODELS["sonnet"])
+
+    def test_a_mid_session_switch_shows_on_the_active_hat(self):
+        with tempfile.TemporaryDirectory() as d:
+            c = self.make_claude(Path(d))
+            c._ctx.convo_model = cfg.CONVO_MODELS["deepseek pro"]  # "use DeepSeek"
+            c._write_agent_state()
+            models = self._state()["models"]
+            self.assertEqual(models["alice"], cfg.CONVO_MODELS["deepseek pro"])
+            self.assertEqual(models["bob"], cfg.CONVO_MODELS["haiku"])  # unaffected
+
+    def test_a_parked_hat_keeps_its_remembered_model(self):
+        # Leave Tom on Opus, talk to Alice: the page must still show Tom's Opus.
+        with tempfile.TemporaryDirectory() as d:
+            c = self.make_claude(Path(d))
+            c._model_overrides["tom"] = cfg.CONVO_MODELS["opus"]
+            c._write_agent_state()
+            self.assertEqual(self._state()["models"]["tom"],
+                             cfg.CONVO_MODELS["opus"])
+
+    def test_since_tracks_the_persona_change_not_the_write(self):
+        # It is refreshed every turn now; that must not keep resetting "since".
+        with tempfile.TemporaryDirectory() as d:
+            c = self.make_claude(Path(d))
+            c._write_agent_state()
+            first = self._state()["since"]
+            c._write_agent_state()
+            self.assertEqual(self._state()["since"], first)

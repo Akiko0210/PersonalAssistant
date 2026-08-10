@@ -40,6 +40,7 @@ def make_claude(responses):
     c.idle = SimpleNamespace(start=lambda: None, stop=lambda: None)
     c.memory = SimpleNamespace(record_dropped=lambda dropped: None)
     c._save_history = lambda: None
+    c._write_agent_state = lambda: None  # refreshed every turn; no disk writes here
     return c
 
 
