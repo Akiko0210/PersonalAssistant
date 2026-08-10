@@ -13,7 +13,7 @@ model classes so it can be tested without hardware or an API key.
 import json
 import logging
 
-from atomic_io import write_json_atomic
+from atomic_io import read_json, write_json_atomic
 
 log = logging.getLogger("history")
 
@@ -79,14 +79,9 @@ def trim(history, max_messages):
 def load(path):
     """Read a saved history list from `path`. Returns [] when the file is
     missing or unreadable — a lost history must never block startup."""
-    try:
-        if path.exists():
-            h = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(h, list):
-                return h
-    except (OSError, ValueError) as e:
-        log.warning("could not load conversation history: %s", e)
-    return []
+    return read_json(path, [], expect=list,
+                     warn=lambda e: log.warning(
+                         "could not load conversation history: %s", e))
 
 
 def save(path, history):

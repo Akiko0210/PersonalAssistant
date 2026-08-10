@@ -53,7 +53,8 @@ from urllib.parse import parse_qs, urlparse
 import agents as agents_registry
 import categories
 import config as cfg
-from atomic_io import write_json_atomic
+from atomic_io import read_json, write_json_atomic
+from frontmatter import parse_frontmatter
 from single_instance import AlreadyRunning, SingleInstance
 
 log = logging.getLogger("dashboard")
@@ -268,27 +269,6 @@ def validate_payload(payload):
 
 # --- Data readers (all straight off disk, fresh per request) ------------------
 
-def _read_json(path, fallback):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return fallback
-
-
-def parse_frontmatter(text):
-    # Mirror of notes.parse_frontmatter — duplicated so the dashboard never
-    # imports notes.py (which drags in chromadb + the embedding stack).
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, re.DOTALL)
-    if not m:
-        return {}, text
-    fields = {}
-    for line in m.group(1).splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            fields[key.strip()] = value.strip()
-    return fields, text[m.end():]
-
-
 # The lock probe below is cheap but not free: when no agent holds the lock, the
 # probe takes it and releasing DELETES the lock file. The sidebar polls it from
 # every open tab, in a folder Dropbox is watching — so the answer is memoised
@@ -333,7 +313,7 @@ def folder_registry():
 
 
 def note_index():
-    return _read_json(cfg.INDEX_PATH, {})
+    return read_json(cfg.INDEX_PATH, {})
 
 
 def api_overview():
@@ -341,11 +321,11 @@ def api_overview():
     folders = folder_registry()
     counts = {}
     for info in index.values():
-        slug = info.get("category") or categories.DEFAULT_CATEGORY
+        slug = categories.slug_of(info)
         counts[slug] = counts.get(slug, 0) + 1
-    history = _read_json(cfg.HISTORY_PATH, [])
-    pending = _read_json(cfg.MEMORY_PENDING_PATH, [])
-    manifest = _read_json(cfg.KNOWLEDGE_MANIFEST, {})
+    history = read_json(cfg.HISTORY_PATH, [])
+    pending = read_json(cfg.MEMORY_PENDING_PATH, [])
+    manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     logs = sorted(cfg.LOG_DIR.glob("session_*.log")) if cfg.LOG_DIR.exists() else []
 
     # Notes per day over the last 30 days, for the activity chart.
@@ -375,7 +355,7 @@ def api_overview():
         "convo_model": cfg.convo_model_label(cfg.CONVO_MODEL),
         "summary_model": cfg.SUMMARY_MODEL,
         "whisper_model": cfg.WHISPER_MODEL,
-        "overrides_active": len(_read_json(cfg.OVERRIDES_PATH, {})),
+        "overrides_active": len(read_json(cfg.OVERRIDES_PATH, {})),
         "activity": [{"day": d, "count": by_day[d]} for d in days],
         "recent_notes": [
             {"id": nid, **info}
@@ -390,7 +370,7 @@ def api_notes(folder=None):
     items = sorted(index.items(), reverse=True)
     if folder:
         items = [(nid, info) for nid, info in items
-                 if (info.get("category") or categories.DEFAULT_CATEGORY) == folder]
+                 if categories.slug_of(info) == folder]
     return {
         "folders": [
             {"slug": slug, "display": meta["display"],
@@ -407,7 +387,7 @@ def api_note(note_id):
     if not info or not NOTE_ID_RE.match(note_id):
         return None
     folders = folder_registry()
-    slug = info.get("category") or categories.DEFAULT_CATEGORY
+    slug = categories.slug_of(info)
     folder = folders.get(slug, {}).get("folder", slug)
     base = cfg.DATA_DIR / folder
     summary, transcript = "", ""
@@ -436,7 +416,7 @@ def api_search(query):
     folders = folder_registry()
     results = []
     for nid, info in sorted(index.items(), reverse=True):
-        slug = info.get("category") or categories.DEFAULT_CATEGORY
+        slug = categories.slug_of(info)
         folder = folders.get(slug, {}).get("folder", slug)
         title = info.get("title", "")
         snippet = ""
@@ -463,7 +443,7 @@ def api_search(query):
 def talking_to():
     """Which persona is active, from the state file llm.switch_to writes.
     Meaningful only while the agent runs; the dashboard greys it out otherwise."""
-    state = _read_json(cfg.AGENT_STATE_PATH, {})
+    state = read_json(cfg.AGENT_STATE_PATH, {})
     return state if isinstance(state, dict) else {}
 
 
@@ -569,7 +549,7 @@ def api_agents():
     """The persona registry: coded defaults overlaid with data/agents.json,
     plus who's active. Editable fields only — tool lists are shown read-only."""
     agents_registry.load_agents()  # pick up saved edits fresh, like folder_registry
-    overlay = _read_json(cfg.AGENTS_PATH, {})
+    overlay = read_json(cfg.AGENTS_PATH, {})
     defaults = agents_registry.defaults()
     # What each persona is ACTUALLY answering with right now. The "model" field
     # below is the configured default; a mid-session "switch to DeepSeek" lives
@@ -617,7 +597,7 @@ def save_agents(payload):
     if not isinstance(payload, dict):
         return {"ok": False, "errors": {"_": "expected an object"}}
     agents_registry.load_agents()
-    overlay = _read_json(cfg.AGENTS_PATH, {})
+    overlay = read_json(cfg.AGENTS_PATH, {})
     if not isinstance(overlay, dict):
         overlay = {}
     errors = {}
@@ -689,7 +669,7 @@ def save_agents(payload):
 
 
 def api_config():
-    overrides = _read_json(cfg.OVERRIDES_PATH, {})
+    overrides = read_json(cfg.OVERRIDES_PATH, {})
     out = []
     for meta in TUNABLES:
         key = meta["key"]
@@ -720,17 +700,17 @@ def save_config(payload):
 
 
 def api_history(limit=200):
-    messages = _read_json(cfg.HISTORY_PATH, [])
+    messages = read_json(cfg.HISTORY_PATH, [])
     return {"messages": messages[-limit:], "total": len(messages)}
 
 
 def api_memory():
-    return {"pending": _read_json(cfg.MEMORY_PENDING_PATH, []),
+    return {"pending": read_json(cfg.MEMORY_PENDING_PATH, []),
             "min_messages": cfg.MEMORY_MIN_MESSAGES}
 
 
 def api_knowledge():
-    manifest = _read_json(cfg.KNOWLEDGE_MANIFEST, {})
+    manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     docs = [{"hash": h[:12], **info} for h, info in manifest.items()]
     docs.sort(key=lambda d: d.get("ingested", ""), reverse=True)
     ingested = {d.get("source") for d in docs}
@@ -881,7 +861,7 @@ def remove_pending(name):
     path = cfg.KNOWLEDGE_DIR / name
     if not path.is_file():
         return 404, {"ok": False, "error": f"'{name}' is no longer in the folder"}
-    manifest = _read_json(cfg.KNOWLEDGE_MANIFEST, {})
+    manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     if any(entry.get("source") == name for entry in manifest.values()):
         return 409, {"ok": False,
                      "error": f"'{name}' is already in the knowledge base — "

@@ -142,7 +142,7 @@ class Claude:
         self._ctx = ToolContext(store=self.store, discord=self.discord,
                                 kb=self.kb, memory=self.memory,
                                 client=tool_client,
-                                convo_model=self._registry_model(self.active),
+                                convo_model=agents.registry_model(self.active),
                                 active_agent=self.active)
         self._active_since = datetime.now()
         self._write_agent_state()
@@ -208,6 +208,99 @@ class Claude:
         pending, self._ctx.pending_delegations = self._ctx.pending_delegations, []
         return pending
 
+    # --- the tool loop --------------------------------------------------------
+    def _tool_loop(self, messages, *, ctx, tools, system_for, default_model,
+                   max_rounds, on_tool=None, stop=None):
+        """The one create -> tool_use -> tool_result engine behind converse(),
+        run_delegated_task(), and choose_folder_via_dialogue(). It existed as
+        three hand-written copies that drifted: only converse() had the
+        NotFoundError revert and the max_tokens honesty (_final_text) — the
+        others silently lacked both.
+
+        messages       mutated in place (converse passes self.history).
+        ctx            ToolContext for dispatch(); ctx.convo_model is read
+                       fresh each round, so set_conversation_model mid-loop
+                       applies to the next call — and is reverted to
+                       default_model() if the API no longer serves it.
+        system_for     (model_id) -> system str, rebuilt per round because the
+                       identity block names the model.
+        default_model  () -> model id when ctx.convo_model is unset, and the
+                       NotFoundError fallback (re-raises if already on it).
+        on_tool        optional (block) -> result str for a caller-private
+                       tool (the folder dialogue's choose_folder); None means
+                       "not mine", and the block goes through dispatch().
+        stop           optional () -> bool, checked after each tool round, so
+                       on_tool can end the loop through closure state.
+
+        Returns the final response (stop_reason != "tool_use"), or None when
+        the rounds ran out or `stop` fired. The idle cue is the caller's:
+        converse holds it across the whole loop, the folder dialogue per
+        exchange."""
+        for _ in range(max_rounds):
+            model = ctx.convo_model or default_model()
+            try:
+                resp = self.client_for(model).messages.create(
+                    model=model,
+                    max_tokens=cfg.CONVO_MAX_TOKENS,
+                    system=system_for(model),
+                    tools=tools,
+                    messages=cached(messages),
+                    **cfg.thinking_kwargs(model),
+                )
+            except anthropic.NotFoundError:
+                # A switched-to model id the API no longer serves must not
+                # brick every later turn — the voice fix (switching back)
+                # itself needs a working model call. Revert and retry.
+                fallback = default_model()
+                if model != fallback:
+                    log.warning("model %s rejected (not found); reverting "
+                                "to the default %s", model, fallback)
+                    ctx.convo_model = fallback
+                    continue
+                raise
+            messages.append(
+                {"role": "assistant",
+                 "content": [self._dump_block(b) for b in resp.content]})
+            if resp.stop_reason != "tool_use":
+                return resp
+            results = []
+            for block in resp.content:
+                if block.type != "tool_use":
+                    continue
+                out = on_tool(block) if on_tool else None
+                if out is None:
+                    log.info("tool_use %s %s", block.name, block.input)
+                    out = dispatch(ctx, block.name, block.input)
+                results.append({"type": "tool_result",
+                                "tool_use_id": block.id, "content": out})
+            messages.append({"role": "user", "content": results})
+            if stop is not None and stop():
+                return None
+        return None
+
+    @staticmethod
+    def _final_text(resp):
+        """Text of a final response, with the max_tokens honesty applied. If
+        the reply died inside a tool call, that call was never dispatched —
+        the action did NOT happen, and the dangling tool_use will be sanitized
+        away, so the model won't even remember trying. Say so out loud; a
+        silent empty return here cost a whole note save while the model kept
+        announcing "saving now" (2026-07-19 log)."""
+        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if resp.stop_reason == "max_tokens":
+            truncated_tool = any(b.type == "tool_use" for b in resp.content)
+            log.warning("reply truncated at CONVO_MAX_TOKENS "
+                        "(tool call cut off: %s)", truncated_tool)
+            if truncated_tool:
+                notice = ("Sorry — that action needed a longer reply than "
+                          "I'm allowed, so it did not complete. Try asking "
+                          "for a shorter version.")
+                return f"{text} {notice}".strip()
+            if not text:
+                return ("My reply hit its length limit before I could say "
+                        "anything. Try asking for a shorter version.")
+        return text
+
     # --- background delegation ------------------------------------------------
     def run_delegated_task(self, key, task):
         """Run `task` as persona `key` in an isolated mini-conversation, for
@@ -230,8 +323,7 @@ class Claude:
         sound either — the user may be mid-sentence with the foreground
         persona."""
         hat = agents.AGENTS[key]
-        model = self._registry_model(key)
-        client = self.client_for(model)
+        model = agents.registry_model(key)
         sub_ctx = ToolContext(store=self.store, discord=self.discord,
                               kb=self.kb, memory=self.memory,
                               client=self._ctx.client,
@@ -249,53 +341,28 @@ class Claude:
             "submit_order", "cancel_order"})
         messages = [{"role": "user", "content": task}]
         log.info("delegated task -> %s (%s)", key, model)
-        for _ in range(cfg.DELEGATION_MAX_TOOL_ROUNDS):
-            resp = client.messages.create(
-                model=model,
-                max_tokens=cfg.CONVO_MAX_TOKENS,
-                system=system,
-                tools=tools,
-                messages=cached(messages),
-                **cfg.thinking_kwargs(model),
-            )
-            messages.append(
-                {"role": "assistant",
-                 "content": [self._dump_block(b) for b in resp.content]})
-            if resp.stop_reason == "tool_use":
-                results = []
-                for block in resp.content:
-                    if block.type == "tool_use":
-                        log.info("delegated tool_use %s %s",
-                                 block.name, block.input)
-                        results.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": dispatch(sub_ctx, block.name,
-                                                block.input),
-                        })
-                messages.append({"role": "user", "content": results})
-                continue
-            text = "".join(b.text for b in resp.content
-                           if b.type == "text").strip()
-            return (text or "the task is done.", sub_ctx.pending_note)
-        log.warning("delegated task hit DELEGATION_MAX_TOOL_ROUNDS (%d); "
-                    "reporting as incomplete", cfg.DELEGATION_MAX_TOOL_ROUNDS)
-        return ("I ran out of steps before finishing that task — it may be "
-                "incomplete.", sub_ctx.pending_note)
+        resp = self._tool_loop(
+            messages, ctx=sub_ctx, tools=tools,
+            system_for=lambda m: system, default_model=lambda: model,
+            max_rounds=cfg.DELEGATION_MAX_TOOL_ROUNDS,
+        )
+        if resp is None:
+            log.warning("delegated task hit DELEGATION_MAX_TOOL_ROUNDS (%d); "
+                        "reporting as incomplete",
+                        cfg.DELEGATION_MAX_TOOL_ROUNDS)
+            return ("I ran out of steps before finishing that task — it may "
+                    "be incomplete.", sub_ctx.pending_note)
+        return (self._final_text(resp) or "the task is done.",
+                sub_ctx.pending_note)
 
     # --- personas ("hats") ----------------------------------------------------
-    @staticmethod
-    def _registry_model(key):
-        """The API model id an agent's registry entry names."""
-        return cfg.CONVO_MODELS.get(agents.AGENTS[key]["model"], cfg.CONVO_MODEL)
-
     @property
     def active_model(self):
         """API model id the active persona answers with — its registry default
         unless a mid-session set_conversation_model override is in play. Same
         expression converse() resolves each call, exposed so callers (the switch
         announcement) can report the model without reaching into _ctx."""
-        return self._ctx.convo_model or self._registry_model(self.active)
+        return self._ctx.convo_model or agents.registry_model(self.active)
 
     @property
     def active_model_label(self):
@@ -326,7 +393,7 @@ class Claude:
         self.active = key
         self._ctx.active_agent = key
         self._ctx.convo_model = (self._model_overrides.get(key)
-                                 or self._registry_model(key))
+                                 or agents.registry_model(key))
         self._active_since = datetime.now()
         self._write_agent_state()
         # An assistant turn, like flush_tool_events' self-notes: the system's
@@ -359,7 +426,7 @@ class Claude:
             for key in agents.AGENTS:
                 chosen = (self._ctx.convo_model if key == self.active
                           else self._model_overrides.get(key))
-                live[key] = chosen or self._registry_model(key)
+                live[key] = chosen or agents.registry_model(key)
             write_json_atomic(cfg.AGENT_STATE_PATH, {
                 "active": self.active,
                 "name": agents.AGENTS[self.active]["name"],
@@ -466,83 +533,30 @@ class Claude:
         self.history = hist.sanitize(self.history)
         self.idle.start()  # thinking — keep it looping across the whole tool loop
         try:
-            for _ in range(cfg.CONVO_MAX_TOOL_ROUNDS):
-                # Read the model fresh each pass: if set_conversation_model runs
-                # during this turn's tool loop, the follow-up call (and every
-                # later turn) uses the newly chosen model.
-                model = self._ctx.convo_model or self._registry_model(self.active)
-                hat = agents.AGENTS[self.active]
-                system = (cfg.CONVO_SYSTEM_BASE + "\n\n" + hat["persona"]
-                          + agents.roster_block(self.active)
-                          + cfg.model_identity_block(
-                              cfg.convo_model_label(model)))
-                try:
-                    resp = self.client_for(model).messages.create(
-                        model=model,
-                        max_tokens=cfg.CONVO_MAX_TOKENS,
-                        system=system,
-                        tools=api_tools(include=hat["tools"]),
-                        messages=cached(self.history),
-                        **cfg.thinking_kwargs(model),
-                    )
-                except anthropic.NotFoundError:
-                    # A switched-to model id the API no longer serves must not
-                    # brick every later turn — the voice fix (switching back)
-                    # itself needs a working model call. Revert and retry.
-                    fallback = self._registry_model(self.active)
-                    if model != fallback:
-                        log.warning("model %s rejected (not found); reverting "
-                                    "to %s's default %s", model,
-                                    hat["name"], fallback)
-                        self._ctx.convo_model = fallback
-                        continue
-                    raise
-                self.history.append(
-                    {"role": "assistant",
-                     "content": [self._dump_block(b) for b in resp.content]}
-                )
-
-                if resp.stop_reason == "tool_use":
-                    results = []
-                    for block in resp.content:
-                        if block.type == "tool_use":
-                            log.info("tool_use %s %s", block.name, block.input)
-                            out = dispatch(self._ctx, block.name, block.input)
-                            results.append({
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": out,
-                            })
-                    self.history.append({"role": "user", "content": results})
-                    continue
-
-                text = "".join(b.text for b in resp.content if b.type == "text").strip()
-                if resp.stop_reason == "max_tokens":
-                    # The reply hit CONVO_MAX_TOKENS. If it died inside a tool
-                    # call, that call was never dispatched — the action did NOT
-                    # happen, and the dangling tool_use will be sanitized away,
-                    # so the model won't even remember trying. Say so out loud;
-                    # a silent empty return here cost a whole note save while
-                    # the model kept announcing "saving now" (2026-07-19 log).
-                    truncated_tool = any(b.type == "tool_use" for b in resp.content)
-                    log.warning("reply truncated at CONVO_MAX_TOKENS "
-                                "(tool call cut off: %s)", truncated_tool)
-                    if truncated_tool:
-                        notice = ("Sorry — that action needed a longer reply than "
-                                  "I'm allowed, so it did not complete. Try asking "
-                                  "for a shorter version.")
-                        return f"{text} {notice}".strip()
-                    if not text:
-                        return ("My reply hit its length limit before I could say "
-                                "anything. Try asking for a shorter version.")
-                return text
-            # The model kept calling tools without ever answering. Bail out with
-            # an honest line rather than billing API calls forever; the next
-            # turn's sanitize repairs whatever the loop left mid-flight.
-            log.warning("tool loop hit CONVO_MAX_TOOL_ROUNDS (%d); bailing out",
-                        cfg.CONVO_MAX_TOOL_ROUNDS)
-            return ("I got stuck repeating tool calls and stopped myself. "
-                    "Could you ask that again, maybe more specifically?")
+            # The hat is stable for the whole turn (switch_agent defers to a
+            # pending slot); the MODEL is not — set_conversation_model mid-loop
+            # applies to the next round, which is why the system prompt is a
+            # per-round closure: its identity block names the model.
+            hat = agents.AGENTS[self.active]
+            resp = self._tool_loop(
+                self.history, ctx=self._ctx,
+                tools=api_tools(include=hat["tools"]),
+                system_for=lambda model: (
+                    cfg.CONVO_SYSTEM_BASE + "\n\n" + hat["persona"]
+                    + agents.roster_block(self.active)
+                    + cfg.model_identity_block(cfg.convo_model_label(model))),
+                default_model=lambda: agents.registry_model(self.active),
+                max_rounds=cfg.CONVO_MAX_TOOL_ROUNDS,
+            )
+            if resp is None:
+                # The model kept calling tools without ever answering. Bail out
+                # with an honest line rather than billing API calls forever; the
+                # next turn's sanitize repairs whatever the loop left mid-flight.
+                log.warning("tool loop hit CONVO_MAX_TOOL_ROUNDS (%d); bailing "
+                            "out", cfg.CONVO_MAX_TOOL_ROUNDS)
+                return ("I got stuck repeating tool calls and stopped myself. "
+                        "Could you ask that again, maybe more specifically?")
+            return self._final_text(resp)
         finally:
             self.idle.stop()
             # Fold in anything a synchronous tool recorded this turn, then save.
@@ -662,44 +676,39 @@ class Claude:
                                    "switch_agent", "ask_agent"}) + [choose_tool]
         history = [{"role": "user",
                     "content": "I just finished recording a note. Where should it go?"}]
+        chosen = None
+
+        def on_tool(block):
+            """Intercept choose_folder — it's this dialogue's private tool,
+            not a registry one — and end the loop through `chosen`."""
+            nonlocal chosen
+            if block.name != "choose_folder":
+                return None
+            chosen = block.input.get("folder", "")
+            return "ok"
+
         try:
+            # max_turns bounds the spoken exchanges; each may spend tool
+            # rounds up to the loop's usual cap.
             for _ in range(max_turns):
                 self.idle.start()  # thinking; stopped below before we speak/listen
-                model = self._ctx.convo_model or cfg.CONVO_MODEL
-                resp = self.client_for(model).messages.create(
-                    model=model,
-                    max_tokens=cfg.CONVO_MAX_TOKENS,
-                    system=system,
-                    tools=tools,
-                    messages=cached(history),
-                    **cfg.thinking_kwargs(model),
+                resp = self._tool_loop(
+                    history, ctx=self._ctx, tools=tools,
+                    system_for=lambda m: system,
+                    default_model=lambda: cfg.CONVO_MODEL,
+                    max_rounds=cfg.CONVO_MAX_TOOL_ROUNDS,
+                    on_tool=on_tool, stop=lambda: chosen is not None,
                 )
-                history.append({"role": "assistant", "content": resp.content})
-
-                if resp.stop_reason == "tool_use":
-                    results = []
-                    chosen = None
-                    for block in resp.content:
-                        if block.type != "tool_use":
-                            continue
-                        if block.name == "choose_folder":
-                            chosen = block.input.get("folder", "")
-                            results.append({"type": "tool_result", "tool_use_id": block.id,
-                                            "content": "ok"})
-                        else:
-                            log.info("tool_use %s %s", block.name, block.input)
-                            results.append({"type": "tool_result", "tool_use_id": block.id,
-                                            "content": dispatch(self._ctx, block.name, block.input)})
-                    if chosen is not None:
-                        if chosen in categories.NOTE_CATEGORIES:
-                            return chosen
-                        # Re-validate before falling back: delete_folder may
-                        # have removed `suggested` from the registry during
-                        # this very dialogue.
-                        return (self.store._match_category(chosen)
-                                or categories.valid_slug(suggested))
-                    history.append({"role": "user", "content": results})
-                    continue  # still thinking — keep the loop playing
+                if chosen is not None:
+                    if chosen in categories.NOTE_CATEGORIES:
+                        return chosen
+                    # Re-validate before falling back: delete_folder may have
+                    # removed `suggested` from the registry during this very
+                    # dialogue.
+                    return (self.store._match_category(chosen)
+                            or categories.valid_slug(suggested))
+                if resp is None:
+                    break  # stuck in tool calls — fall back to the suggestion
 
                 # The model wants to talk to the user: silence the cue so it
                 # doesn't bleed into the spoken question or the mic.

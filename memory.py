@@ -19,11 +19,10 @@ import logging
 import re
 from datetime import datetime
 
-import chromadb
-from chromadb.utils import embedding_functions
+import chroma_store
 
 import config as cfg
-from atomic_io import write_json_atomic
+from atomic_io import read_json, write_json_atomic
 
 log = logging.getLogger("memory")
 
@@ -75,13 +74,7 @@ class ConversationMemory:
         if self._col is not None:
             return
         log.info("loading embedding model + chroma (memory, first use)...")
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=cfg.EMBED_MODEL
-        )
-        client = chromadb.PersistentClient(path=str(cfg.CHROMA_DIR))
-        self._col = client.get_or_create_collection(
-            name=cfg.MEMORY_COLLECTION, embedding_function=ef
-        )
+        self._col = chroma_store.collection(cfg.MEMORY_COLLECTION)
         log.info("memory collection ready")
 
     # --- staging (free — no model call) ---------------------------------------
@@ -104,14 +97,9 @@ class ConversationMemory:
         return f"{role}: {text}" if text else None
 
     def _load_pending(self) -> list:
-        if cfg.MEMORY_PENDING_PATH.exists():
-            try:
-                data = json.loads(cfg.MEMORY_PENDING_PATH.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    return data
-            except (OSError, ValueError):
-                log.warning("memory staging file unreadable; starting fresh")
-        return []
+        return read_json(cfg.MEMORY_PENDING_PATH, [], expect=list,
+                         warn=lambda e: log.warning(
+                             "memory staging file unreadable; starting fresh"))
 
     def _save_pending(self, pending: list):
         # Atomic (temp + rename) so a power loss mid-save can't corrupt the

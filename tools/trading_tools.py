@@ -54,6 +54,18 @@ def _ticket_chain(eng):
         return None, None, f"Couldn't load the {tk.underlying} chain: {e}"
 
 
+def _engine_and_ticket():
+    """(eng, ticket, chain, None) or (None, None, None, spoken-problem) —
+    the engine + current-ticket preamble the ticket-mutating tools share."""
+    eng, err = _engine()
+    if err:
+        return None, None, None, err
+    tk, chain, problem = _ticket_chain(eng)
+    if problem:
+        return None, None, None, problem
+    return eng, tk, chain, None
+
+
 @tool({
     "name": "trading_status",
     "description": (
@@ -241,10 +253,7 @@ def build_strategy(ctx, args):
     },
 })
 def adjust_leg(ctx, args):
-    eng, err = _engine()
-    if err:
-        return err
-    tk, chain, problem = _ticket_chain(eng)
+    eng, tk, chain, problem = _engine_and_ticket()
     if problem:
         return problem
     i = int(args.get("leg_number", 0)) - 1
@@ -308,10 +317,7 @@ def adjust_leg(ctx, args):
     },
 })
 def set_order_terms(ctx, args):
-    eng, err = _engine()
-    if err:
-        return err
-    tk, chain, problem = _ticket_chain(eng)
+    eng, tk, chain, problem = _engine_and_ticket()
     if problem:
         return problem
     said = []
@@ -353,10 +359,7 @@ def set_order_terms(ctx, args):
     "input_schema": {"type": "object", "properties": {}},
 })
 def review_order(ctx, args):
-    eng, err = _engine()
-    if err:
-        return err
-    tk, chain, problem = _ticket_chain(eng)
+    eng, tk, chain, problem = _engine_and_ticket()
     if problem:
         return problem
     problems = tk.validate(chain)
@@ -406,10 +409,7 @@ def review_order(ctx, args):
     },
 })
 def submit_order(ctx, args):
-    eng, err = _engine()
-    if err:
-        return err
-    tk, chain, problem = _ticket_chain(eng)
+    eng, tk, chain, problem = _engine_and_ticket()
     if problem:
         return problem
     order, reason = eng.orders.submit(tk, chain,

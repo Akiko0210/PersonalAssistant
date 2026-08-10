@@ -14,7 +14,7 @@ import json
 import re
 
 import config as cfg
-from atomic_io import write_json_atomic
+from atomic_io import read_json, write_json_atomic
 
 # Slugs never change once assigned so notes, the index, and Chroma metadata
 # stay linked across renames.
@@ -58,6 +58,14 @@ def category_dir(slug):
     return cfg.DATA_DIR / NOTE_CATEGORIES[valid_slug(slug)]["folder"]
 
 
+def slug_of(info):
+    """The category slug of an index entry, defaulting when absent OR None.
+    This spelling existed two divergent ways — .get("category", DEFAULT) let
+    an explicit None through, .get("category") or DEFAULT didn't — and which
+    one a call site used was luck. None now defaults everywhere."""
+    return (info or {}).get("category") or DEFAULT_CATEGORY
+
+
 def valid_slug(slug):
     """`slug` if it is (still) a registered category, else the default. Folders
     can be deleted while a flow is in flight — e.g. delete_folder called during
@@ -93,13 +101,8 @@ def _unique(value: str, existing, sep: str = "") -> str:
 def load_categories():
     """Overlay user-persisted folders onto the built-in defaults. Idempotent, so
     it's safe to call on every ensure_dirs()."""
-    if not cfg.CATEGORIES_PATH.exists():
-        return
-    try:
-        data = json.loads(cfg.CATEGORIES_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if isinstance(data, dict):
+    data = read_json(cfg.CATEGORIES_PATH, {}, expect=dict)
+    if data:
         for slug, meta in data.items():
             if isinstance(meta, dict) and {"display", "folder"} <= meta.keys():
                 NOTE_CATEGORIES[slug] = meta

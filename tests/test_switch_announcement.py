@@ -27,6 +27,9 @@ class _AgentShell:
     def say(self, text, **kw):
         self.spoken.append(text)
 
+    def _use_voice(self, hat):
+        return Agent._use_voice(self, hat)
+
 
 class TestSwitchAnnouncement(unittest.TestCase):
     def test_announcement_names_persona_and_model(self):

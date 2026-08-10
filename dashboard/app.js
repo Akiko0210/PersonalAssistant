@@ -17,6 +17,34 @@ async function api(path) {
   return r.json();
 }
 
+/* The one POST helper — controls, saves, and the trading page all use it.
+   The parsed body rides on the thrown Error (err.body) so callers can render
+   field-error maps ({errors: {...}}), not just the flat message. */
+async function apiPost(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data.error || r.statusText);
+    err.body = data;
+    throw err;
+  }
+  return data;
+}
+
+/* "field: message; field: message" from a thrown apiPost error, for the
+   save buttons; falls back to the plain message. */
+function errorList(e) {
+  const errs = e.body && e.body.errors;
+  if (errs && Object.keys(errs).length) {
+    return Object.entries(errs).map(([k, v]) => `${k}: ${v}`).join("; ");
+  }
+  return e.message;
+}
+
 function fmtDate(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -132,21 +160,10 @@ async function pollControl() {
 setInterval(pollControl, 2000);
 pollControl();
 
-async function controlPost(action, payload) {
-  const r = await fetch(`/api/control/${action}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  const body = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(body.error || r.statusText);
-  return body;
-}
-
 muteBtn.addEventListener("click", async () => {
   if (!micState || typeof micState.muted !== "boolean") return;
   try {
-    const body = await controlPost("mute", { muted: !micState.muted });
+    const body = await apiPost("/api/control/mute", { muted: !micState.muted });
     micState = { ...micState, muted: body.muted, mode: body.mode };
     muteNote = "";
   } catch (e) {
@@ -160,7 +177,7 @@ sendForm.addEventListener("submit", async (ev) => {
   const text = sendText.value.trim();
   if (!text || sendBtn.disabled) return;
   try {
-    await controlPost("send_message", { text });
+    await apiPost("/api/control/send_message", { text });
     sendText.value = "";
     sendNote.className = "send-note ok";
     sendNote.textContent = "Sent — answered aloud.";
@@ -404,30 +421,17 @@ views.agents = async function () {
     const msg = $("#agents-msg");
     msg.className = "save-msg"; msg.textContent = "Saving…";
     try {
-      const r = await fetch("/api/agents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(pending),
-      });
-      const body = await r.json();
-      if (body.ok) {
-        msg.className = "save-msg ok";
-        msg.textContent = "Saved. " + (data.agent_running
-          ? "Restart the agent to apply." : "Applied on next agent start.");
-        for (const k of Object.keys(pending)) delete pending[k];
-        data = await api("/api/agents");
-        render();
-        $("#agents-msg").className = "save-msg ok";
-        $("#agents-msg").textContent = "Saved. " + (data.agent_running
-          ? "Restart the agent to apply." : "Applied on next agent start.");
-      } else {
-        msg.className = "save-msg err";
-        msg.textContent = "Not saved: " + Object.entries(body.errors || {})
-          .map(([k, v]) => `${k}: ${v}`).join("; ");
-      }
+      await apiPost("/api/agents", pending);
+      for (const k of Object.keys(pending)) delete pending[k];
+      data = await api("/api/agents");
+      render();  // replaces the DOM — set the message on the fresh node, once
+      const fresh = $("#agents-msg");
+      fresh.className = "save-msg ok";
+      fresh.textContent = "Saved. " + (data.agent_running
+        ? "Restart the agent to apply." : "Applied on next agent start.");
     } catch (e) {
       msg.className = "save-msg err";
-      msg.textContent = "Save failed: " + e.message;
+      msg.textContent = "Not saved: " + errorList(e);
     }
   }
 
@@ -703,26 +707,14 @@ views.config = async function () {
     const msg = $("#save-msg");
     msg.className = "save-msg"; msg.textContent = "Saving…";
     try {
-      const r = await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(pending),
-      });
-      const body = await r.json();
-      if (body.ok) {
-        msg.className = "save-msg ok";
-        msg.textContent = `Saved ${body.saved.length} override(s). ` +
-          (data.agent_running ? "Restart the agent to apply." : "Applied on next agent start.");
-        const banner = $("#cfg-banner");
-        banner.classList.add("saved");
-      } else {
-        msg.className = "save-msg err";
-        msg.textContent = "Not saved: " + Object.entries(body.errors || {})
-          .map(([k, v]) => `${k}: ${v}`).join("; ");
-      }
+      const body = await apiPost("/api/config", pending);
+      msg.className = "save-msg ok";
+      msg.textContent = `Saved ${body.saved.length} override(s). ` +
+        (data.agent_running ? "Restart the agent to apply." : "Applied on next agent start.");
+      $("#cfg-banner").classList.add("saved");
     } catch (e) {
       msg.className = "save-msg err";
-      msg.textContent = "Save failed: " + e.message;
+      msg.textContent = "Not saved: " + errorList(e);
     }
   }
 
@@ -1140,17 +1132,6 @@ views.logs = async function () {
    real-time bid/ask itself: it fetches a DXLink token from the local API and
    opens the websocket directly (same pattern as Tasty-Web), so quotes stream
    straight into the browser with no server-side relay. */
-
-async function apiPost(path, body) {
-  const r = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body || {}),
-  });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || r.statusText);
-  return data;
-}
 
 const TR = {
   status: null, chain: null, ticket: null, dryRun: null,

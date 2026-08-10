@@ -250,22 +250,38 @@ class Agent:
         self.interject.set()
 
     def _handle_typed_message(self, text: str):
-        """Answer one typed message as a spoken turn. Same path as a spoken
-        utterance except for the mic-specific parts: no continuation settle
-        (that window listens to the microphone and would merge room noise into
-        typed text — so llm.converse directly, the forwarded-turn precedent in
-        _after_reply), and no backchannel/resume handling (fillers are things
-        the mic hears). Persona addressing still applies, so "Tom, ..." typed
-        works like "Tom, ..." spoken."""
+        """Answer one typed message as a spoken turn. Same tail as a spoken
+        utterance (_respond) minus the mic-specific parts: no continuation
+        settle (followups=False — that window listens to the microphone and
+        would merge room noise into typed text), and no backchannel/resume
+        handling (fillers are things the mic hears)."""
         self.log.info("you (typed): %s", text)
+        self._respond(text, followups=False)
+
+    def _respond(self, text: str, *, followups: bool):
+        """The shared tail of every user turn, typed or spoken: persona
+        addressing ("Tom, ..." switches, exactly like saying it), the model
+        call, the empty-reply honesty, speaking the reply, and _after_reply's
+        deferred-slot draining.
+
+        followups: capture mid-thought continuations from the microphone
+        before calling the model (_converse_with_followups) — spoken turns
+        only. A typed message is already complete, and the settle window
+        would merge unrelated room speech into it."""
         target, remainder = agents.match_address(text)
         if target and target != self.llm.active:
             self._switch_agent(target)
             if not remainder:
-                return
+                return  # a pure switch — back to listening in the new voice
             text = remainder
-        reply = self.llm.converse(text)
+        reply = (self._converse_with_followups(text) if followups
+                 else self.llm.converse(text))
         if not reply:
+            # Expected only when note-taking or quit cut the turn short. An
+            # empty reply with nothing silencing it means the model produced
+            # nothing — that must never pass silently again (a truncated tool
+            # call once died here unnoticed, and the user heard nothing for 12
+            # minutes).
             if not self.silence.is_set():
                 self.log.warning("model returned an empty reply for: %r", text)
                 self.say("I came back with an empty reply — something went "
@@ -423,33 +439,7 @@ class Agent:
 
         self._interrupted_reply = None
         self._interrupted_remaining = None
-
-        # Spoken agent addressing: "Bob, what's my last note?" or "switch to
-        # Tom". Detected on the transcript directly — zero model calls; any
-        # free-form phrasing the regex misses is covered by the switch_agent
-        # tool the active persona can call.
-        target, remainder = agents.match_address(text)
-        if target and target != self.llm.active:
-            self._switch_agent(target)
-            if not remainder:
-                return  # a pure switch — back to listening in the new voice
-            text = remainder
-
-        reply = self._converse_with_followups(text)
-        if not reply:
-            # Expected only when note-taking or quit cut the turn short. An
-            # empty reply with nothing silencing it means the model produced
-            # nothing — that must never pass silently again (a truncated tool
-            # call once died here unnoticed, and the user heard nothing for 12
-            # minutes).
-            if not self.silence.is_set():
-                self.log.warning("model returned an empty reply for: %r", text)
-                self.say("I came back with an empty reply — something went "
-                         "wrong. Try that again.", voice=False, commands=False)
-            return
-        self.log.info("agent: %s", reply)
-        interrupted = self.say(reply, save_resume=True)
-        self._after_reply(interrupted)
+        self._respond(text, followups=True)
 
     def _after_reply(self, interrupted: bool):
         """Everything a turn leaves behind once its reply is spoken: background
@@ -523,6 +513,15 @@ class Agent:
             # the next between-turns gap instead.)
             self._deliver_interjections()
 
+    def _use_voice(self, hat):
+        """Speak as `hat`: set the SAPI voice AND refresh the cached
+        _speaking_voice the announcer contrasts against (announce(avoid_voice=
+        ...)). Always both — the startup site used to skip the refresh,
+        leaving the mute acknowledgement able to land on the same voice as
+        the reply it was speaking over."""
+        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
+        self._speaking_voice = self.tts.current_voice()
+
     def _switch_agent(self, key):
         """Flip the active persona everywhere it shows: model/tools/prompt
         (llm.switch_to), the speaking voice, and a short spoken announcement —
@@ -535,8 +534,7 @@ class Agent:
         conversation model is exactly the thing you can't hear."""
         self.llm.switch_to(key)
         hat = agents.AGENTS[key]
-        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
-        self._speaking_voice = self.tts.current_voice()
+        self._use_voice(hat)
         model = self.llm.active_model_label
         self.log.info("=== talking to %s (%s) ===", hat["name"], model)
         self.say(f"{hat['name']} here, running on {model}.",
@@ -614,15 +612,13 @@ class Agent:
         note = item.get("note")
         if note:
             active = agents.AGENTS[self.llm.active]
-            self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
-            self._speaking_voice = self.tts.current_voice()
+            self._use_voice(hat)
             try:
                 self.say(f"{hat['name']} here — your note is ready to file.",
                          voice=False, commands=False)
                 self._save_pending_note(note, saver=hat["name"])
             finally:
-                self.tts.set_voice(active["tts_voice"], active["tts_rate"])
-                self._speaking_voice = self.tts.current_voice()
+                self._use_voice(active)
             return False
         self.llm.record_tool_event(
             f"{hat['name']} finished a background task (ask_agent) and "
@@ -1029,7 +1025,7 @@ class Agent:
             "Ready. Headset button: 1-click=mute  2-click=note  3-click=quit"
         )
         hat = agents.AGENTS[self.llm.active]
-        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
+        self._use_voice(hat)  # also refreshes the announcer's avoid_voice
         self.say(f"Voice agent ready. {hat['name']} speaking.",
                  voice=False, commands=False)
         try:

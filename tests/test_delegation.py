@@ -19,7 +19,8 @@ from types import SimpleNamespace
 import agents
 import config as cfg
 from voice_agent import Agent
-from tests.llm_fixtures import make_claude as _make_claude, text_reply, tool_reply
+from tests.llm_fixtures import (FakeBlock, make_claude as _make_claude,
+                                text_reply, tool_reply)
 
 # The shell run_delegated_task touches, active as Tom.
 make_claude = functools.partial(_make_claude, active="tom",
@@ -70,6 +71,18 @@ class TestRunDelegatedTask(unittest.TestCase):
         self.assertIn("get_pnl", names)
         self.assertNotIn("submit_order", names)
         self.assertNotIn("cancel_order", names)
+
+    def test_truncated_delegated_reply_is_reported_honestly(self):
+        # The delegated loop used to lack converse()'s max_tokens honesty —
+        # a truncated tool call died silently. The shared _tool_loop fixed
+        # that; this pins it.
+        resp = SimpleNamespace(
+            stop_reason="max_tokens",
+            content=[FakeBlock(type="tool_use", id="t1",
+                               name="save_conversation_note",
+                               input={"title": "T"})])
+        text, _ = make_claude([resp]).run_delegated_task("bob", "save this")
+        self.assertIn("did not complete", text)
 
     def test_round_cap_reports_honestly(self):
         c = make_claude([tool_reply("get_current_time", {}, f"tu_{i}")
@@ -131,6 +144,9 @@ class _Shell:
 
     def _switch_agent(self, key):
         self.switched.append(key)
+
+    def _use_voice(self, hat):
+        return Agent._use_voice(self, hat)
 
     def _speak_interjection(self, item):
         return Agent._speak_interjection(self, item)

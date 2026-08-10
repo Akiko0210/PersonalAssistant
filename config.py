@@ -472,11 +472,8 @@ def apply_overrides(data):
 def _load_overrides():
     for name in OVERRIDABLE:
         CONFIG_DEFAULTS[name] = globals()[name]
-    try:
-        data = json.loads(OVERRIDES_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    apply_overrides(data)
+    from atomic_io import read_json  # here, not at top: atomic_io is leaf-only
+    apply_overrides(read_json(OVERRIDES_PATH, {}))
 
 
 _load_overrides()

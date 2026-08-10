@@ -153,6 +153,16 @@ def defaults():
     return copy.deepcopy(_DEFAULTS)
 
 
+def registry_model(key):
+    """The API model id persona `key` answers with by default — the ONE
+    resolver converse(), delegation, state publishing, and get_current_model
+    all share, so a tool's answer can never drift from the router (the tool
+    used to re-derive this with a comment promising sameness). Unknown/None
+    keys fall back to the global default model."""
+    hat = AGENTS.get(key or "")
+    return cfg.CONVO_MODELS.get(hat["model"], cfg.CONVO_MODEL) if hat else cfg.CONVO_MODEL
+
+
 def load_agents():
     """Overlay dashboard edits from data/agents.json onto the built-in
     defaults. Idempotent (defaults are restored first); a missing/corrupt
@@ -160,12 +170,8 @@ def load_agents():
     Only _OVERLAYABLE fields apply — tool allowlists stay code."""
     for key, agent in _DEFAULTS.items():
         AGENTS[key] = copy.deepcopy(agent)
-    try:
-        data = json.loads(cfg.AGENTS_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    if not isinstance(data, dict):
-        return
+    from atomic_io import read_json  # here, not at top: keeps this module pure-data
+    data = read_json(cfg.AGENTS_PATH, {}, expect=dict)
     for key, edits in data.items():
         agent = AGENTS.get(key)
         if agent is None or not isinstance(edits, dict):

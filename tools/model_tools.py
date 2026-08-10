@@ -43,13 +43,11 @@ from tools import tool
     "input_schema": {"type": "object", "properties": {}},
 })
 def get_current_model(ctx, args):
-    # Same resolution Claude.converse uses to route the API call — the live
-    # override if one is set, else the active persona's registry default — so
-    # this can never disagree with the model that actually answers.
+    # The live override if one is set, else the shared resolver converse()
+    # routes with — one function, so this can never disagree with the model
+    # that actually answers.
+    model_id = ctx.convo_model or agents.registry_model(ctx.active_agent)
     hat = agents.AGENTS.get(ctx.active_agent or "")
-    default = (cfg.CONVO_MODELS.get(hat["model"], cfg.CONVO_MODEL) if hat
-               else cfg.CONVO_MODEL)
-    model_id = ctx.convo_model or default
     who = hat["name"] if hat else "This assistant"
     return (f"{who} is answering on {cfg.convo_model_label(model_id)}, served "
             f"by {cfg.provider_label(model_id)}. This is the live setting, "

@@ -25,12 +25,11 @@ import json
 import logging
 from datetime import datetime
 
-import chromadb
-from chromadb.utils import embedding_functions
+import chroma_store
 from pypdf import PdfReader
 
 import config as cfg
-from atomic_io import write_json_atomic
+from atomic_io import read_json, write_json_atomic
 
 log = logging.getLogger("knowledge")
 
@@ -56,13 +55,7 @@ class KnowledgeStore:
         if self._col is not None:
             return
         log.info("loading embedding model + chroma (knowledge, first use)...")
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=cfg.EMBED_MODEL
-        )
-        client = chromadb.PersistentClient(path=str(cfg.CHROMA_DIR))
-        self._col = client.get_or_create_collection(
-            name=cfg.KNOWLEDGE_COLLECTION, embedding_function=ef
-        )
+        self._col = chroma_store.collection(cfg.KNOWLEDGE_COLLECTION)
         log.info("knowledge collection ready")
 
     # --- whisper -------------------------------------------------------------
@@ -85,12 +78,9 @@ class KnowledgeStore:
 
     # --- manifest ------------------------------------------------------------
     def _load_manifest(self) -> dict:
-        if cfg.KNOWLEDGE_MANIFEST.exists():
-            try:
-                return json.loads(cfg.KNOWLEDGE_MANIFEST.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                log.warning("knowledge manifest unreadable; treating as empty")
-        return {}
+        return read_json(cfg.KNOWLEDGE_MANIFEST, {},
+                         warn=lambda e: log.warning(
+                             "knowledge manifest unreadable; treating as empty"))
 
     def _save_manifest(self, manifest: dict):
         write_json_atomic(cfg.KNOWLEDGE_MANIFEST, manifest)
