@@ -37,21 +37,20 @@ The code is layered: hardware/IO services at the bottom, a thin orchestration
 layer on top, and pure logic pulled out into standalone, testable modules.
 
 ```
-                         voice_agent.py  (Agent: main loop + orchestration)
-                          |      |      |        |          |
-        +-----------------+      |      |        |          +----------------+
-        |                        |      |        |                           |
-   audio.py                   tts.py  sound.py  gestures.py            llm.py (Claude)
-   (mic + VAD)                (speak) (cue)     (button decode)         |    |     |
-        |                        |                                      |    |     |
-   barge_in.py              media_control.py                      history.py |  tools/  (registry)
-   (interrupt logic)        (SMTC button + keepalive)            (persist)   |    |
-                                                                     memory.py  notes.py
-                                                                  (long-term)  knowledge.py
-                                                                               discord_data.py
-                                                                               categories.py
+                  voice_agent.py  (Agent: main loop + orchestration; root)
+                   |         |            |             |            |
+     +-------------+         |            |             |            +---------+
+     |                       |            |             |                      |
+  speech/                 speech/      buttons/      brain/llm.py         web/server.py
+  audio.py (mic+VAD)      tts.py       gestures.py   (Claude)             (dashboard,
+  barge_in.py (interrupt) sound.py     media_control  |     |              embedded)
+                          (speak/cue)  (SMTC button)  |     |
+                                            brain/history.py, memory.py   tools/ (registry)
+                                            stores/ notes, knowledge,     |
+                                                    discord_data,   ------+
+                                                    categories
 
-   config.py — constants shared by everything
+  config.py (root) — constants shared by everything;  lib/ — leaf utilities
 ```
 
 Design principle: **each module is a self-contained service with a small API and
@@ -71,55 +70,55 @@ unit-tested without a microphone, speakers, or an API key.
   `--miccheck`, `--ingest`, `--kb-list`, `--resync`.
 
 ### Audio IO
-- **`audio.py`** — `AudioEngine`: one always-on input stream pushing fixed-size
+- **`speech/audio.py`** — `AudioEngine`: one always-on input stream pushing fixed-size
   frames onto a queue. `collect_utterance` pulls whole utterances using VAD so
   long silences cost almost nothing. `poll_speech` and `pushback` support
   barge-in (retaining the audio consumed while detecting an interruption).
-- **`stt.py`** — `Transcriber`: faster-whisper wrapper (`small.en` by default,
+- **`speech/stt.py`** — `Transcriber`: faster-whisper wrapper (`small.en` by default,
   `vad_filter=True` to reject hallucinated text from silence).
-- **`tts.py`** — `Speaker`: Windows SAPI backend (async speak + purge, which is
+- **`speech/tts.py`** — `Speaker`: Windows SAPI backend (async speak + purge, which is
   what enables barge-in; plus pause/resume, which is what lets a mute click
   leave a reply intact) with a synchronous pyttsx3 fallback. `Announcer` is a
   deliberately separate second voice — one SpVoice serialises its utterances,
   so a notice that must be heard *over* a playing reply ("Muted.") needs its
   own voice object, in its own thread and COM apartment.
-- **`sound.py`** — `IdleSound`: loops a "thinking" WAV while the agent waits on
+- **`speech/sound.py`** — `IdleSound`: loops a "thinking" WAV while the agent waits on
   the model. Idempotent, thread-safe, never raises (missing file = silence).
 
 ### Button / interruption logic (extracted, pure-ish, tested)
-- **`barge_in.py`** — `BargeInDetector`: decides when the user's voice should
+- **`speech/barge_in.py`** — `BargeInDetector`: decides when the user's voice should
   interrupt playback. Calibrates an echo baseline from the first part of
   playback, then requires frames that are both voiced (VAD) and louder than that
   baseline; a *leaky* counter tolerates brief mid-word dropouts. Retains the
   consumed frames so the user's opening words aren't lost on interruption.
-- **`gestures.py`** — `ClickGestureDecoder`: turns raw button presses into
+- **`buttons/gestures.py`** — `ClickGestureDecoder`: turns raw button presses into
   single/double/triple gestures. Dedupes presses that arrive on both listener
   channels, counts clicks within a window, and fires the gesture on a timer.
   Thread-safe.
-- **`media_control.py`** — `MediaButtonListener`: a Windows System Media Transport
+- **`buttons/media_control.py`** — `MediaButtonListener`: a Windows System Media Transport
   Controls (SMTC) session so Bluetooth-native headset buttons (AVRCP, which never
   appear as key events) are received, plus the silent keepalive stream. See
   `MEDIA_CONTROL.md` for the hardware reasoning.
 
 ### Language model
-- **`llm.py`** — `Claude`: the conversation loop (`converse`, with the tool-call
+- **`brain/llm.py`** — `Claude`: the conversation loop (`converse`, with the tool-call
   loop), the folder-choice dialogue (`choose_folder_via_dialogue`), note
   summarisation (`summarize`), and memory consolidation. Holds a `ToolContext`
   and reads the active conversation model from it each call.
-- **`history.py`** — pure functions over the message list: `sanitize` (drop any
+- **`brain/history.py`** — pure functions over the message list: `sanitize` (drop any
   tool_use whose tool_result never arrived, and merge adjacent same-role turns),
   `trim` (rolling window that starts on a clean user message), `load`/`save`.
   This is what makes a conversation persisted mid-tool-loop safe to reload — see
   §6.
-- **`memory.py`** — `ConversationMemory`: long-term memory. Stages messages that
+- **`brain/memory.py`** — `ConversationMemory`: long-term memory. Stages messages that
   fall off the live window, then at boot consolidates the staged text into one
   dense record embedded in a Chroma `conversations` collection; `search` backs
   the `search_past_conversations` tool.
 
 ### Stores
-- **`notes.py`** — `NoteStore`: note storage, retrieval, semantic search, folder
+- **`stores/notes.py`** — `NoteStore`: note storage, retrieval, semantic search, folder
   management (create/rename/delete/move), and a `resync` repair pass.
-- **`knowledge.py`** — `KnowledgeStore`: ingests reference PDFs/text/video into a
+- **`stores/knowledge.py`** — `KnowledgeStore`: ingests reference PDFs/text/video into a
   Chroma `knowledge` collection (idempotent, content-hashed via `manifest.json`)
   and searches it. Video/audio is transcribed by Whisper first and chunked with
   timestamps, so hits cite a moment rather than a page; because that costs ~20 min
@@ -130,9 +129,9 @@ unit-tested without a microphone, speakers, or an API key.
   released before the agent asks for it. Encrypted PDFs need `cryptography`
   (in requirements.txt); without it pypdf fails with "AES algorithm" and the
   scan reports the file as failed.
-- **`discord_data.py`** — `DiscordData`: read-only view over a sibling "Discord
+- **`stores/discord_data.py`** — `DiscordData`: read-only view over a sibling "Discord
   Notifier" project's captured messages and trade alerts.
-- **`categories.py`** — the note-folder registry: seed folders, the
+- **`stores/categories.py`** — the note-folder registry: seed folders, the
   voice-created/renamed overlay (persisted to `data/categories.json`),
   `category_dir`, and the add/rename/delete API. This is runtime-mutable *state*,
   deliberately separate from `config.py`.
@@ -144,8 +143,11 @@ unit-tested without a microphone, speakers, or an API key.
   adjusted in the dashboard reach the agent on its next start.
 
 ### Dashboard
-- **`dashboard.py`** + **`dashboard/`** — a local web dashboard
-  (`python dashboard.py`, or `dashboard.bat`; http://127.0.0.1:8765). Browse
+- **`web/server.py`** + **`web/static/`** — the web dashboard
+  (http://127.0.0.1:8765). Served two ways from the same module: **embedded in
+  the agent process** (`serve_embedded`, started by `Agent.run()`, fails soft
+  on a taken port), or **standalone** (`python -m web.server` /
+  `dashboard.bat`) for browsing/config/ingest while the agent is off. Browse
   notes/folders/transcripts, inspect the live conversation history, memory
   staging, the knowledge base, Discord captures, and session logs — and edit
   the tunable config values from a form. Stdlib-only and read-mostly: it writes
@@ -169,19 +171,20 @@ unit-tested without a microphone, speakers, or an API key.
     exclusive by design. The UI disables the button and says so while the agent
     runs; the server re-checks the lock regardless.
   - **Live controls** (the sidebar mute button and message box) are the one
-    place the dashboard talks to a *running* agent. The agent hosts a
-    localhost-only HTTP control endpoint — **`controller.py`** (generic
-    plumbing: `GET /status`, `POST /<action>`, port `config.CONTROL_PORT`,
-    fails soft if the port is taken) with the actions in
-    **`controller_service.py`** — and the dashboard proxies `/api/control/*`
-    to it, so the browser stays on one origin and a refused connection is the
-    honest "agent not running" signal. **To add a control**: write one method
-    in `controller_service.py` (validate the payload, raise `ValueError` for a
-    bad one), register it in `actions`, and give the dashboard a button that
-    POSTs `/api/control/<name>`. Neither `controller.py` nor the dashboard
-    routing changes. Typed messages ride the agent's existing interjection
-    wake-up: queued, answered aloud at the next utterance boundary, never
-    truncating speech, and working while muted.
+    place the dashboard touches a *running* agent — and embedded, that touch
+    is a direct method call: `/api/control/<name>` dispatches through the
+    `CONTROL_ACTIONS` table onto `server.agent` (`agent.set_mute`,
+    `agent.queue_typed_message` — public methods, called from HTTP handler
+    threads exactly as the headset-button thread calls them). Standalone,
+    `server.agent` is None and the routes answer honestly: "agent not
+    running", or "the agent is running — use its dashboard" when the lock
+    says one is alive in its own process. **To add a control**: one handler
+    in `CONTROL_ACTIONS` (validate the payload, raise `ValueError` for a bad
+    one → 400), one public Agent method, one button POSTing
+    `/api/control/<name>`; the dispatch — which carries the one provenance
+    log line — never changes. Typed messages ride the agent's existing
+    interjection wake-up: queued, answered aloud at the next utterance
+    boundary, never truncating speech, and working while muted.
 
 ### Tools package
 - **`tools/`** — the tool registry (§5). `__init__.py` holds the `@tool`
@@ -248,7 +251,7 @@ unit-tested without a microphone, speakers, or an API key.
 
 Alice (general), Bob (notes/memory), and Tom (trading) are per-turn
 configurations — system prompt, tool allowlist, model, TTS voice — over ONE
-shared conversation (`agents.py`). Switching never fragments memory.
+shared conversation (`brain/agents.py`). Switching never fragments memory.
 
 A request can move between personas two ways, and the difference is the core
 of the design:
@@ -394,7 +397,7 @@ Everything under `data/`, `logs/`, `knowledge/`, and `.env` is gitignored — th
 user's content and keys never enter version control.
 
 Only one agent may run against this directory at a time. At startup
-`single_instance.py` takes a Windows `msvcrt` lock on `data/agent.lock`; a second
+`lib/single_instance.py` takes a Windows `msvcrt` lock on `data/agent.lock`; a second
 launch finds it held and exits with a spoken notice, so two instances can't race
 on `history.json` / the Chroma index (which would corrupt them) or talk over each
 other. The OS drops the lock when the process exits — including on a crash — so
@@ -440,9 +443,9 @@ your words. See `MEDIA_CONTROL.md` for the full hardware story.
 - **New tool / capability** — add one decorated function under `tools/` and import
   the module in `tools/__init__.py`. Nothing else to wire.
 - **New note folder** — created by voice at runtime, or seed one in
-  `categories.py`.
-- **Swap an engine** — STT/TTS/embedding choices are isolated behind `stt.py` /
-  `tts.py` / the stores; a new backend is a drop-in.
+  `stores/categories.py`.
+- **Swap an engine** — STT/TTS/embedding choices are isolated behind `speech/stt.py` /
+  `speech/tts.py` / the stores; a new backend is a drop-in.
 - **Tuning** — audio thresholds, models, endpointing, and barge-in sensitivity
   are all constants in `config.py`, adjustable visually via the dashboard
   (`dashboard.bat`) — its edits persist to `data/config_overrides.json` and

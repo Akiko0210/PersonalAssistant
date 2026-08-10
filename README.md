@@ -17,7 +17,7 @@ sentence-transformers) are all on-device. No UI — just your voice and hotkeys 
 but everything is logged to `logs/`.
 
 For a detailed technical walkthrough — module map, data flows, the tool
-registry, and extension points — see **[PROJECT.md](PROJECT.md)**. (You can also
+registry, and extension points — see **[PROJECT.md](docs/PROJECT.md)**. (You can also
 just ask the agent: "tell me about this project.")
 
 ## Setup
@@ -81,7 +81,7 @@ reply to end; on a machine with more than one voice installed it deliberately
 uses a different one, so you can tell the two apart. There's a brief hitch
 where the click landed: playback pauses the instant the button goes down,
 because the wireless dongle only passes on the *next* click of a double/triple
-if the host really stops (see `MEDIA_CONTROL.md`), and the reply picks up again
+if the host really stops (see `docs/MEDIA_CONTROL.md`), and the reply picks up again
 as soon as the click turns out to be a single.
 
 Muting while the agent is still *thinking* doesn't cancel anything either —
@@ -91,7 +91,7 @@ triple-click (quit) do end a reply immediately, and to cut one short without
 changing anything, just start talking (barge-in, below).
 
 Button presses are listened for on two channels at once (see
-`MEDIA_CONTROL.md`): a keyboard hook (how wired headsets and USB wireless
+`docs/MEDIA_CONTROL.md`): a keyboard hook (how wired headsets and USB wireless
 dongles deliver presses) and a Windows media session (SMTC — how
 Bluetooth-native headsets like AirPods deliver them; those never appear as key
 events). A press arriving on both channels is counted once. Multi-click
@@ -101,7 +101,7 @@ instead; those map to the same double/triple actions. A silent keepalive
 stream runs continuously (`MEDIA_KEEPALIVE` in `config.py`) so the headset's
 audio link never spins up from silence — wireless dongles drop presses during
 those first seconds — and every click briefly pauses it so state-tracking
-dongles stay in sync (see `MEDIA_CONTROL.md`).
+dongles stay in sync (see `docs/MEDIA_CONTROL.md`).
 
 ### Dashboard controls (mute button, typed messages)
 
@@ -121,13 +121,14 @@ muted — that's rather the point of typing. During note-taking the message
 waits until the note ends. The exchange shows up on the Conversation page like
 any spoken turn.
 
-How it works: the agent hosts a small localhost-only control endpoint
-(`controller.py`, port 8766) whose actions live in `controller_service.py`;
-the dashboard proxies `/api/control/*` to it. When no agent is running the
-connection is refused, so the controls say "agent not running" and disable
-rather than guessing — and a request that can't be delivered is reported, not
-pretended. Adding a future control is one method in `controller_service.py`
-plus a button; the plumbing doesn't change.
+How it works: the agent **serves the dashboard itself** (localhost:8765, from
+inside its own process — `web/server.py`'s `serve_embedded`), so a button
+click is a direct method call on the running agent. A standalone dashboard
+(`dashboard.bat`, for browsing/config/ingest while the agent is off) answers
+control clicks honestly instead: "agent not running", or "the agent is
+running — use its dashboard" when one is alive in its own process. Adding a
+future control is one handler in `web/server.py`'s `CONTROL_ACTIONS` table,
+one public method on the Agent, and a button; the routing doesn't change.
 
 ### Barge-in (interrupt the agent)
 
@@ -324,8 +325,8 @@ buying-power effect, fees, warnings) → *"submit it"*. Submission only works
 after a review of that exact ticket and your explicit go-ahead; any edit
 invalidates the review. *"Cancel the order"*, *"what are my positions?"*, and
 *"how much did I make this week on SPX?"* work as expected. Design and API
-research: [TRADING_PLAN.md](TRADING_PLAN.md),
-[TRADING_RESEARCH.md](TRADING_RESEARCH.md).
+research: [TRADING_PLAN.md](docs/TRADING_PLAN.md),
+[TRADING_RESEARCH.md](docs/TRADING_RESEARCH.md).
 
 ## Switching the model by voice
 
@@ -369,26 +370,28 @@ live read rather than a recollection — and it shows up as a `tool_use` line in
 
 The agent can answer questions about its own design — "how does barge-in work?",
 "where are my notes stored?", "what tools do you have?", "how do I switch models?".
-It reads [PROJECT.md](PROJECT.md) (via the `describe_project` tool) and answers
+It reads [PROJECT.md](docs/PROJECT.md) (via the `describe_project` tool) and answers
 from it, so its self-knowledge stays in sync with the documentation.
 
 ## Project layout
 
 ```
 voice_agent.py   entry point + Agent orchestration (main loop, modes, say/barge-in)
-audio.py stt.py tts.py sound.py     mic/VAD, transcription, speech, thinking cue
-barge_in.py gestures.py media_control.py   interrupt logic, button decode, SMTC
-llm.py history.py memory.py         Claude loop, history repair, long-term memory
-notes.py knowledge.py discord_data.py categories.py   stores + folder registry
 config.py        shared constants (paths, audio params, models, system prompt)
-controller.py controller_service.py   the agent's HTTP control endpoint + its actions
+speech/          audio (mic/VAD), stt, tts, sound (thinking cue), barge_in
+buttons/         gestures (click decode), media_control (SMTC / headset button)
+brain/           llm (Claude loop), agents (personas), history, memory
+stores/          notes, knowledge, categories, discord_data, chroma_store
+lib/             atomic_io, single_instance, frontmatter — leaf utilities
+web/             server.py (the dashboard, embedded in the agent) + static/
+docs/            PROJECT.md, MEDIA_CONTROL.md, TODO.md, TRADING_*.md
 tools/           tool registry — one file per domain (notes, discord, model, ...)
 tests/           unittest suite over the pure logic (no hardware needed)
 scripts/         manual hardware probes used while developing button handling
 ```
 
 Adding a capability is one decorated function under `tools/` — see
-[PROJECT.md](PROJECT.md) §5. Run the tests with:
+[PROJECT.md](docs/PROJECT.md) §5. Run the tests with:
 
 ```sh
 python -m unittest discover tests
