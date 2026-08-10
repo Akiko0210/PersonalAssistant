@@ -18,10 +18,11 @@ Design constraints:
   reach into a live process, with the one exception below.
 - Live controls (the mute button, typed messages) are that exception, because
   they're worthless if they only take effect at the next start. The agent
-  hosts a localhost HTTP control endpoint (controller.py, port
-  config.CONTROL_PORT); the /api/control/* routes here just proxy to it so the
-  browser stays on one origin. A connection refused IS the "agent not running"
-  signal — no lock probe, no state files.
+  serves this same dashboard from inside its own process (serve_embedded), so
+  a button click on that page is a direct method call on the live Agent. Run
+  standalone (this file's main()), there is no agent in-process; the control
+  routes then answer honestly — "agent not running", or "the agent is running,
+  use its dashboard" when the lock says one is alive elsewhere.
 - Localhost only: binds 127.0.0.1; this is a private control panel, not a web
   service.
 
@@ -39,6 +40,7 @@ Run:  python dashboard.py [--port 8765] [--no-browser]
 
 import argparse
 import json
+import logging
 import re
 import threading
 import time
@@ -54,8 +56,9 @@ import config as cfg
 from atomic_io import write_json_atomic
 from single_instance import AlreadyRunning, SingleInstance
 
+log = logging.getLogger("dashboard")
+
 STATIC_DIR = cfg.BASE_DIR / "dashboard"
-DEFAULT_PORT = 8765
 
 NOTE_ID_RE = re.compile(r"^note_[\w.-]+$")
 LOG_NAME_RE = re.compile(r"^session_[\w.-]+\.log$")
@@ -287,20 +290,27 @@ def parse_frontmatter(text):
 
 
 # The lock probe below is cheap but not free: when no agent holds the lock, the
-# probe takes it and releasing DELETES the lock file. The sidebar status light
-# polls it from every open tab, in a folder Dropbox is watching — so the answer
-# is memoised for a moment. Staleness is bounded by the TTL and harmless: this
-# drives display only. The live controls do NOT use this (a refused connection
-# to the control endpoint is their signal), and neither does the ingest job —
-# it proves the agent is absent by taking the real lock (see _run_ingest).
+# probe takes it and releasing DELETES the lock file. The sidebar polls it from
+# every open tab, in a folder Dropbox is watching — so the answer is memoised
+# for a moment. Staleness is bounded by the TTL and harmless: this drives
+# display and the standalone controls' error message. The ingest job does NOT
+# use this — it proves the agent is absent by taking the real lock
+# (see _run_ingest).
 _RUNNING_TTL_S = 1.0
 _running_cache = (0.0, False)
 _running_lock = threading.Lock()
+
+# Set by serve_embedded: this process IS the agent. Probing our own lock
+# happened to answer True by accident (acquire raises AlreadyRunning against
+# our own held handle); say it on purpose instead.
+_embedded_agent = None
 
 
 def agent_running():
     """True if the voice agent currently holds the single-instance lock."""
     global _running_cache
+    if _embedded_agent is not None:
+        return True
     with _running_lock:
         checked, value = _running_cache
         now = time.monotonic()
@@ -457,54 +467,80 @@ def talking_to():
     return state if isinstance(state, dict) else {}
 
 
-# --- Live-control proxy -------------------------------------------------------
-# The agent hosts its own control endpoint (controller.py) on CONTROL_PORT;
-# these routes forward to it so the browser stays on this origin. Connection
-# refused/timeout is the honest "agent not running" signal — no lock probe.
-# Short timeout: the endpoint is on localhost and answers from memory, so
-# anything slower than this means nobody is home.
-_AGENT_TIMEOUT_S = 0.8
+# --- Live controls ------------------------------------------------------------
+# Embedded in the agent process, a control is a direct method call on the live
+# Agent (self.server.agent, attached by build_server). To add one: write a
+# handler here that validates its payload (raise ValueError for a bad one →
+# 400), register it in CONTROL_ACTIONS, and give the front-end a button that
+# POSTs /api/control/<name>. The dispatch below never changes — and it carries
+# the ONE provenance log line, so no action ever grows a log-only wrapper.
+
+MAX_MESSAGE_CHARS = 4000  # sanity bound; a "message" is a question, not a document
 
 
-def _agent_url(path):
-    return f"http://127.0.0.1:{cfg.CONTROL_PORT}/{path}"
+def _control_state(agent, **extra):
+    return {"muted": agent.audio.muted.is_set(), "mode": agent.status, **extra}
 
 
-def agent_control_get():
-    """The live agent's state, for the sidebar controls. `muted` is None when
-    no agent answers — the button shows unknown and refuses to act rather than
-    guessing at a microphone it can't see."""
-    import urllib.request
+def _ctl_mute(agent, payload):
+    """{"muted": true|false} -> the resulting state. A state, not a toggle, so
+    a stale page or double-tap can't land on the opposite of what was asked."""
+    muted = payload.get("muted") if isinstance(payload, dict) else None
+    if not isinstance(muted, bool):
+        raise ValueError('expected {"muted": true|false}')
+    agent.set_mute(muted)
+    return _control_state(agent, ok=True)
+
+
+def _ctl_send(agent, payload):
+    """{"text": "..."} -> queued ack. The reply is spoken at the next gap in
+    conversation — seconds later, so it can't ride back on this response; the
+    Conversation page shows the exchange."""
+    text = payload.get("text") if isinstance(payload, dict) else None
+    text = text.strip() if isinstance(text, str) else ""
+    if not text:
+        raise ValueError("message text may not be empty")
+    if len(text) > MAX_MESSAGE_CHARS:
+        raise ValueError(f"message is over {MAX_MESSAGE_CHARS} characters")
+    agent.queue_typed_message(text)
+    return {"ok": True, "queued": True}
+
+
+CONTROL_ACTIONS = {"mute": _ctl_mute, "send_message": _ctl_send}
+
+
+def api_control(agent):
+    """GET /api/control — the state behind the sidebar controls. Standalone
+    (agent=None) reports `muted` as None: the page shows unknown and disables
+    the buttons rather than guessing at a microphone it can't see."""
+    if agent is not None:
+        return {"agent_running": True, **_control_state(agent)}
+    return {"agent_running": agent_running(), "muted": None, "mode": None}
+
+
+def api_control_post(agent, name, payload):
+    """POST /api/control/<name> -> (status, body). A request that can't be
+    delivered is an error the user is told about — silently accepting it would
+    look exactly like one that worked."""
+    action = CONTROL_ACTIONS.get(name)
+    if action is None:
+        return 404, {"ok": False, "error": "no such action"}
+    if agent is None:
+        if agent_running():
+            # An agent IS alive — in its own process, serving its own copy of
+            # this dashboard. This standalone page can't reach into it.
+            return 409, {"ok": False, "error":
+                         "The agent is running — use its dashboard at "
+                         f"http://127.0.0.1:{cfg.DASHBOARD_PORT}/"}
+        return 409, {"ok": False, "error": "The voice agent isn't running."}
+    log.info("control: %s", name)
     try:
-        with urllib.request.urlopen(_agent_url("status"),
-                                    timeout=_AGENT_TIMEOUT_S) as r:
-            body = json.loads(r.read())
-        return {"agent_running": True, **body}
-    except (OSError, ValueError):
-        return {"agent_running": False, "muted": None, "mode": None}
-
-
-def agent_control_post(name, payload):
-    """Forward one action to the agent. Returns (status, body); the agent's
-    own 4xx (unknown action, bad payload) passes through untouched, and an
-    unreachable agent is a 409 the user is told about — silently accepting a
-    request that can't be delivered would look exactly like one that worked."""
-    import urllib.error
-    import urllib.request
-    req = urllib.request.Request(
-        _agent_url(name), data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=_AGENT_TIMEOUT_S) as r:
-            return 200, json.loads(r.read())
-    except urllib.error.HTTPError as e:  # before OSError — it's a subclass
-        try:
-            return e.code, json.loads(e.read())
-        except ValueError:
-            return e.code, {"ok": False, "error": f"agent said {e.code}"}
-    except OSError:
-        return 409, {"ok": False,
-                     "error": "The voice agent isn't running."}
+        return 200, action(agent, payload)
+    except ValueError as e:
+        return 400, {"ok": False, "error": str(e)}
+    except Exception as e:  # noqa: BLE001 - a bad request must not kill the server
+        log.exception("control %s failed", name)
+        return 500, {"ok": False, "error": str(e)}
 
 
 def api_voices():
@@ -746,7 +782,9 @@ def _run_ingest():
         return _set_job(
             state="error", file="",
             message=("The voice agent is running. Close it first — ingesting "
-                     "writes the same search index the agent has open."),
+                     "writes the same search index the agent has open — then "
+                     "run the ingest from a standalone dashboard "
+                     "(dashboard.bat)."),
             finished=datetime.now().isoformat(timespec="seconds"))
     except OSError as e:
         return _set_job(state="error", file="", message=f"Could not take the lock: {e}",
@@ -952,7 +990,7 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/agents":
                 return self._send(200, api_agents())
             if route == "/api/control":
-                return self._send(200, agent_control_get())
+                return self._send(200, api_control(self.server.agent))
             if route == "/api/voices":
                 return self._send(200, api_voices())
             if route == "/api/history":
@@ -1033,10 +1071,10 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
             if url.path.startswith("/api/control/"):
-                # Generic: /api/control/<action> forwards to the agent, so a
-                # new control needs no route added here.
-                status, body = agent_control_post(
-                    url.path[len("/api/control/"):], payload)
+                # Generic: /api/control/<action> dispatches through
+                # CONTROL_ACTIONS, so a new control needs no route added here.
+                status, body = api_control_post(
+                    self.server.agent, url.path[len("/api/control/"):], payload)
                 return self._send(status, body)
             if url.path.startswith("/api/trading/"):
                 return self._trading(url.path, None, body=payload)
@@ -1052,15 +1090,91 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": str(e)})
 
 
+# --- Server construction ------------------------------------------------------
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+    # Windows quirk: with the inherited allow_reuse_address=True a second bind
+    # on the same port silently SUCCEEDS, so a port conflict would go
+    # undetected instead of producing the honest error/soft-fail below.
+    allow_reuse_address = False
+
+
+def build_server(port, agent=None):
+    """The dashboard server, not yet serving. `agent` is the live Agent when
+    embedded in the agent process, None standalone; Handler reads it via
+    self.server.agent. Raises OSError if the port can't be bound."""
+    server = _Server(("127.0.0.1", port), Handler)
+    server.agent = agent
+    return server
+
+
+class _Embedded:
+    """Handle for a dashboard served inside the agent process. `server` is
+    None when the bind failed — every method stays safe to call."""
+
+    def __init__(self, server):
+        self._server = server
+        self._thread = None
+
+    @property
+    def port(self):
+        return self._server.server_address[1] if self._server else None
+
+    def start(self):
+        if self._server is None:
+            return self
+        # Tight poll so stop() (which waits out one poll) returns promptly.
+        self._thread = threading.Thread(
+            target=lambda: self._server.serve_forever(poll_interval=0.1),
+            daemon=True, name="dashboard")
+        self._thread.start()
+        log.info("dashboard on http://127.0.0.1:%s/", self.port)
+        return self
+
+    def stop(self):
+        if self._server is None:
+            return
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=1.0)
+        self._server = None
+
+
+def serve_embedded(agent, port=None):
+    """Host the dashboard inside the agent process, on a daemon thread, its
+    controls wired straight to `agent` (set_mute / queue_typed_message — the
+    same cross-thread calls the headset-button thread already makes; no extra
+    locking). Fails SOFT on a taken port: log a warning and return a dead
+    handle, because a web page must never stop the voice agent from starting.
+    Never opens a browser."""
+    global _embedded_agent
+    try:
+        server = build_server(cfg.DASHBOARD_PORT if port is None else port,
+                              agent=agent)
+    except OSError as e:
+        log.warning("could not bind the dashboard port %s (%s) — the agent "
+                    "runs without a web UI",
+                    cfg.DASHBOARD_PORT if port is None else port, e)
+        return _Embedded(None)
+    _embedded_agent = agent
+    return _Embedded(server).start()
+
+
 def main():
     ap = argparse.ArgumentParser(description="Voice agent dashboard")
-    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--port", type=int, default=cfg.DASHBOARD_PORT)
     ap.add_argument("--no-browser", action="store_true",
                     help="don't open the dashboard in the default browser")
     args = ap.parse_args()
 
     cfg.ensure_dirs()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    try:
+        server = build_server(args.port)
+    except OSError:
+        print(f"Port {args.port} is taken — if the voice agent is running, "
+              f"its dashboard is already at http://127.0.0.1:{args.port}/")
+        raise SystemExit(1)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"Voice agent dashboard: {url}  (Ctrl+C to stop)")
     if not args.no_browser:

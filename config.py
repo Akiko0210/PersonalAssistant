@@ -32,11 +32,13 @@ AGENTS_PATH = DATA_DIR / "agents.json"
 # switch so the dashboard can show who the user is talking to. Read-only
 # telemetry — nothing in the agent reads it back.
 AGENT_STATE_PATH = DATA_DIR / "agent_state.json"
-# The agent's control endpoint (controller.py): a localhost-only HTTP port the
-# dashboard proxies live controls to (mute, send a typed message). One below
-# the dashboard's own default of 8765. Soft dependency — if the port can't be
-# bound the agent logs a warning and runs without dashboard control.
-CONTROL_PORT = 8766
+# The dashboard's port. The agent serves the dashboard from inside its own
+# process (dashboard.serve_embedded), live controls included; `python
+# dashboard.py` standalone serves the same UI for browsing/config/ingest while
+# the agent is off. Soft dependency for the agent — if the port can't be bound
+# it logs a warning and runs without a web UI. One value here: it used to live
+# in three places (dashboard.py, launch.json, docs prose).
+DASHBOARD_PORT = 8765
 # Live transcripts are appended here while recording, then moved into the chosen
 # category folder when the note is saved (the category isn't known until the end).
 PENDING_DIR = DATA_DIR / "pending"

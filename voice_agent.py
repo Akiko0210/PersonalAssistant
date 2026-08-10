@@ -27,9 +27,8 @@ import anthropic
 import agents
 import categories
 import config as cfg
+import dashboard
 from audio import AudioEngine
-from controller import ControlServer
-from controller_service import ControllerService
 from barge_in import BargeInDetector
 from gestures import ClickGestureDecoder
 from stt import Transcriber
@@ -170,8 +169,8 @@ class Agent:
         self.interjections: "queue.Queue[dict]" = queue.Queue()
         self.interject = threading.Event()
         self._delegation_threads = []
-        # Messages typed into the dashboard (controller_service.send_message).
-        # Drained one per turn at utterance boundaries, same as interjections.
+        # Messages typed into the dashboard (queue_typed_message). Drained one
+        # per turn at utterance boundaries, same as interjections.
         self.typed: "queue.Queue[str]" = queue.Queue()
 
     # --- command plumbing ----------------------------------------------------
@@ -204,15 +203,18 @@ class Agent:
         self.silence.clear()
         return signals
 
-    def _set_mute(self, muted: bool):
-        """Put the microphone into `muted` and say so — the shared body of every
-        mute, whatever asked for it.
+    def set_mute(self, muted: bool):
+        """Put the microphone into `muted` and say so — the shared body of
+        every mute, whatever asked for it: the headset click (via _toggle_mute)
+        or the dashboard's button, arriving on a web handler thread.
 
-        A *state*, not a toggle, because the dashboard names the state it wants
-        (controller_service.mute) and two sources flipping a shared toggle
-        would race. A request for the state we're already in is applied
-        silently: there is nothing to announce, and re-announcing would talk
-        over the reply for no reason."""
+        A *state*, not a toggle, because the dashboard names the state it
+        wants and two sources flipping a shared toggle would race. A request
+        for the state we're already in is applied silently: there is nothing
+        to announce, and re-announcing would talk over the reply for no
+        reason. A dashboard mute skips the headset's click dance entirely —
+        there is no dongle here waiting to see a pause honoured, so nothing
+        touches playback; a playing reply carries on."""
         changed = muted != self.audio.muted.is_set()
         if muted:
             self.audio.muted.set()
@@ -235,27 +237,15 @@ class Agent:
         playing (mute no longer cuts it off), and the microphone must already
         be deaf while it plays: otherwise the tail of the reply stays
         interruptible by the very person who just asked not to be heard."""
-        self._set_mute(not self.audio.muted.is_set())
+        self.set_mute(not self.audio.muted.is_set())
 
-    def _on_dashboard_mute(self, muted: bool):
-        """The dashboard's mute button, arriving on a controller handler thread
-        (controller.py -> controller_service.mute).
-
-        The effect is the headset single click's: the microphone goes deaf and
-        a playing reply carries on. What it skips is the click dance — there is
-        no dongle here waiting to see a pause honoured, so nothing touches
-        playback at all."""
-        self.log.info("dashboard asked to %s", "mute" if muted else "unmute")
-        self._set_mute(muted)
-
-    def _queue_typed_message(self, text: str):
-        """A message typed into the dashboard, arriving on a controller handler
+    def queue_typed_message(self, text: str):
+        """A message typed into the dashboard, arriving on a web handler
         thread. Queued, not answered here: the turn loop picks it up at the
         next utterance boundary, so it never cuts off speech in progress. The
         wake event is honoured while muted — typing is exactly what a muted
         user does — and honoured only between utterances, so it cannot
         truncate one."""
-        self.log.info("dashboard message queued: %.120s", text)
         self.typed.put(text)
         self.interject.set()
 
@@ -1030,14 +1020,11 @@ class Agent:
     def run(self):
         self.audio.start()
         self.start_hotkeys()
-        # The dashboard's live controls (mute button, typed messages) arrive
-        # over a localhost HTTP endpoint served inside this process. Fails
-        # soft if the port is taken — the agent runs without them.
-        self._control = ControlServer(ControllerService(
-            read_state=lambda: (self.audio.muted.is_set(), self.status),
-            set_mute=self._on_dashboard_mute,
-            send_message=self._queue_typed_message,
-        )).start()
+        # The dashboard — live controls included — is served from inside this
+        # process, so its buttons call straight into the methods that own the
+        # state. Fails soft if the port is taken: a web page must never stop
+        # the voice agent from starting.
+        self._web = dashboard.serve_embedded(self)
         self.log.info(
             "Ready. Headset button: 1-click=mute  2-click=note  3-click=quit"
         )
@@ -1067,8 +1054,8 @@ class Agent:
             # The port closes with the process anyway, but stopping cleanly
             # means an in-flight dashboard request gets a response, not a
             # reset.
-            if getattr(self, "_control", None) is not None:
-                self._control.stop()
+            if getattr(self, "_web", None) is not None:
+                self._web.stop()
             self.audio.stop()
             if getattr(self, "_media", None) is not None:
                 self._media.stop()
