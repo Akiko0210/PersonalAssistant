@@ -3,50 +3,10 @@ change the model, the tool subset, and the system prompt — while the one
 shared history keeps flowing through untouched."""
 
 import unittest
-from types import SimpleNamespace
 
 import agents
 import config as cfg
-from llm import Claude
-from tools import ToolContext
-
-
-class FakeBlock:
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
-
-    def model_dump(self, exclude_none=False):
-        return dict(self.__dict__)
-
-
-def _reply(text="ok"):
-    return SimpleNamespace(stop_reason="end_turn",
-                           content=[FakeBlock(type="text", text=text)])
-
-
-class CapturingMessages:
-    def __init__(self):
-        self.calls = []
-
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
-        return _reply()
-
-
-def make_claude():
-    c = Claude.__new__(Claude)
-    c.client = SimpleNamespace(messages=CapturingMessages())
-    c._deepseek = None  # client_for builds it on demand; never in these tests
-    c.active = agents.DEFAULT_AGENT
-    c._model_overrides = {}
-    c._ctx = ToolContext(active_agent=c.active,
-                         convo_model=cfg.CONVO_MODELS["haiku"])
-    c.history = []
-    c.idle = SimpleNamespace(start=lambda: None, stop=lambda: None)
-    c.memory = SimpleNamespace(record_dropped=lambda dropped: None)
-    c._save_history = lambda: None
-    c._write_agent_state = lambda: None  # no disk writes from tests
-    return c
+from tests.llm_fixtures import make_claude
 
 
 class TestHats(unittest.TestCase):

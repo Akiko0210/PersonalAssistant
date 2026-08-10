@@ -13,17 +13,8 @@ model) is skipped; the methods here only touch _ctx, history, and _save_history.
 import unittest
 
 import history as hist
-from llm import Claude
 from tools import ToolContext
-
-
-def make_claude(history=None):
-    c = Claude.__new__(Claude)
-    c._ctx = ToolContext()
-    c.history = list(history or [])
-    c.saved = []
-    c._save_history = lambda: c.saved.append(list(c.history))
-    return c
+from tests.llm_fixtures import make_claude
 
 
 class TestRecordEvent(unittest.TestCase):

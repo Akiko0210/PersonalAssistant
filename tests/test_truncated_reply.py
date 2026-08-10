@@ -8,40 +8,14 @@ was dropped, sanitize erased the evidence from history, and the model kept
 announcing "saving now" for 12 minutes with the user hearing nothing.
 """
 
+import functools
 import unittest
 from types import SimpleNamespace
 
-from llm import Claude
+from tests.llm_fixtures import FakeBlock, make_claude as _make_claude
 
-
-class FakeBlock:
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
-
-    def model_dump(self, exclude_none=False):
-        return dict(self.__dict__)
-
-
-class FakeMessages:
-    def __init__(self, responses):
-        self._responses = list(responses)
-
-    def create(self, **kwargs):
-        return self._responses.pop(0)
-
-
-def make_claude(responses):
-    import agents
-    c = Claude.__new__(Claude)
-    c.client = SimpleNamespace(messages=FakeMessages(responses))
-    c.active = agents.DEFAULT_AGENT
-    c._ctx = SimpleNamespace(convo_model=None, events=[])
-    c.history = []
-    c.idle = SimpleNamespace(start=lambda: None, stop=lambda: None)
-    c.memory = SimpleNamespace(record_dropped=lambda dropped: None)
-    c._save_history = lambda: None
-    c._write_agent_state = lambda: None  # refreshed every turn; no disk writes here
-    return c
+# convo_model=None: these tests pin the registry-default resolution path.
+make_claude = functools.partial(_make_claude, convo_model=None)
 
 
 class TestTruncatedReply(unittest.TestCase):

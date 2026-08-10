@@ -10,6 +10,7 @@ dropped switch.
 Fake clients and agent shells throughout, in the house pattern of
 test_hats.py and test_switch_announcement.py."""
 
+import functools
 import queue
 import threading
 import unittest
@@ -17,56 +18,12 @@ from types import SimpleNamespace
 
 import agents
 import config as cfg
-from llm import Claude
-from tools import ToolContext
 from voice_agent import Agent
+from tests.llm_fixtures import make_claude as _make_claude, text_reply, tool_reply
 
-
-class FakeBlock:
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
-
-    def model_dump(self, exclude_none=False):
-        return dict(self.__dict__)
-
-
-class ScriptedMessages:
-    """messages.create returning canned responses in order, capturing calls."""
-
-    def __init__(self, responses):
-        self.calls = []
-        self._responses = list(responses)
-
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
-        return self._responses.pop(0)
-
-
-def text_reply(text):
-    return SimpleNamespace(stop_reason="end_turn",
-                           content=[FakeBlock(type="text", text=text)])
-
-
-def tool_reply(name, args, block_id="tu_1"):
-    return SimpleNamespace(stop_reason="tool_use",
-                           content=[FakeBlock(type="tool_use", name=name,
-                                              input=args, id=block_id)])
-
-
-def make_claude(responses):
-    """A Claude shell with only what run_delegated_task touches."""
-    c = Claude.__new__(Claude)
-    c.client = SimpleNamespace(messages=ScriptedMessages(responses))
-    c._deepseek = None
-    c.active = "tom"
-    c._model_overrides = {}
-    c.store = None
-    c.discord = None
-    c.kb = None
-    c.memory = None
-    c._ctx = ToolContext(active_agent="tom",
-                         convo_model=cfg.CONVO_MODELS["sonnet"])
-    return c
+# The shell run_delegated_task touches, active as Tom.
+make_claude = functools.partial(_make_claude, active="tom",
+                                convo_model=cfg.CONVO_MODELS["sonnet"])
 
 
 class TestRunDelegatedTask(unittest.TestCase):
