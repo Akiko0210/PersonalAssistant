@@ -103,7 +103,7 @@ audio link never spins up from silence — wireless dongles drop presses during
 those first seconds — and every click briefly pauses it so state-tracking
 dongles stay in sync (see `docs/MEDIA_CONTROL.md`).
 
-### Dashboard controls (mute button, typed messages)
+### Dashboard controls (mute button, chat box)
 
 The same mute, without the headset: the dashboard sidebar carries a **mute
 button** on every page, showing whether the microphone is live (`🎙 Mic on`) or
@@ -113,13 +113,15 @@ click on the headset does, spoken confirmation included; a reply already
 playing carries on. Mute from the headset and the dashboard follows within a
 couple of seconds.
 
-Under it, a **message box**: type instead of speak, and the agent answers
-aloud, exactly as if you'd said it — persona addressing included ("Tom, …"
-typed works like "Tom, …" spoken). The message is answered at the next gap in
-conversation, never cutting off speech in progress, and typing works while
-muted — that's rather the point of typing. During note-taking the message
-waits until the note ends. The exchange shows up on the Conversation page like
-any spoken turn.
+**Typing instead of speaking** lives on the **Conversation page**, as a chat
+box under the transcript: type a message and the agent answers aloud, exactly
+as if you'd said it — persona addressing included ("Tom, …" typed works like
+"Tom, …" spoken). The message is answered at the next gap in conversation,
+never cutting off speech in progress, and typing works while muted — that's
+rather the point of typing. During note-taking it waits until the note ends.
+The exchange then appears in the transcript above like any spoken turn; the
+page watches for it, since the agent writes history only once it has finished
+answering.
 
 How it works: the agent **serves the dashboard itself** (localhost:8765, from
 inside its own process — `web/server.py`'s `serve_embedded`), so a button

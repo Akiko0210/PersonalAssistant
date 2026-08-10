@@ -87,23 +87,31 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .mute-btn.muted:hover:not(:disabled) { border-color: #fff; }
 .mute-btn.muted .mute-action { color: rgba(255, 255, 255, .92); }
 
-/* Typed messages to the agent — same sidebar block, same big-target rules. */
-.send-form { margin: 0 4px; display: flex; flex-direction: column; gap: 6px; }
-.send-form input {
-  min-height: 46px; padding: 8px 12px; font-size: 15px; font-family: inherit;
-  background: var(--surface-2); color: var(--ink);
-  border: 1.5px solid var(--hairline); border-radius: 9px;
+/* Conversation composer — type instead of speak; the agent answers aloud.
+   Sits under the transcript where a chat composer belongs, at main-column
+   sizing: the input and its Send button on one row, the status line directly
+   beneath the control that produced it. */
+.composer {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--hairline);
 }
-.send-form input:focus-visible { outline: 3px solid var(--ink); outline-offset: 1px; }
-.send-form input:disabled { opacity: .45; }
+.composer input {
+  flex: 1 1 280px; min-height: 52px; padding: 10px 15px;
+  font-size: 17px; font-family: inherit;
+  background: var(--surface-2); color: var(--ink);
+  border: 1.5px solid var(--hairline); border-radius: 10px;
+}
+.composer input:focus-visible { outline: 3px solid var(--ink); outline-offset: 1px; }
+.composer input:disabled { opacity: .5; }
 .send-btn {
-  min-height: 46px; border: none; border-radius: 9px; cursor: pointer;
-  background: var(--accent); color: #fff; font-size: 16px; font-weight: 700;
+  min-height: 52px; padding: 0 28px; flex: 0 0 auto;
+  border: none; border-radius: 10px; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 17px; font-weight: 700;
 }
 .send-btn:hover:not(:disabled) { filter: brightness(1.12); }
 .send-btn:disabled { opacity: .45; cursor: default; }
 .send-btn:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
-.send-note { font-size: 13px; min-height: 18px; line-height: 1.35; }
+.send-note { flex: 1 0 100%; font-size: 15px; min-height: 20px; line-height: 1.4; }
 .send-note.ok { color: var(--good); font-weight: 650; }
 .send-note.err { color: var(--critical); font-weight: 650; }
 

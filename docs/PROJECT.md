@@ -170,7 +170,8 @@ unit-tested without a microphone, speakers, or an API key.
     store the agent has open, so an ingest and a live agent are mutually
     exclusive by design. The UI disables the button and says so while the agent
     runs; the server re-checks the lock regardless.
-  - **Live controls** (the sidebar mute button and message box) are the one
+  - **Live controls** (the sidebar mute button, and the Conversation
+    page's chat composer) are the one
     place the dashboard touches a *running* agent — and embedded, that touch
     is a direct method call: `/api/control/<name>` dispatches through the
     `CONTROL_ACTIONS` table onto `server.agent` (`agent.set_mute`,

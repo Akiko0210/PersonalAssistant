@@ -115,16 +115,15 @@ async function pollStatus() {
 setInterval(pollStatus, 5000);
 pollStatus();
 
-/* ---------- Live controls (sidebar, polled) ----------
-   Mute + typed messages, proxied to the agent's control endpoint. A POST
-   returns the resulting state synchronously, so there's no optimistic UI; the
-   2 s poll exists to follow changes made elsewhere (the headset button). The
-   mute state is spelled out in words, the button goes red, and the tab title
-   carries it, because forgetting the microphone is muted is the exact failure
-   this is here to prevent. */
+/* ---------- Live controls (polled) ----------
+   The agent's state, once every 2 s: it drives the sidebar mute button and —
+   when the Conversation page is open — its composer. A control POST returns
+   the resulting state synchronously, so there's no optimistic UI; the poll
+   exists to follow changes made elsewhere (the headset button). The mute
+   state is spelled out in words, the button goes red, and the tab title
+   carries it, because forgetting the microphone is muted is the exact
+   failure this is here to prevent. */
 const muteBtn = $("#mute-btn");
-const sendForm = $("#send-form"), sendText = $("#send-text"),
-      sendBtn = $("#send-btn"), sendNote = $("#send-note");
 let micState = null;   // last /api/control response
 let muteNote = "";     // why the last mute request didn't land
 
@@ -135,7 +134,6 @@ function setMute(stateText, actionText, { on = false, live = false } = {}) {
   muteBtn.setAttribute("aria-label", `${stateText}. ${actionText}`);
   $(".mute-state", muteBtn).textContent = stateText;
   $(".mute-action", muteBtn).textContent = actionText;
-  sendText.disabled = sendBtn.disabled = !live;
   document.title = on ? "🔇 MUTED — Voice Agent Dashboard"
                       : "Voice Agent Dashboard";
 }
@@ -156,6 +154,28 @@ async function pollControl() {
   try { micState = await api("/api/control"); }
   catch { micState = null; }
   renderMute();
+  renderComposer();
+}
+
+/* The Conversation page's composer, kept in step by the same poll. A no-op
+   whenever that page isn't open, so the view owns its own markup and this
+   never has to know which page is showing. */
+function renderComposer() {
+  const input = $("#chat-text"), btn = $("#chat-send");
+  if (!input) return;
+  // A real `muted` boolean means the agent is in THIS process and we can call
+  // it. agent_running alone isn't enough: on the standalone dashboard it's
+  // true whenever an agent lives in its own process, which we cannot reach —
+  // the same distinction the server's two 409s draw.
+  const live = !!(micState && typeof micState.muted === "boolean");
+  input.disabled = btn.disabled = !live;
+  // The availability goes in the placeholder, not the status line — that line
+  // belongs to the last send, and the two would fight over it.
+  input.placeholder =
+    live ? "Type to the agent…"
+      : micState && micState.agent_running
+        ? "Chat lives on the agent's own dashboard — open port 8765"
+        : "The agent isn't running — start it to chat";
 }
 setInterval(pollControl, 2000);
 pollControl();
@@ -172,27 +192,13 @@ muteBtn.addEventListener("click", async () => {
   renderMute();
 });
 
-sendForm.addEventListener("submit", async (ev) => {
-  ev.preventDefault();
-  const text = sendText.value.trim();
-  if (!text || sendBtn.disabled) return;
-  try {
-    await apiPost("/api/control/send_message", { text });
-    sendText.value = "";
-    sendNote.className = "send-note ok";
-    sendNote.textContent = "Sent — answered aloud.";
-  } catch (e) {
-    sendNote.className = "send-note err";
-    sendNote.textContent = e.message;
-  }
-  clearTimeout(sendForm._noteTimer);
-  sendForm._noteTimer = setTimeout(() => { sendNote.textContent = ""; }, 6000);
-});
-
 /* ---------- Router ---------- */
 const views = {};
+function currentView() {
+  return (location.hash.replace(/^#\//, "") || "overview").split("/")[0];
+}
 function route() {
-  const name = (location.hash.replace(/^#\//, "") || "overview").split("/")[0];
+  const name = currentView();
   document.querySelectorAll(".nav-links a").forEach(a =>
     a.classList.toggle("active", a.dataset.view === name));
   (views[name] || views.overview)();
@@ -754,14 +760,52 @@ views.conversation = async function () {
 
   main.innerHTML = header("Conversation",
     `The live history window — ${data.total} message(s) persisted, restored on next boot.`) +
-    `<div class="chat">${msgs || '<div class="card empty">No conversation history yet</div>'}</div>`;
+    `<div class="chat">${msgs || '<div class="card empty">No conversation history yet</div>'}</div>
+     <form class="composer" id="chat-form">
+       <input type="text" id="chat-text" aria-label="Message to the agent"
+              placeholder="Type to the agent…" autocomplete="off" disabled>
+       <button class="send-btn" id="chat-send" type="submit" disabled>Send</button>
+       <div class="send-note" id="chat-note" role="status"></div>
+     </form>`;
 
   main.querySelectorAll(".tool-chip").forEach(b => b.onclick = () => {
     const d = main.querySelector(`[data-detail="${b.dataset.tool}"]`);
     if (d) d.hidden = !d.hidden;
   });
+
+  const note = $("#chat-note");
+  $("#chat-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const input = $("#chat-text"), text = input.value.trim();
+    if (!text || $("#chat-send").disabled) return;
+    try {
+      await apiPost("/api/control/send_message", { text });
+      input.value = "";
+      note.className = "send-note ok";
+      note.textContent = "Sent — the agent answers aloud.";
+      awaitReply(data.total);
+    } catch (e) {
+      note.className = "send-note err";
+      note.textContent = e.message;
+    }
+  });
+
+  renderComposer();  // don't wait up to 2 s for the poll to enable it
   window.scrollTo(0, document.body.scrollHeight);
 };
+
+/* History is written only once the agent has finished answering, so a typed
+   message and its reply land together, seconds later. Watch for the count to
+   move rather than making the user reload; give up quietly after ~40 s (a long
+   reply, or a note dialogue holding the floor) and leave what's on screen. */
+async function awaitReply(before) {
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    if (currentView() !== "conversation") return;  // user navigated away
+    const h = await api("/api/history").catch(() => null);
+    if (h && h.total !== before) return views.conversation();
+  }
+}
 
 /* ================= Memory ================= */
 views.memory = async function () {
