@@ -110,9 +110,22 @@ class QuoteService:
                 if not key:
                     continue
                 q = self._quotes.get(key) or Quote(symbol=key)
-                q.bid = _f(it.get("bid")) or q.bid
-                q.ask = _f(it.get("ask")) or q.ask
-                q.last = _f(it.get("last")) or _f(it.get("mark")) or q.last
+                # None-guards, not `or`: 0.0 is a real price (a deep-OTM option
+                # with no buyer bids 0.00), and the old `or`-merge read it as
+                # "missing" — keeping a stale non-zero bid standing, and on a
+                # fresh Quote dropping the zero entirely. The streaming path
+                # (_feed_data) already assigns directly.
+                bid = _f(it.get("bid"))
+                if bid is not None:
+                    q.bid = bid
+                ask = _f(it.get("ask"))
+                if ask is not None:
+                    q.ask = ask
+                last = _f(it.get("last"))
+                if last is None:
+                    last = _f(it.get("mark"))  # mark fallback, as before
+                if last is not None:
+                    q.last = last
                 q.updated_at = now
                 self._quotes[key] = q
 

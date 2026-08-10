@@ -14,8 +14,14 @@ Design constraints:
   stays a voice feature; the dashboard's search is a plain substring scan.
 - Read-mostly: it writes data/config_overrides.json (via atomic_io, same as
   every other state file), and accepts uploads into knowledge/. Config changes
-  are picked up by config.py at the agent's next start — the dashboard never
-  reaches into a live process.
+  are picked up by config.py at the agent's next start — the dashboard does not
+  reach into a live process, with the one exception below.
+- Live controls (the mute button, typed messages) are that exception, because
+  they're worthless if they only take effect at the next start. The agent
+  hosts a localhost HTTP control endpoint (controller.py, port
+  config.CONTROL_PORT); the /api/control/* routes here just proxy to it so the
+  browser stays on one origin. A connection refused IS the "agent not running"
+  signal — no lock probe, no state files.
 - Localhost only: binds 127.0.0.1; this is a private control panel, not a web
   service.
 
@@ -35,6 +41,7 @@ import argparse
 import json
 import re
 import threading
+import time
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -279,15 +286,35 @@ def parse_frontmatter(text):
     return fields, text[m.end():]
 
 
+# The lock probe below is cheap but not free: when no agent holds the lock, the
+# probe takes it and releasing DELETES the lock file. The sidebar status light
+# polls it from every open tab, in a folder Dropbox is watching — so the answer
+# is memoised for a moment. Staleness is bounded by the TTL and harmless: this
+# drives display only. The live controls do NOT use this (a refused connection
+# to the control endpoint is their signal), and neither does the ingest job —
+# it proves the agent is absent by taking the real lock (see _run_ingest).
+_RUNNING_TTL_S = 1.0
+_running_cache = (0.0, False)
+_running_lock = threading.Lock()
+
+
 def agent_running():
     """True if the voice agent currently holds the single-instance lock."""
-    try:
-        with SingleInstance(cfg.LOCK_PATH):
-            return False
-    except AlreadyRunning:
-        return True
-    except OSError:
-        return False
+    global _running_cache
+    with _running_lock:
+        checked, value = _running_cache
+        now = time.monotonic()
+        if now - checked < _RUNNING_TTL_S:
+            return value
+        try:
+            with SingleInstance(cfg.LOCK_PATH):
+                value = False
+        except AlreadyRunning:
+            value = True
+        except OSError:
+            value = False
+        _running_cache = (now, value)
+        return value
 
 
 def folder_registry():
@@ -428,6 +455,56 @@ def talking_to():
     Meaningful only while the agent runs; the dashboard greys it out otherwise."""
     state = _read_json(cfg.AGENT_STATE_PATH, {})
     return state if isinstance(state, dict) else {}
+
+
+# --- Live-control proxy -------------------------------------------------------
+# The agent hosts its own control endpoint (controller.py) on CONTROL_PORT;
+# these routes forward to it so the browser stays on this origin. Connection
+# refused/timeout is the honest "agent not running" signal — no lock probe.
+# Short timeout: the endpoint is on localhost and answers from memory, so
+# anything slower than this means nobody is home.
+_AGENT_TIMEOUT_S = 0.8
+
+
+def _agent_url(path):
+    return f"http://127.0.0.1:{cfg.CONTROL_PORT}/{path}"
+
+
+def agent_control_get():
+    """The live agent's state, for the sidebar controls. `muted` is None when
+    no agent answers — the button shows unknown and refuses to act rather than
+    guessing at a microphone it can't see."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen(_agent_url("status"),
+                                    timeout=_AGENT_TIMEOUT_S) as r:
+            body = json.loads(r.read())
+        return {"agent_running": True, **body}
+    except (OSError, ValueError):
+        return {"agent_running": False, "muted": None, "mode": None}
+
+
+def agent_control_post(name, payload):
+    """Forward one action to the agent. Returns (status, body); the agent's
+    own 4xx (unknown action, bad payload) passes through untouched, and an
+    unreachable agent is a 409 the user is told about — silently accepting a
+    request that can't be delivered would look exactly like one that worked."""
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        _agent_url(name), data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=_AGENT_TIMEOUT_S) as r:
+            return 200, json.loads(r.read())
+    except urllib.error.HTTPError as e:  # before OSError — it's a subclass
+        try:
+            return e.code, json.loads(e.read())
+        except ValueError:
+            return e.code, {"ok": False, "error": f"agent said {e.code}"}
+    except OSError:
+        return 409, {"ok": False,
+                     "error": "The voice agent isn't running."}
 
 
 def api_voices():
@@ -874,6 +951,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, api_config())
             if route == "/api/agents":
                 return self._send(200, api_agents())
+            if route == "/api/control":
+                return self._send(200, agent_control_get())
             if route == "/api/voices":
                 return self._send(200, api_voices())
             if route == "/api/history":
@@ -953,6 +1032,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
+            if url.path.startswith("/api/control/"):
+                # Generic: /api/control/<action> forwards to the agent, so a
+                # new control needs no route added here.
+                status, body = agent_control_post(
+                    url.path[len("/api/control/"):], payload)
+                return self._send(status, body)
             if url.path.startswith("/api/trading/"):
                 return self._trading(url.path, None, body=payload)
             savers = {"/api/config": save_config, "/api/agents": save_agents}

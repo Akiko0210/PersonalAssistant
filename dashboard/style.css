@@ -66,6 +66,47 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .agent-status.running .status-text { color: var(--ink); }
 .agent-status.stopped .dot { background: var(--critical); }
 
+/* Mute button — the one control in the sidebar, so it is reachable and legible
+   from every page without hunting. Big target, state written in words rather
+   than carried by an icon alone, and an unmissable red block when muted. */
+.mute-btn {
+  display: block; width: 100%; text-align: left;
+  min-height: 58px; padding: 9px 14px; margin: 0 4px; width: calc(100% - 8px);
+  background: var(--surface-2); color: var(--ink);
+  border: 1.5px solid var(--hairline); border-radius: 10px;
+  cursor: pointer;
+}
+.mute-btn:hover:not(:disabled) { border-color: var(--ink-2); }
+.mute-btn:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+.mute-btn:disabled { opacity: .45; cursor: default; }
+.mute-state { display: block; font-size: 17px; font-weight: 750; line-height: 1.25; }
+.mute-action { display: block; font-size: 12.5px; color: var(--ink-2); margin-top: 1px; }
+.mute-btn.muted {
+  background: var(--critical); border-color: var(--critical); color: #fff;
+}
+.mute-btn.muted:hover:not(:disabled) { border-color: #fff; }
+.mute-btn.muted .mute-action { color: rgba(255, 255, 255, .92); }
+
+/* Typed messages to the agent — same sidebar block, same big-target rules. */
+.send-form { margin: 0 4px; display: flex; flex-direction: column; gap: 6px; }
+.send-form input {
+  min-height: 46px; padding: 8px 12px; font-size: 15px; font-family: inherit;
+  background: var(--surface-2); color: var(--ink);
+  border: 1.5px solid var(--hairline); border-radius: 9px;
+}
+.send-form input:focus-visible { outline: 3px solid var(--ink); outline-offset: 1px; }
+.send-form input:disabled { opacity: .45; }
+.send-btn {
+  min-height: 46px; border: none; border-radius: 9px; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 16px; font-weight: 700;
+}
+.send-btn:hover:not(:disabled) { filter: brightness(1.12); }
+.send-btn:disabled { opacity: .45; cursor: default; }
+.send-btn:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+.send-note { font-size: 13px; min-height: 18px; line-height: 1.35; }
+.send-note.ok { color: var(--good); font-weight: 650; }
+.send-note.err { color: var(--critical); font-weight: 650; }
+
 .nav-links { display: flex; flex-direction: column; gap: 2px; }
 .nav-links a {
   display: flex; align-items: center; gap: 11px;

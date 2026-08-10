@@ -168,6 +168,20 @@ unit-tested without a microphone, speakers, or an API key.
     store the agent has open, so an ingest and a live agent are mutually
     exclusive by design. The UI disables the button and says so while the agent
     runs; the server re-checks the lock regardless.
+  - **Live controls** (the sidebar mute button and message box) are the one
+    place the dashboard talks to a *running* agent. The agent hosts a
+    localhost-only HTTP control endpoint — **`controller.py`** (generic
+    plumbing: `GET /status`, `POST /<action>`, port `config.CONTROL_PORT`,
+    fails soft if the port is taken) with the actions in
+    **`controller_service.py`** — and the dashboard proxies `/api/control/*`
+    to it, so the browser stays on one origin and a refused connection is the
+    honest "agent not running" signal. **To add a control**: write one method
+    in `controller_service.py` (validate the payload, raise `ValueError` for a
+    bad one), register it in `actions`, and give the dashboard a button that
+    POSTs `/api/control/<name>`. Neither `controller.py` nor the dashboard
+    routing changes. Typed messages ride the agent's existing interjection
+    wake-up: queued, answered aloud at the next utterance boundary, never
+    truncating speech, and working while muted.
 
 ### Tools package
 - **`tools/`** — the tool registry (§5). `__init__.py` holds the `@tool`

@@ -87,6 +87,91 @@ async function pollStatus() {
 setInterval(pollStatus, 5000);
 pollStatus();
 
+/* ---------- Live controls (sidebar, polled) ----------
+   Mute + typed messages, proxied to the agent's control endpoint. A POST
+   returns the resulting state synchronously, so there's no optimistic UI; the
+   2 s poll exists to follow changes made elsewhere (the headset button). The
+   mute state is spelled out in words, the button goes red, and the tab title
+   carries it, because forgetting the microphone is muted is the exact failure
+   this is here to prevent. */
+const muteBtn = $("#mute-btn");
+const sendForm = $("#send-form"), sendText = $("#send-text"),
+      sendBtn = $("#send-btn"), sendNote = $("#send-note");
+let micState = null;   // last /api/control response
+let muteNote = "";     // why the last mute request didn't land
+
+function setMute(stateText, actionText, { on = false, live = false } = {}) {
+  muteBtn.classList.toggle("muted", on);
+  muteBtn.disabled = !live;
+  muteBtn.setAttribute("aria-pressed", String(on));
+  muteBtn.setAttribute("aria-label", `${stateText}. ${actionText}`);
+  $(".mute-state", muteBtn).textContent = stateText;
+  $(".mute-action", muteBtn).textContent = actionText;
+  sendText.disabled = sendBtn.disabled = !live;
+  document.title = on ? "🔇 MUTED — Voice Agent Dashboard"
+                      : "Voice Agent Dashboard";
+}
+
+function renderMute() {
+  if (!micState || typeof micState.muted !== "boolean") {
+    return setMute("Microphone", micState && !micState.agent_running
+                   ? "agent not running" : "state unknown");
+  }
+  // One short line only — a second clause wraps in the narrow sidebar.
+  setMute(micState.muted ? "🔇 MUTED" : "🎙 Mic on",
+          muteNote ? `${muteNote} · tap to retry`
+                   : (micState.muted ? "Tap to unmute" : "Tap to mute"),
+          { on: micState.muted, live: true });
+}
+
+async function pollControl() {
+  try { micState = await api("/api/control"); }
+  catch { micState = null; }
+  renderMute();
+}
+setInterval(pollControl, 2000);
+pollControl();
+
+async function controlPost(action, payload) {
+  const r = await fetch(`/api/control/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(body.error || r.statusText);
+  return body;
+}
+
+muteBtn.addEventListener("click", async () => {
+  if (!micState || typeof micState.muted !== "boolean") return;
+  try {
+    const body = await controlPost("mute", { muted: !micState.muted });
+    micState = { ...micState, muted: body.muted, mode: body.mode };
+    muteNote = "";
+  } catch (e) {
+    muteNote = e.message;
+  }
+  renderMute();
+});
+
+sendForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const text = sendText.value.trim();
+  if (!text || sendBtn.disabled) return;
+  try {
+    await controlPost("send_message", { text });
+    sendText.value = "";
+    sendNote.className = "send-note ok";
+    sendNote.textContent = "Sent — answered aloud.";
+  } catch (e) {
+    sendNote.className = "send-note err";
+    sendNote.textContent = e.message;
+  }
+  clearTimeout(sendForm._noteTimer);
+  sendForm._noteTimer = setTimeout(() => { sendNote.textContent = ""; }, 6000);
+});
+
 /* ---------- Router ---------- */
 const views = {};
 function route() {

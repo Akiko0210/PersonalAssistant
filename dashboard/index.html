@@ -20,6 +20,19 @@
     <div class="agent-status" id="agent-status">
       <span class="dot"></span><span class="status-text">checking…</span>
     </div>
+    <!-- Live agent controls, in the sidebar so they're on screen whichever
+         page is open. The mute state especially: losing track of it is the
+         problem the button exists to solve. -->
+    <button class="mute-btn" id="mute-btn" type="button" aria-pressed="false" disabled>
+      <span class="mute-state">Microphone</span>
+      <span class="mute-action">checking…</span>
+    </button>
+    <form class="send-form" id="send-form">
+      <input type="text" id="send-text" placeholder="Type to the agent…"
+             aria-label="Message to the agent" autocomplete="off" disabled>
+      <button class="send-btn" id="send-btn" type="submit" disabled>Send</button>
+      <div class="send-note" id="send-note" role="status"></div>
+    </form>
     <div class="nav-links">
       <a href="#/overview" data-view="overview"><span class="nav-ico">◧</span>Overview</a>
       <a href="#/agents" data-view="agents"><span class="nav-ico">🎭</span>Agents</a>

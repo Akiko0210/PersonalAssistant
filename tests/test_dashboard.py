@@ -8,6 +8,7 @@ Covers the two halves of a dashboard edit reaching the agent:
 """
 
 import unittest
+from unittest import mock
 
 import config as cfg
 import dashboard
@@ -128,6 +129,31 @@ class PathGuardTests(unittest.TestCase):
         self.assertTrue(dashboard.LOG_NAME_RE.match("session_2026-07-19.log"))
         self.assertFalse(dashboard.LOG_NAME_RE.match("..\\config.py"))
         self.assertFalse(dashboard.LOG_NAME_RE.match("session_x.log.exe"))
+
+
+class AgentRunningCacheTests(unittest.TestCase):
+    """The lock probe deletes the lock file when no agent holds it, and the
+    sidebar polls from every open tab. Repeated asks must share one answer."""
+
+    def setUp(self):
+        self.addCleanup(setattr, dashboard, "_running_cache", (0.0, False))
+        dashboard._running_cache = (0.0, False)
+
+    def test_repeated_calls_probe_the_lock_once(self):
+        with mock.patch.object(dashboard, "SingleInstance") as probe:
+            probe.return_value.__enter__ = mock.Mock()
+            probe.return_value.__exit__ = mock.Mock(return_value=False)
+            for _ in range(5):
+                self.assertFalse(dashboard.agent_running())
+        self.assertEqual(probe.call_count, 1)
+
+    def test_the_answer_is_refreshed_once_the_ttl_passes(self):
+        with mock.patch.object(dashboard, "SingleInstance") as probe:
+            probe.side_effect = dashboard.AlreadyRunning("held")
+            self.assertTrue(dashboard.agent_running())
+            dashboard._running_cache = (0.0, True)  # pretend the TTL elapsed
+            self.assertTrue(dashboard.agent_running())
+        self.assertEqual(probe.call_count, 2)
 
 
 if __name__ == "__main__":

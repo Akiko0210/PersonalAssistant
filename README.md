@@ -103,6 +103,32 @@ audio link never spins up from silence — wireless dongles drop presses during
 those first seconds — and every click briefly pauses it so state-tracking
 dongles stay in sync (see `MEDIA_CONTROL.md`).
 
+### Dashboard controls (mute button, typed messages)
+
+The same mute, without the headset: the dashboard sidebar carries a **mute
+button** on every page, showing whether the microphone is live (`🎙 Mic on`) or
+deaf (`🔇 MUTED`, in red — and the browser tab title says so too, so a glance
+at the taskbar answers "am I muted?"). Clicking it does exactly what a single
+click on the headset does, spoken confirmation included; a reply already
+playing carries on. Mute from the headset and the dashboard follows within a
+couple of seconds.
+
+Under it, a **message box**: type instead of speak, and the agent answers
+aloud, exactly as if you'd said it — persona addressing included ("Tom, …"
+typed works like "Tom, …" spoken). The message is answered at the next gap in
+conversation, never cutting off speech in progress, and typing works while
+muted — that's rather the point of typing. During note-taking the message
+waits until the note ends. The exchange shows up on the Conversation page like
+any spoken turn.
+
+How it works: the agent hosts a small localhost-only control endpoint
+(`controller.py`, port 8766) whose actions live in `controller_service.py`;
+the dashboard proxies `/api/control/*` to it. When no agent is running the
+connection is refused, so the controls say "agent not running" and disable
+rather than guessing — and a request that can't be delivered is reported, not
+pretended. Adding a future control is one method in `controller_service.py`
+plus a button; the plumbing doesn't change.
+
 ### Barge-in (interrupt the agent)
 
 While the agent is speaking a reply, just start talking — it will stop and
@@ -355,6 +381,7 @@ barge_in.py gestures.py media_control.py   interrupt logic, button decode, SMTC
 llm.py history.py memory.py         Claude loop, history repair, long-term memory
 notes.py knowledge.py discord_data.py categories.py   stores + folder registry
 config.py        shared constants (paths, audio params, models, system prompt)
+controller.py controller_service.py   the agent's HTTP control endpoint + its actions
 tools/           tool registry — one file per domain (notes, discord, model, ...)
 tests/           unittest suite over the pure logic (no hardware needed)
 scripts/         manual hardware probes used while developing button handling

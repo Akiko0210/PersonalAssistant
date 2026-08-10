@@ -183,10 +183,6 @@ class TestCancelAndList(OrdersBase):
         self.assertEqual([o.id for o in working], ["123"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestDefaultOrdersWindow(unittest.TestCase):
     """Two working SPX orders placed 2026-08-06 were invisible on 08-09 in both
     the dashboard and "any working orders?" — the default start date was today,
@@ -199,3 +195,9 @@ class TestDefaultOrdersWindow(unittest.TestCase):
 
     def test_default_start_is_not_today(self):
         self.assertNotEqual(tcfg.default_orders_start(), date.today().isoformat())
+
+
+# Last in the file on purpose: unittest.main() only sees classes already
+# defined, so anything added below it is silently skipped on a direct run.
+if __name__ == "__main__":
+    unittest.main()

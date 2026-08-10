@@ -201,9 +201,6 @@ class TestModelProvider(unittest.TestCase):
         self.assertEqual(cfg.model_provider(""), "anthropic")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestPublishedAgentState(unittest.TestCase):
     """The dashboard can only ever show the CONFIGURED model unless the agent
@@ -263,3 +260,9 @@ class TestPublishedAgentState(unittest.TestCase):
             first = self._state()["since"]
             c._write_agent_state()
             self.assertEqual(self._state()["since"], first)
+
+
+# Last in the file on purpose: unittest.main() only sees classes already
+# defined, so anything added below it is silently skipped on a direct run.
+if __name__ == "__main__":
+    unittest.main()

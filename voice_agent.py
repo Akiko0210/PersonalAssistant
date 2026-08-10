@@ -28,6 +28,8 @@ import agents
 import categories
 import config as cfg
 from audio import AudioEngine
+from controller import ControlServer
+from controller_service import ControllerService
 from barge_in import BargeInDetector
 from gestures import ClickGestureDecoder
 from stt import Transcriber
@@ -168,6 +170,9 @@ class Agent:
         self.interjections: "queue.Queue[dict]" = queue.Queue()
         self.interject = threading.Event()
         self._delegation_threads = []
+        # Messages typed into the dashboard (controller_service.send_message).
+        # Drained one per turn at utterance boundaries, same as interjections.
+        self.typed: "queue.Queue[str]" = queue.Queue()
 
     # --- command plumbing ----------------------------------------------------
     def _push(self, cmd):
@@ -199,26 +204,86 @@ class Agent:
         self.silence.clear()
         return signals
 
+    def _set_mute(self, muted: bool):
+        """Put the microphone into `muted` and say so — the shared body of every
+        mute, whatever asked for it.
+
+        A *state*, not a toggle, because the dashboard names the state it wants
+        (controller_service.mute) and two sources flipping a shared toggle
+        would race. A request for the state we're already in is applied
+        silently: there is nothing to announce, and re-announcing would talk
+        over the reply for no reason."""
+        changed = muted != self.audio.muted.is_set()
+        if muted:
+            self.audio.muted.set()
+        else:
+            self.audio.muted.clear()
+        if not changed:
+            return
+        self.log.info("muted — not listening" if muted else "unmuted — listening")
+        # The acknowledgement goes out on the *second* voice, so it lands with
+        # the button press instead of queueing behind a reply that may have
+        # twenty seconds left to run. Only if that voice is unavailable does it
+        # fall back to the main one, spoken at the next drain.
+        notice = "Muted." if muted else "Listening."
+        if not self.announcer.announce(notice, avoid_voice=self._speaking_voice):
+            self._push("announce_mute")
+
     def _toggle_mute(self):
         """Flip the microphone, from the button thread, the instant the gesture
         resolves — not when the main loop next drains. The reply is still
         playing (mute no longer cuts it off), and the microphone must already
         be deaf while it plays: otherwise the tail of the reply stays
-        interruptible by the very person who just asked not to be heard.
+        interruptible by the very person who just asked not to be heard."""
+        self._set_mute(not self.audio.muted.is_set())
 
-        The acknowledgement goes out on the *second* voice, so it lands with
-        the button press instead of queueing behind a reply that may have
-        twenty seconds left to run. Only if that voice is unavailable does it
-        fall back to the main one, spoken at the next drain."""
-        if self.audio.muted.is_set():
-            self.audio.muted.clear()
-        else:
-            self.audio.muted.set()
-        notice = "Muted." if self.audio.muted.is_set() else "Listening."
-        self.log.info("muted — not listening" if self.audio.muted.is_set()
-                      else "unmuted — listening")
-        if not self.announcer.announce(notice, avoid_voice=self._speaking_voice):
-            self._push("announce_mute")
+    def _on_dashboard_mute(self, muted: bool):
+        """The dashboard's mute button, arriving on a controller handler thread
+        (controller.py -> controller_service.mute).
+
+        The effect is the headset single click's: the microphone goes deaf and
+        a playing reply carries on. What it skips is the click dance — there is
+        no dongle here waiting to see a pause honoured, so nothing touches
+        playback at all."""
+        self.log.info("dashboard asked to %s", "mute" if muted else "unmute")
+        self._set_mute(muted)
+
+    def _queue_typed_message(self, text: str):
+        """A message typed into the dashboard, arriving on a controller handler
+        thread. Queued, not answered here: the turn loop picks it up at the
+        next utterance boundary, so it never cuts off speech in progress. The
+        wake event is honoured while muted — typing is exactly what a muted
+        user does — and honoured only between utterances, so it cannot
+        truncate one."""
+        self.log.info("dashboard message queued: %.120s", text)
+        self.typed.put(text)
+        self.interject.set()
+
+    def _handle_typed_message(self, text: str):
+        """Answer one typed message as a spoken turn. Same path as a spoken
+        utterance except for the mic-specific parts: no continuation settle
+        (that window listens to the microphone and would merge room noise into
+        typed text — so llm.converse directly, the forwarded-turn precedent in
+        _after_reply), and no backchannel/resume handling (fillers are things
+        the mic hears). Persona addressing still applies, so "Tom, ..." typed
+        works like "Tom, ..." spoken."""
+        self.log.info("you (typed): %s", text)
+        target, remainder = agents.match_address(text)
+        if target and target != self.llm.active:
+            self._switch_agent(target)
+            if not remainder:
+                return
+            text = remainder
+        reply = self.llm.converse(text)
+        if not reply:
+            if not self.silence.is_set():
+                self.log.warning("model returned an empty reply for: %r", text)
+                self.say("I came back with an empty reply — something went "
+                         "wrong. Try that again.", voice=False, commands=False)
+            return
+        self.log.info("agent: %s", reply)
+        interrupted = self.say(reply, save_resume=True)
+        self._after_reply(interrupted)
 
     def _toggle_note(self):
         self.silence.set()  # a new note (or the end of one) stops the reply
@@ -332,6 +397,15 @@ class Agent:
             self.run_notetaking()
             return
         if utt is None or utt.size == 0:
+            # No speech — but perhaps a typed message ended the idle wait (its
+            # arrival sets self.interject, the wake event). One per turn, so a
+            # burst of messages interleaves with the mic instead of locking
+            # the floor.
+            try:
+                typed = self.typed.get_nowait()
+            except queue.Empty:
+                return
+            self._handle_typed_message(typed)
             return
         text = self.stt.transcribe(utt)
         if not text:
@@ -956,6 +1030,14 @@ class Agent:
     def run(self):
         self.audio.start()
         self.start_hotkeys()
+        # The dashboard's live controls (mute button, typed messages) arrive
+        # over a localhost HTTP endpoint served inside this process. Fails
+        # soft if the port is taken — the agent runs without them.
+        self._control = ControlServer(ControllerService(
+            read_state=lambda: (self.audio.muted.is_set(), self.status),
+            set_mute=self._on_dashboard_mute,
+            send_message=self._queue_typed_message,
+        )).start()
         self.log.info(
             "Ready. Headset button: 1-click=mute  2-click=note  3-click=quit"
         )
@@ -982,6 +1064,11 @@ class Agent:
             pass
         finally:
             self._rescue_background_notes()
+            # The port closes with the process anyway, but stopping cleanly
+            # means an in-flight dashboard request gets a response, not a
+            # reset.
+            if getattr(self, "_control", None) is not None:
+                self._control.stop()
             self.audio.stop()
             if getattr(self, "_media", None) is not None:
                 self._media.stop()
