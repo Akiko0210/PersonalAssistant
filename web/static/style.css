@@ -366,6 +366,9 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
   border-bottom-left-radius: 4px;
 }
 .msg .m-role { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 3px; }
+/* A just-typed message, shown before the agent has answered: it is NOT in
+   history yet, so it reads as provisional until the real exchange replaces it. */
+.msg.user.pending { border-style: dashed; opacity: .72; }
 .msg.user .m-role { color: var(--accent); }
 .tool-chip {
   display: inline-flex; align-items: center; gap: 6px;

@@ -783,7 +783,14 @@ views.conversation = async function () {
       input.value = "";
       note.className = "send-note ok";
       note.textContent = "Sent — the agent answers aloud.";
-      awaitReply(data.total);
+      // Show it in the transcript straight away. It isn't in history yet (the
+      // agent writes that only once it has answered), so it's marked pending
+      // until the real exchange arrives and replaces it.
+      $(".chat").insertAdjacentHTML("beforeend",
+        `<div class="msg user pending"><div class="m-role">You · sending</div>
+         <div>${esc(text)}</div></div>`);
+      window.scrollTo(0, document.body.scrollHeight);
+      awaitReply(historySig(data), note);
     } catch (e) {
       note.className = "send-note err";
       note.textContent = e.message;
@@ -794,17 +801,25 @@ views.conversation = async function () {
   window.scrollTo(0, document.body.scrollHeight);
 };
 
+/* Compare CONTENT, not the count: history is trimmed to HISTORY_MAX_MESSAGES,
+   so once it is at the cap a new turn pushes old messages off the front and
+   the total barely moves — watching `total` meant a typed message never
+   appeared until a manual reload. */
+const historySig = (h) => JSON.stringify(h.messages);
+
 /* History is written only once the agent has finished answering, so a typed
-   message and its reply land together, seconds later. Watch for the count to
-   move rather than making the user reload; give up quietly after ~40 s (a long
-   reply, or a note dialogue holding the floor) and leave what's on screen. */
-async function awaitReply(before) {
+   message and its reply land together, seconds later. Watch for it rather than
+   making the user reload; after ~40 s say so plainly instead of leaving the
+   pending bubble unexplained (a note dialogue can hold the floor far longer). */
+async function awaitReply(before, note) {
   for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 2000));
     if (currentView() !== "conversation") return;  // user navigated away
     const h = await api("/api/history").catch(() => null);
-    if (h && h.total !== before) return views.conversation();
+    if (h && historySig(h) !== before) return views.conversation();
   }
+  note.className = "send-note";
+  note.textContent = "Still no reply — the agent may be mid-note. Reload to check.";
 }
 
 /* ================= Memory ================= */
