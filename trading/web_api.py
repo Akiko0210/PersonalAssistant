@@ -1,6 +1,6 @@
 """JSON adapters for the dashboard's /api/trading/* routes.
 
-dashboard.py imports this module lazily inside its route handlers, so the
+web/server.py imports this module lazily inside its route handlers, so the
 dashboard keeps its instant, stdlib-only start until a Trading page is
 actually opened. Every function takes plain dicts and returns
 JSON-serializable dicts; anything that can fail returns {"error": ...}

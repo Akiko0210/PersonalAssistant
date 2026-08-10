@@ -24,20 +24,20 @@ except ImportError:
 
 import anthropic
 
-import agents
-import categories
+from brain import agents
+from stores import categories
 import config as cfg
-import dashboard
-from audio import AudioEngine
-from barge_in import BargeInDetector
-from gestures import ClickGestureDecoder
-from stt import Transcriber
-from tts import Announcer, Speaker
-from notes import NoteStore
-from knowledge import KnowledgeStore
-from llm import Claude
-from sound import IdleSound
-from single_instance import SingleInstance, AlreadyRunning
+from web import server as dashboard
+from speech.audio import AudioEngine
+from speech.barge_in import BargeInDetector
+from buttons.gestures import ClickGestureDecoder
+from speech.stt import Transcriber
+from speech.tts import Announcer, Speaker
+from stores.notes import NoteStore
+from stores.knowledge import KnowledgeStore
+from brain.llm import Claude
+from speech.sound import IdleSound
+from lib.single_instance import SingleInstance, AlreadyRunning
 
 
 def explain_error(e: Exception) -> str:
@@ -359,7 +359,7 @@ class Agent:
         self._listener.start()
 
         try:
-            from media_control import MediaButtonListener
+            from buttons.media_control import MediaButtonListener
 
             def on_play_pause():
                 self.log.info("media button (SMTC) received (speaking=%s)",

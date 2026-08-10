@@ -35,7 +35,7 @@ single-instance lock for the duration, because embedding writes the same Chroma
 store the agent has open and two writers would corrupt it. That means an ingest
 and a running agent are mutually exclusive by design, not by oversight.
 
-Run:  python dashboard.py [--port 8765] [--no-browser]
+Run:  python -m web.server [--port 8765] [--no-browser]   (or dashboard.bat)
 """
 
 import argparse
@@ -50,16 +50,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-import agents as agents_registry
-import categories
+from brain import agents as agents_registry
+from stores import categories
 import config as cfg
-from atomic_io import read_json, write_json_atomic
-from frontmatter import parse_frontmatter
-from single_instance import AlreadyRunning, SingleInstance
+from lib.atomic_io import read_json, write_json_atomic
+from lib.frontmatter import parse_frontmatter
+from lib.single_instance import AlreadyRunning, SingleInstance
 
 log = logging.getLogger("dashboard")
 
-STATIC_DIR = cfg.BASE_DIR / "dashboard"
+STATIC_DIR = cfg.BASE_DIR / "web" / "static"
 
 NOTE_ID_RE = re.compile(r"^note_[\w.-]+$")
 LOG_NAME_RE = re.compile(r"^session_[\w.-]+\.log$")
@@ -770,7 +770,7 @@ def _run_ingest():
         return _set_job(state="error", file="", message=f"Could not take the lock: {e}",
                         finished=datetime.now().isoformat(timespec="seconds"))
     try:
-        from knowledge import KnowledgeStore  # heavy; only for a real job
+        from stores.knowledge import KnowledgeStore  # heavy; only for a real job
 
         _set_job(message="Loading models…")
         store = KnowledgeStore()

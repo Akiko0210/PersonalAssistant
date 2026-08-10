@@ -14,7 +14,7 @@ import json
 import re
 
 import config as cfg
-from atomic_io import read_json, write_json_atomic
+from lib.atomic_io import read_json, write_json_atomic
 
 # Slugs never change once assigned so notes, the index, and Chroma metadata
 # stay linked across renames.

@@ -12,7 +12,7 @@ import logging
 import unittest
 from types import SimpleNamespace
 
-from llm import Claude
+from brain.llm import Claude
 from voice_agent import Agent
 
 

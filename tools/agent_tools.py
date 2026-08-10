@@ -25,7 +25,7 @@ put Bob on?") — the active model recognises the intent and calls it, which
 costs nothing extra since that model call was already happening.
 """
 
-import agents
+from brain import agents
 from tools import tool
 
 

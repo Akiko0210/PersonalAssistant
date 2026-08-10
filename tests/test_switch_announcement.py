@@ -7,7 +7,7 @@ it touches — a real Agent would boot audio, TTS, Whisper and the note stores.
 import unittest
 from types import SimpleNamespace
 
-import agents
+from brain import agents
 import config as cfg
 from voice_agent import Agent
 from tests.llm_fixtures import make_claude

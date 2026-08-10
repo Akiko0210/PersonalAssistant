@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import config as cfg
-from knowledge import KnowledgeStore, _hms
+from stores.knowledge import KnowledgeStore, _hms
 
 
 def seg(text, start):

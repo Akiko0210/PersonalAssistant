@@ -13,8 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 import config as cfg
-import dashboard
-from single_instance import AlreadyRunning
+from web import server as dashboard
+from lib.single_instance import AlreadyRunning
 
 
 class UploadTests(unittest.TestCase):
@@ -218,8 +218,8 @@ class IngestJobTests(unittest.TestCase):
         # never start again without killing the dashboard.
         with mock.patch.object(dashboard, "SingleInstance") as lock_cls:
             lock = lock_cls.return_value.acquire.return_value
-            with mock.patch.dict("sys.modules", {"knowledge": mock.MagicMock()}) as mods:
-                mods["knowledge"].KnowledgeStore.side_effect = RuntimeError("boom")
+            with mock.patch.dict("sys.modules", {"stores.knowledge": mock.MagicMock()}) as mods:
+                mods["stores.knowledge"].KnowledgeStore.side_effect = RuntimeError("boom")
                 dashboard._run_ingest()
             lock.release.assert_called_once()
         job = dashboard.job_status()
@@ -231,8 +231,8 @@ class IngestJobTests(unittest.TestCase):
             lock = lock_cls.return_value.acquire.return_value
             store = mock.MagicMock()
             store.ingest_folder.return_value = "Ingested 812 chunk(s) from 1 new file(s)."
-            with mock.patch.dict("sys.modules", {"knowledge": mock.MagicMock()}) as mods:
-                mods["knowledge"].KnowledgeStore.return_value = store
+            with mock.patch.dict("sys.modules", {"stores.knowledge": mock.MagicMock()}) as mods:
+                mods["stores.knowledge"].KnowledgeStore.return_value = store
                 dashboard._run_ingest()
             lock.release.assert_called_once()
         job = dashboard.job_status()
@@ -258,8 +258,8 @@ class IngestJobTests(unittest.TestCase):
         with mock.patch.object(dashboard, "SingleInstance"):
             store = mock.MagicMock()
             store.ingest_folder.side_effect = fake_ingest
-            with mock.patch.dict("sys.modules", {"knowledge": mock.MagicMock()}) as mods:
-                mods["knowledge"].KnowledgeStore.return_value = store
+            with mock.patch.dict("sys.modules", {"stores.knowledge": mock.MagicMock()}) as mods:
+                mods["stores.knowledge"].KnowledgeStore.return_value = store
                 dashboard._run_ingest()
         return [msg for msg, _ in seen], [f for _, f in seen]
 

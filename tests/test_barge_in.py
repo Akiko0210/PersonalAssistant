@@ -5,7 +5,7 @@ Frame timing here: frame_ms=30, calib 90ms (3 frames), fire at 90ms
 
 import unittest
 
-from barge_in import BargeInDetector
+from speech.barge_in import BargeInDetector
 
 
 def make_detector(**over):

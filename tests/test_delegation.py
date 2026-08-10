@@ -16,7 +16,7 @@ import threading
 import unittest
 from types import SimpleNamespace
 
-import agents
+from brain import agents
 import config as cfg
 from voice_agent import Agent
 from tests.llm_fixtures import (FakeBlock, make_claude as _make_claude,

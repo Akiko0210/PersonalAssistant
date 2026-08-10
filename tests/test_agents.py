@@ -2,7 +2,7 @@
 
 import unittest
 
-import agents
+from brain import agents
 from tools import _REGISTRY
 
 

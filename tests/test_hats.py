@@ -4,7 +4,7 @@ shared history keeps flowing through untouched."""
 
 import unittest
 
-import agents
+from brain import agents
 import config as cfg
 from tests.llm_fixtures import make_claude
 

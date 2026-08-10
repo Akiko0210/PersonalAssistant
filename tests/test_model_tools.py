@@ -8,9 +8,9 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
-import agents
+from brain import agents
 import config as cfg
-from llm import Claude
+from brain.llm import Claude
 from tools import ToolContext, dispatch, api_tools
 
 

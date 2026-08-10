@@ -25,11 +25,11 @@ import json
 import logging
 from datetime import datetime
 
-import chroma_store
+from stores import chroma_store
 from pypdf import PdfReader
 
 import config as cfg
-from atomic_io import read_json, write_json_atomic
+from lib.atomic_io import read_json, write_json_atomic
 
 log = logging.getLogger("knowledge")
 

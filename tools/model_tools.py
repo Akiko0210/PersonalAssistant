@@ -23,7 +23,7 @@ auditable instead of merely plausible.
 
 import os
 
-import agents
+from brain import agents
 import config as cfg
 from tools import tool
 

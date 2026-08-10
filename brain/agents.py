@@ -170,7 +170,7 @@ def load_agents():
     Only _OVERLAYABLE fields apply — tool allowlists stay code."""
     for key, agent in _DEFAULTS.items():
         AGENTS[key] = copy.deepcopy(agent)
-    from atomic_io import read_json  # here, not at top: keeps this module pure-data
+    from lib.atomic_io import read_json  # here, not at top: keeps this module pure-data
     data = read_json(cfg.AGENTS_PATH, {}, expect=dict)
     for key, edits in data.items():
         agent = AGENTS.get(key)

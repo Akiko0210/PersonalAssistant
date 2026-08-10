@@ -12,7 +12,7 @@ model) is skipped; the methods here only touch _ctx, history, and _save_history.
 
 import unittest
 
-import history as hist
+from brain import history as hist
 from tools import ToolContext
 from tests.llm_fixtures import make_claude
 

@@ -20,7 +20,7 @@ INDEX_PATH = DATA_DIR / "index.json"
 LOCK_PATH = DATA_DIR / "agent.lock"
 # Detailed project description — the knowledge source the describe_project tool
 # reads so the agent can answer questions about its own design.
-PROJECT_DOC_PATH = BASE_DIR / "PROJECT.md"
+PROJECT_DOC_PATH = BASE_DIR / "docs" / "PROJECT.md"
 # User-created / renamed folders are persisted here and overlaid on the built-in
 # NOTE_CATEGORIES defaults below at startup (see load_categories).
 CATEGORIES_PATH = DATA_DIR / "categories.json"
@@ -34,10 +34,10 @@ AGENTS_PATH = DATA_DIR / "agents.json"
 AGENT_STATE_PATH = DATA_DIR / "agent_state.json"
 # The dashboard's port. The agent serves the dashboard from inside its own
 # process (dashboard.serve_embedded), live controls included; `python
-# dashboard.py` standalone serves the same UI for browsing/config/ingest while
+# -m web.server` standalone serves the same UI for browsing/config/ingest while
 # the agent is off. Soft dependency for the agent — if the port can't be bound
 # it logs a warning and runs without a web UI. One value here: it used to live
-# in three places (dashboard.py, launch.json, docs prose).
+# in three places (the server module, launch.json, docs prose).
 DASHBOARD_PORT = 8765
 # Live transcripts are appended here while recording, then moved into the chosen
 # category folder when the note is saved (the category isn't known until the end).
@@ -400,7 +400,7 @@ def model_identity_block(label: str) -> str:
 
 
 # --- Dashboard config overrides ----------------------------------------------
-# The web dashboard (dashboard.py) lets the user adjust tunables visually. Its
+# The web dashboard (web/server.py) lets the user adjust tunables visually. Its
 # edits are persisted to this file and applied here, at import time, on top of
 # the defaults above — so a dashboard change reaches the agent on its next
 # start without anyone editing this module. Only the whitelisted names below
@@ -472,7 +472,7 @@ def apply_overrides(data):
 def _load_overrides():
     for name in OVERRIDABLE:
         CONFIG_DEFAULTS[name] = globals()[name]
-    from atomic_io import read_json  # here, not at top: atomic_io is leaf-only
+    from lib.atomic_io import read_json  # here, not at top: atomic_io is leaf-only
     apply_overrides(read_json(OVERRIDES_PATH, {}))
 
 
@@ -482,7 +482,7 @@ _load_overrides()
 def ensure_dirs():
     # Imported here, not at module top: categories.py imports config for its
     # paths, so a top-level import would be circular.
-    import categories
+    from stores import categories
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)  # needed before reading categories.json
     categories.load_categories()  # bring in any voice-created / renamed folders

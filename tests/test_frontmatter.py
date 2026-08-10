@@ -3,7 +3,7 @@ adoption relies on to rebuild an index entry from a note file alone."""
 
 import unittest
 
-from frontmatter import parse_frontmatter
+from lib.frontmatter import parse_frontmatter
 
 
 class TestParseFrontmatter(unittest.TestCase):

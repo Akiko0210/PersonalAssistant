@@ -13,7 +13,7 @@ model classes so it can be tested without hardware or an API key.
 import json
 import logging
 
-from atomic_io import read_json, write_json_atomic
+from lib.atomic_io import read_json, write_json_atomic
 
 log = logging.getLogger("history")
 

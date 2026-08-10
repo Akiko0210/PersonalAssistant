@@ -8,9 +8,9 @@ test_memory_staged's positional FakeBlock) stays local to that file.
 
 from types import SimpleNamespace
 
-import agents
+from brain import agents
 import config as cfg
-from llm import Claude
+from brain.llm import Claude
 from tools import ToolContext
 
 

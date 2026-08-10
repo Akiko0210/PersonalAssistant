@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 import config as cfg
-from memory import ConversationMemory
+from brain.memory import ConversationMemory
 
 
 class TestSearchStaged(unittest.TestCase):
@@ -144,7 +144,7 @@ class TestRecallStaged(unittest.TestCase):
         # default: on Haiku it answered NOTHING_RELEVANT for topics plainly in
         # the staged text (2026-07-27). Sending the wrong model here is what
         # made the whole feature unreliable, so it is asserted.
-        import memory as memory_mod
+        from brain import memory as memory_mod
         self._stage("the kicker is sixty-five days out")
         client = FakeClient(answer="something")
         self.mem.recall_staged(client, "kicker")
@@ -264,7 +264,7 @@ class TestEveryHatCanSearchMemory(unittest.TestCase):
     def test_shared_memory_is_searchable_by_every_persona(self):
         # The conversation memory is shared; a hat without the search tool
         # cannot obey "review your memory" — the exact 2026-07-20 failure.
-        import agents
+        from brain import agents
         for key, agent in agents.AGENTS.items():
             self.assertIn("search_past_conversations", agent["tools"], key)
 

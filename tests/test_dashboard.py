@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 import config as cfg
-import dashboard
+from web import server as dashboard
 
 
 class ApplyOverridesTests(unittest.TestCase):

@@ -12,12 +12,12 @@ import logging
 import re
 from datetime import datetime
 
-import chroma_store
+from stores import chroma_store
 
-import categories
+from stores import categories
 import config as cfg
-from atomic_io import read_json, write_json_atomic, write_text_atomic
-from frontmatter import parse_frontmatter
+from lib.atomic_io import read_json, write_json_atomic, write_text_atomic
+from lib.frontmatter import parse_frontmatter
 
 log = logging.getLogger("notes")
 

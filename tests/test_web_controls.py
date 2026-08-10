@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from unittest import mock
 
-import dashboard
+from web import server as dashboard
 from tests.agent_fixtures import make_agent
 
 

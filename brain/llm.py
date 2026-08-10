@@ -11,14 +11,14 @@ from datetime import datetime
 
 import anthropic
 
-import agents
-import categories
+from brain import agents
+from stores import categories
 import config as cfg
-import history as hist
-from atomic_io import write_json_atomic
-from discord_data import DiscordData
-from knowledge import KnowledgeStore
-from memory import ConversationMemory
+from brain import history as hist
+from lib.atomic_io import write_json_atomic
+from stores.discord_data import DiscordData
+from stores.knowledge import KnowledgeStore
+from brain.memory import ConversationMemory
 from tools import ToolContext, api_tools, dispatch
 
 log = logging.getLogger("llm")
