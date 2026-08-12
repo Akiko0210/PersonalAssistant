@@ -7,57 +7,50 @@ documented in `PROJECT.md`.
 
 Current state this plan builds on:
 
-- One Chroma database at `data/chroma`, two collections — `knowledge`
-  (ingested books/PDFs/course videos, `knowledge.py`) and `conversations`
-  (archived conversation summaries, `memory.py`). Collection names live in
-  `config.py:93` and `config.py:105`.
-- Three personas in `agents.py` — Alice (general), Bob (notes/memory), Tom
-  (trading). Per-turn hats over one shared history, not separate agents.
+- One Chroma database at `data/chroma`, shared client via
+  `stores/chroma_store.py`. Collections: `knowledge` (common reference
+  material), `notes`, `conversations` (legacy shared archive), plus
+  per-persona `knowledge_<key>` and `conversations_<key>`.
+- Three personas in `brain/agents.py` — Alice (general), Bob (notes/memory),
+  Tom (trading) — each with its OWN history thread
+  (`data/history_<key>.json`) and private memory; cross-persona context moves
+  only via `ask_agent` summaries. Registry `reads` grants can open one
+  persona's private stores to another.
+- Focus mode exists (`tools/focus_tools.py`, Tom-only): `set_focus` narrows
+  retrieval by `strategy`/`underlying` metadata — hard on private
+  collections, soft on common knowledge — and is folded into the system
+  prompt while active.
 - Tools are one decorated function each under `tools/`, registered by import
   order in `tools/__init__.py`; per-persona allowlists filter them via
   `api_tools(include=...)`.
-- The dashboard is a stdlib `BaseHTTPRequestHandler` server (`dashboard.py`)
-  serving `dashboard/index.html`, `app.js`, `style.css` plus `/api/*` JSON
-  routes.
+- The dashboard is a stdlib `BaseHTTPRequestHandler` server (`web/server.py`)
+  serving `web/static/` plus `/api/*` JSON routes. Ingest has a per-run
+  target selector (common or one persona's private collection).
 
 ---
 
-## 1. A trading-journal collection for Tom, plus focus mode
+## 1. A trading journal for Tom
 
 ### Goal
 
-Two things, related:
+A *trading journal* holding recent trading information (fills, adjustments,
+thesis notes, what happened and why), kept apart from reference material.
+Reference material is stable and impersonal; the journal is recent, personal,
+and changes daily. Mixing them makes a search for "how did my last diagonal
+go" return textbook definitions.
 
-1. **Separate Chroma collections for Tom** — in particular a *trading journal*
-   collection holding recent trading information (fills, adjustments, thesis
-   notes, what happened and why), kept apart from the reference-material
-   `knowledge` collection. Reference material is stable and impersonal; the
-   journal is recent, personal, and changes daily. Mixing them makes a search
-   for "how did my last diagonal go" return textbook definitions.
-2. **Focus mode** — the ability to tell Tom "focus on my double diagonals" (or
-   butterflies, or ES credit spreads) and have every subsequent retrieval be
-   scoped to that strategy until focus is cleared. It works like switching
-   memories: fewer distractions in the context, better answers.
+The hard parts already exist: Tom has a private collection
+(`knowledge_tom`), and focus mode filters on `strategy`/`underlying`
+metadata. The journal is the *writer* side — tagged entries flowing in as
+trades happen.
 
 ### Design sketch
 
-**Collections.** Add to `config.py` alongside the existing two:
-
-```python
-JOURNAL_COLLECTION = "trading_journal"   # recent trades, adjustments, outcomes
-```
-
-Build `trading/journal.py` as a `TradingJournal` store modelled on
-`KnowledgeStore` — lazy `_ensure_chroma()`, same `PersistentClient(CHROMA_DIR)`,
-same `SentenceTransformerEmbeddingFunction(cfg.EMBED_MODEL)`, so there is one
-embedding model and one database, just another collection. Do **not** fork the
-Chroma client per store; share it (a small `chroma_client()` helper in
-`knowledge.py` or a new `vectors.py` both stores import) so the embedding model
-is loaded once, not three times.
-
-**Entry shape.** Every journal entry carries metadata that focus mode can filter
-on. Chroma `where=` clauses do the scoping — no separate collection per
-strategy:
+Journal entries are writes into Tom's private collection (or a dedicated
+`journal_tom` collection via `stores/chroma_store.collection()` — decide when
+building; a separate collection keeps "how did my trade go" from mixing with
+privately-ingested PDFs). Every entry carries the metadata focus mode
+already filters on:
 
 | field | example | source |
 |---|---|---|
@@ -68,52 +61,22 @@ strategy:
 | `ticket_id` | opaque id | links entries of one trade together |
 
 Use a canonical strategy vocabulary — reuse or extend the names already in
-`trading/strategies.py` rather than inventing a second taxonomy, so a strategy
-built by voice and a journal entry about it use the same word.
-
-**Focus.** Focus is per-session state, not persisted config. Store it on
-`ToolContext` in `tools/__init__.py` next to `active_agent` and `convo_model`:
-
-```python
-focus: dict = None   # e.g. {"strategy": "double_diagonal", "underlying": "SPX"}
-```
-
-Every retrieval tool reads `ctx.focus` and folds it into its `where=` filter.
-Focus must also be *visible*: fold a line like "Focused on: double diagonals
-(SPX)" into Tom's system prompt each turn, the way the persona text is folded in
-now, so the model knows its own retrieval is narrowed and can say so. Without
-that the model silently misses material and confidently reports nothing found.
-
-Design decision to make before coding: **does focus narrow `search_knowledge`
-too, or only the journal?** Recommendation — yes, both, but as a *soft* filter
-on `knowledge` (rank-boost / fall back to unfiltered when the filtered search
-returns nothing) and a *hard* filter on the journal. Reference chunks are not
-reliably tagged by strategy; journal entries are, because we write them.
+`trading/strategies.py` rather than inventing a second taxonomy, so a
+strategy built by voice and a journal entry about it use the same word.
 
 ### Steps
 
-- [ ] Extract a shared `chroma_client()` + embedding-function helper so
-      `knowledge`, `conversations`, and the new journal share one client and one
-      loaded embedding model.
-- [ ] Add `JOURNAL_COLLECTION` to `config.py`.
-- [ ] Write `trading/journal.py`: `add(text, *, strategy, underlying, kind,
-      ticket_id, date)`, `search(query, *, focus=None, n=...)`,
+- [ ] Decide: journal entries into `knowledge_tom` vs. a dedicated
+      collection. Then `trading/journal.py`: `add(text, *, strategy,
+      underlying, kind, ticket_id, date)`, `search(query, *, focus=None)`,
       `recent(days=..., focus=None)`, `forget(ticket_id)`.
 - [ ] Decide the strategy vocabulary; add a `classify_strategy(text)` helper
       (deterministic mapping first, model call only as fallback).
-- [ ] Wire the store into `ToolContext` as `journal`, constructed where `kb` and
-      `memory` are constructed in `llm.py:Claude.__init__`.
-- [ ] New `tools/journal_tools.py`:
-      - `log_trade_note` — write an entry (Tom calls this when the user says
-        "note that I rolled the short put up a week").
-      - `search_trading_journal` — semantic search, focus-aware, cites date and
-        underlying.
-      - `recent_trading_activity` — time-scoped list, focus-aware, for "what
-        have I been doing in RUT this month".
-      - `set_focus` / `clear_focus` / `get_focus`.
-- [ ] Import the module in `tools/__init__.py` and add the new names to Tom's
-      allowlist in `agents.py`. Keep them **out** of Alice's and Bob's.
-- [ ] Fold the active focus into Tom's system prompt each turn.
+- [ ] Wire the store into `ToolContext` as `journal`, constructed where `kb`
+      and `memory` are constructed in `llm.py:Claude.__init__`.
+- [ ] New `tools/journal_tools.py`: `log_trade_note`,
+      `search_trading_journal` (focus-aware, cites date and underlying),
+      `recent_trading_activity`. Tom's allowlist only.
 - [ ] Auto-journal on submitted orders: when `submit_order` succeeds
       (`tools/trading_tools.py` / `trading/orders.py`), write a `kind="fill"`
       entry with the ticket's strategy and underlying. This is what makes the
@@ -121,24 +84,13 @@ reliably tagged by strategy; journal entries are, because we write them.
       dictate notes.
 - [ ] Backfill: a one-shot script under `scripts/` that reads existing Discord
       trade lines (`discord_data.py`) and the `Trading` note folder into the
-      journal, so focus mode has history on day one.
+      journal, so focus mode has history on day one (pattern:
+      `scripts/seed_agent_memory.py`).
 - [ ] Dashboard: a Journal panel — recent entries, filter by strategy, and a
       delete for a mis-logged entry. Follow the existing narrow-column,
       large-type layout; no wide tables.
-- [ ] Tests in `tests/test_journal.py` and `tests/test_focus.py`: metadata
-      filtering actually excludes off-strategy entries, focus survives across
-      turns, `clear_focus` restores full retrieval, a persona switch away from
-      Tom and back does the intended thing with focus (decide: keep or clear —
-      recommend keep, and say so aloud on switch back).
-
-### Open questions
-
-- Should focus persist to `data/agent_state.json` and survive a restart? Leaning
-  no — a stale focus that outlives the session is exactly the failure mode that
-  makes retrieval look broken.
-- Multiple simultaneous focuses ("diagonals and butterflies")? The `where=`
-  clause supports `$in`, so the store should accept a list from the start even
-  if the tool schema initially takes one value.
+- [ ] Tests in `tests/test_journal.py`: entries carry their tags, focus
+      scoping excludes off-strategy entries, auto-journal fires on submit.
 
 ---
 

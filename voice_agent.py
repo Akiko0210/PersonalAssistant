@@ -1157,6 +1157,10 @@ def main():
                         help="Ingest PDFs/text/video from the knowledge/ folder into "
                              "the knowledge base, then exit (video is transcribed, "
                              "which can take minutes per hour of material)")
+    parser.add_argument("--target", default=cfg.COMMON_COLLECTION,
+                        help="Where --ingest routes NEW files: 'common' (default) "
+                             "or an agent key (e.g. tom) for that agent's "
+                             "private collection")
     parser.add_argument("--kb-list", action="store_true",
                         help="List ingested knowledge sources, then exit")
     parser.add_argument("--resync", action="store_true",
@@ -1191,7 +1195,7 @@ def main():
         if args.selftest:
             selftest()
         elif args.ingest:
-            print(KnowledgeStore().ingest_folder())
+            print(KnowledgeStore().ingest_folder(target=args.target))
         elif args.resync:
             print(NoteStore().resync())
         else:

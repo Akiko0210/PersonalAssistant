@@ -49,11 +49,21 @@ PENDING_DIR = DATA_DIR / "pending"
 # tool, never pasted into the conversation.
 KNOWLEDGE_DIR = BASE_DIR / "knowledge"
 KNOWLEDGE_MANIFEST = KNOWLEDGE_DIR / "manifest.json"  # {sha256: {source,title,...}}
-# Conversation memory: the chat history is saved here after every turn and
-# restored (trimmed) on the next boot, so the agent remembers the last
-# conversation across restarts.
+# Conversation memory: each persona keeps its OWN thread with the user, saved
+# after every turn and restored (trimmed) on the next boot. Isolation is
+# structural — Tom's file simply never contains Alice's turns — so "what did I
+# tell Alice?" is answered by asking Alice (ask_agent), not by filtering.
+HISTORY_MAX_MESSAGES = 40   # messages kept when persisting/restoring a thread
+
+
+def history_path(key):
+    return DATA_DIR / f"history_{key}.json"
+
+
+# The pre-isolation single shared history. Only the one-time migration in
+# llm.py touches it (renames to .bak); scripts/seed_agent_memory.py mines the
+# session logs instead, which cover the same turns with attribution.
 HISTORY_PATH = DATA_DIR / "history.json"
-HISTORY_MAX_MESSAGES = 40   # messages kept when persisting/restoring history
 # Long-term memory: messages that fall off the window above are not lost — their
 # text is staged here, then consolidated (summarised by the model and embedded
 # into a persistent Chroma collection) so older conversations stay searchable
@@ -98,6 +108,21 @@ SEARCH_RESULTS = 5
 
 # --- Knowledge base (ingested PDFs, text, and video/audio) --------------------
 KNOWLEDGE_COLLECTION = "knowledge"   # Chroma collection, separate from "notes"
+# Per-agent private stores live as extra collections in the SAME Chroma DB —
+# one client, one embedding model (chromadb caches it by name), so isolation
+# is a collection name, not a second database. A wrong name returns nothing,
+# which is the point: no where= filter to forget.
+COMMON_COLLECTION = "common"         # manifest label for the shared collection
+
+
+def agent_knowledge_collection(key):
+    return f"knowledge_{key}"
+
+
+def agent_memory_collection(key):
+    return f"conversations_{key}"
+
+
 KB_CHUNK_CHARS = 1000                # target characters per embedded chunk
 KB_CHUNK_OVERLAP = 150               # characters shared between adjacent chunks
 KB_SEARCH_RESULTS = 5                # chunks returned per search_knowledge call

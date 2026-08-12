@@ -42,14 +42,50 @@ class TestRunDelegatedTask(unittest.TestCase):
         # via the return value, never via the shared pending slot.
         self.assertIsNone(c._ctx.pending_note)
 
-    def test_runs_on_registry_default_not_the_active_override(self):
-        # The user parking the foreground hat on an expensive model must not
-        # silently price up background work.
+    def test_active_hats_override_never_leaks_to_a_different_delegate(self):
+        # Tom parked on Opus must not price up a background ask to Bob — the
+        # override belongs to the hat it was made in, nobody else.
         c = make_claude([text_reply("done")])
-        c._ctx.convo_model = cfg.CONVO_MODELS["opus"]
+        c._ctx.convo_model = cfg.CONVO_MODELS["opus"]  # Tom is active
         c.run_delegated_task("bob", "task")
         self.assertEqual(c.client.messages.calls[0]["model"],
                          cfg.CONVO_MODELS["haiku"])
+
+    def test_runs_on_the_delegates_parked_model(self):
+        # "Bob is on X" must mean Bob answers on X everywhere: a delegate on
+        # its registry default while parked elsewhere is how Alice claimed
+        # Haiku seconds before the switch announcement said DeepSeek Flash
+        # (session_2026-08-10.log 18:22). Parked on a Claude model here so
+        # the fake client serves the call — the resolver doesn't care which
+        # provider the override names.
+        c = make_claude([text_reply("done")])
+        c._model_overrides["bob"] = cfg.CONVO_MODELS["opus"]
+        c.run_delegated_task("bob", "task")
+        self.assertEqual(c.client.messages.calls[0]["model"],
+                         cfg.CONVO_MODELS["opus"])
+
+    def test_delegated_identity_answer_matches_the_parked_model(self):
+        # The exact log failure, end to end: asked which model she's on, a
+        # delegated persona must answer with her parked conversation model —
+        # the same one the switch announcement would speak.
+        c = make_claude([
+            tool_reply("get_current_model", {}),
+            text_reply("done"),
+        ])
+        c._model_overrides["alice"] = cfg.CONVO_MODELS["opus"]
+        c.run_delegated_task("alice", "which model are you on?")
+        # The tool result fed back to the model names Opus, not Haiku.
+        result_turn = c.client.messages.calls[1]["messages"][-1]
+        self.assertIn("Opus", str(result_turn))
+        self.assertNotIn("Haiku", str(result_turn))
+
+    def test_delegating_to_the_active_hat_uses_its_live_model(self):
+        # model_for's active branch: the live setting, not a stale override.
+        c = make_claude([text_reply("done")])
+        c._ctx.convo_model = cfg.CONVO_MODELS["opus"]  # Tom, live
+        c.run_delegated_task("tom", "task")
+        self.assertEqual(c.client.messages.calls[0]["model"],
+                         cfg.CONVO_MODELS["opus"])
 
     def test_background_loop_carries_no_switching_tools(self):
         c = make_claude([text_reply("done")])
@@ -59,6 +95,22 @@ class TestRunDelegatedTask(unittest.TestCase):
         self.assertNotIn("switch_agent", names)
         self.assertNotIn("ask_agent", names)
         self.assertNotIn("set_conversation_model", names)
+
+    def test_delegate_memory_search_is_scoped_to_the_delegate(self):
+        # "Tom asks Alice what we discussed" only works if the delegated
+        # Alice searches ALICE's memory — the sub-context's active_agent is
+        # what the store scopes by, so it must carry the delegate's key.
+        c = make_claude([
+            tool_reply("search_past_conversations", {"query": "diagonals"}),
+            text_reply("we discussed diagonals"),
+        ])
+        callers = []
+        c.memory = SimpleNamespace(
+            record_dropped=lambda dropped, owner: None,
+            search=lambda q, client=None, caller=None:
+                callers.append(caller) or "nothing found")
+        c.run_delegated_task("alice", "what did we discuss?")
+        self.assertEqual(callers, ["alice"])
 
     def test_background_loop_cannot_mutate_orders(self):
         # Review-before-submit means the user HEARS the review; a background

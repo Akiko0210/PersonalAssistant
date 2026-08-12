@@ -323,7 +323,10 @@ def api_overview():
     for info in index.values():
         slug = categories.slug_of(info)
         counts[slug] = counts.get(slug, 0) + 1
-    history = read_json(cfg.HISTORY_PATH, [])
+    # Histories are per-agent files; the overview stat is the sum of all
+    # live windows.
+    n_history = sum(len(read_json(cfg.history_path(k), []))
+                    for k in agents_registry.AGENTS)
     pending = read_json(cfg.MEMORY_PENDING_PATH, [])
     manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     logs = sorted(cfg.LOG_DIR.glob("session_*.log")) if cfg.LOG_DIR.exists() else []
@@ -348,7 +351,7 @@ def api_overview():
             {"slug": slug, "count": n} for slug, n in counts.items()
             if slug not in folders
         ],
-        "history_messages": len(history),
+        "history_messages": n_history,
         "memory_pending": len(pending),
         "knowledge_docs": len(manifest),
         "log_files": len(logs),
@@ -699,9 +702,19 @@ def save_config(payload):
     return {"ok": True, "saved": sorted(overrides)}
 
 
-def api_history(limit=200):
-    messages = read_json(cfg.HISTORY_PATH, [])
-    return {"messages": messages[-limit:], "total": len(messages)}
+def api_history(limit=200, agent=None):
+    """One persona's thread (histories are per-agent now). Default: whoever is
+    active per agent_state.json, so the page opens on the live conversation."""
+    if agent not in agents_registry.AGENTS:
+        agent = (read_json(cfg.AGENT_STATE_PATH, {}).get("active")
+                 or agents_registry.DEFAULT_AGENT)
+        if agent not in agents_registry.AGENTS:
+            agent = agents_registry.DEFAULT_AGENT
+    messages = read_json(cfg.history_path(agent), [])
+    return {"messages": messages[-limit:], "total": len(messages),
+            "agent": agent,
+            "agents": [{"key": k, "name": a["name"]}
+                       for k, a in agents_registry.AGENTS.items()]}
 
 
 def api_memory():
@@ -727,9 +740,14 @@ def api_knowledge():
                 "bytes": path.stat().st_size,
                 "media": path.suffix.lower() in cfg.KB_MEDIA_EXTS,
             })
+    # Ingest targets for the UI selector: common plus each agent's private
+    # collection, by display name.
+    targets = ([{"key": cfg.COMMON_COLLECTION, "name": "Common (all agents)"}]
+               + [{"key": k, "name": f"{a['name']} only"}
+                  for k, a in agents_registry.AGENTS.items()])
     return {"docs": docs, "dir": str(cfg.KNOWLEDGE_DIR), "pending": pending,
             "accept": sorted(UPLOAD_EXTS), "agent_running": agent_running(),
-            "job": job_status()}
+            "targets": targets, "job": job_status()}
 
 
 # --- Knowledge ingestion job --------------------------------------------------
@@ -753,7 +771,7 @@ def _set_job(**fields):
         _job.update(fields)
 
 
-def _run_ingest():
+def _run_ingest(target=cfg.COMMON_COLLECTION):
     try:
         lock = SingleInstance(cfg.LOCK_PATH).acquire()
     except AlreadyRunning:
@@ -776,6 +794,7 @@ def _run_ingest():
         store = KnowledgeStore()
         summary = store.ingest_folder(
             include_media=True,
+            target=target,
             on_progress=lambda name, pct=None: _set_job(
                 file=name,
                 message=(f"Ingesting {name}…" if pct is None
@@ -789,8 +808,12 @@ def _run_ingest():
         lock.release()
 
 
-def start_ingest():
-    """Kick off a background ingest unless one is already in flight."""
+def start_ingest(target=cfg.COMMON_COLLECTION):
+    """Kick off a background ingest unless one is already in flight. `target`
+    routes new files: 'common' or an agent key (validated here, before the
+    thread, so a bad value is a 400 and not a background failure)."""
+    if target != cfg.COMMON_COLLECTION and target not in agents_registry.AGENTS:
+        return {"ok": False, "error": f"unknown ingest target '{target}'"}
     with _job_lock:
         if _job["state"] == "running":
             return {"ok": False, "error": "An ingest is already running."}
@@ -800,7 +823,7 @@ def start_ingest():
     # block for the rest of a half-hour transcription. Interrupting is safe --
     # the manifest is written per file, and chunk ids derive from the file hash,
     # so a re-run overwrites rather than duplicates.
-    threading.Thread(target=_run_ingest, daemon=True).start()
+    threading.Thread(target=_run_ingest, args=(target,), daemon=True).start()
     return {"ok": True}
 
 
@@ -974,7 +997,8 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/voices":
                 return self._send(200, api_voices())
             if route == "/api/history":
-                return self._send(200, api_history(int(arg("limit", "200"))))
+                return self._send(200, api_history(int(arg("limit", "200")),
+                                                   arg("agent", None)))
             if route == "/api/memory":
                 return self._send(200, api_memory())
             if route == "/api/knowledge":
@@ -1037,7 +1061,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, {"ok": False, "error": str(e)})
         if url.path == "/api/knowledge/ingest":
-            result = start_ingest()
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, TypeError) as e:
+                return self._send(400, {"ok": False, "error": f"bad request: {e}"})
+            result = start_ingest(payload.get("target", cfg.COMMON_COLLECTION))
+            if result.get("error", "").startswith("unknown"):
+                return self._send(400, result)
             return self._send(200 if result["ok"] else 409, result)
         if url.path == "/api/knowledge/remove":
             try:

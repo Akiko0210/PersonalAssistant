@@ -197,6 +197,12 @@ class IngestJobTests(unittest.TestCase):
         self.addCleanup(dashboard._set_job, state="idle", message="", file="",
                         started=None, finished=None)
 
+    def test_unknown_target_is_refused_before_the_thread_starts(self):
+        result = dashboard.start_ingest("mallory")
+        self.assertFalse(result["ok"])
+        self.assertIn("unknown ingest target", result["error"])
+        self.assertEqual(dashboard.job_status()["state"], "idle")
+
     def test_refuses_to_start_twice(self):
         dashboard._set_job(state="running")
         result = dashboard.start_ingest()
@@ -248,7 +254,7 @@ class IngestJobTests(unittest.TestCase):
         since a finished job deliberately clears the current file."""
         seen = []
 
-        def fake_ingest(include_media, on_progress):
+        def fake_ingest(include_media, target, on_progress):
             for args in calls:
                 on_progress(*args)
                 job = dashboard.job_status()

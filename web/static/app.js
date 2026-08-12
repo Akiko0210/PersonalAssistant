@@ -728,10 +728,14 @@ views.config = async function () {
 };
 
 /* ================= Conversation ================= */
+let convoAgent = null;  // persona whose thread is shown; null = follow active
+
 views.conversation = async function () {
   main.innerHTML = header("Conversation", "The live history window — what the agent remembers verbatim right now.");
   let data;
-  try { data = await api("/api/history"); }
+  try {
+    data = await api("/api/history" + (convoAgent ? `?agent=${convoAgent}` : ""));
+  }
   catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
 
   function blockHtml(b, i) {
@@ -758,9 +762,16 @@ views.conversation = async function () {
       <div class="m-role">${m.role === "user" ? "You" : "Agent"}</div>${content}</div>`;
   }).join("");
 
+  /* Threads are per-persona: one stacked row of big buttons picks whose
+     conversation is on screen. */
+  const agentBtns = (data.agents || []).map(a => `
+    <button class="agent-tab ${a.key === data.agent ? "sel" : ""}"
+            data-agent="${esc(a.key)}">${esc(a.name)}</button>`).join("");
+
   main.innerHTML = header("Conversation",
-    `The live history window — ${data.total} message(s) persisted, restored on next boot.`) +
-    `<div class="chat">${msgs || '<div class="card empty">No conversation history yet</div>'}</div>
+    `${esc((data.agents || []).find(a => a.key === data.agent)?.name || data.agent)}'s thread — ${data.total} message(s) persisted, restored on next boot.`) +
+    `<div class="agent-tabs">${agentBtns}</div>
+     <div class="chat">${msgs || '<div class="card empty">No conversation history yet</div>'}</div>
      <form class="composer" id="chat-form">
        <input type="text" id="chat-text" aria-label="Message to the agent"
               placeholder="Type to the agent…" autocomplete="off" disabled>
@@ -771,6 +782,11 @@ views.conversation = async function () {
   main.querySelectorAll(".tool-chip").forEach(b => b.onclick = () => {
     const d = main.querySelector(`[data-detail="${b.dataset.tool}"]`);
     if (d) d.hidden = !d.hidden;
+  });
+
+  main.querySelectorAll(".agent-tab").forEach(b => b.onclick = () => {
+    convoAgent = b.dataset.agent;
+    views.conversation();
   });
 
   const note = $("#chat-note");
@@ -815,7 +831,8 @@ async function awaitReply(before, note) {
   for (let i = 0; i < 20; i++) {
     await new Promise(r => setTimeout(r, 2000));
     if (currentView() !== "conversation") return;  // user navigated away
-    const h = await api("/api/history").catch(() => null);
+    const h = await api("/api/history" + (convoAgent ? `?agent=${convoAgent}` : ""))
+      .catch(() => null);
     if (h && historySig(h) !== before) return views.conversation();
   }
   note.className = "send-note";
@@ -832,7 +849,8 @@ views.memory = async function () {
   const batches = data.pending.map(p => `
     <div class="card">
       <h2>${esc(fmtDate(p.ts))}</h2>
-      <div class="card-sub">${(p.lines || []).length} line(s) staged</div>
+      <div class="card-sub">${(p.lines || []).length} line(s) staged · ${
+        p.agent ? `${esc(p.agent)}'s memory` : "shared (pre-isolation)"}</div>
       <div class="mono-list">${(p.lines || []).map(l => `<div>${esc(l)}</div>`).join("")}</div>
     </div>`).join("");
 
@@ -851,6 +869,7 @@ views.knowledge = async function () {
 
   let jobTimer = null;
   let confirming = null;   // name of the pending file asking "remove?"
+  let target = "common";   // where the next ingest routes new files
 
   /* Laid out for a narrow visual field: one column, big targets, each control
      next to the thing it acts on. Steps read top to bottom — add, then the
@@ -884,13 +903,17 @@ views.knowledge = async function () {
         </div>
       </div>`).join("");
 
+    const targetName = key =>
+      (data.targets || []).find(t => t.key === key)?.name || key;
     const docRows = data.docs.map(d => {
       const extent = d.pages ? `${d.pages} pages` : (d.duration ? d.duration : "text");
+      const where = (d.collection && d.collection !== "common")
+        ? ` · ${esc(targetName(d.collection))}` : "";
       return `<div class="kb-row done">
         <div class="kb-row-main">
           <div class="kb-row-name">${esc(d.title)}</div>
           <div class="kb-row-meta">${esc(extent)} · ${d.chunks} chunk${d.chunks === 1 ? "" : "s"}
-            · added ${esc(fmtDate(d.ingested))}</div>
+            · added ${esc(fmtDate(d.ingested))}${where}</div>
         </div>
       </div>`;
     }).join("");
@@ -923,6 +946,16 @@ views.knowledge = async function () {
           <h2><span class="kb-num">2</span> Waiting to add${pending.length ? ` (${pending.length})` : ""}</h2>
           ${pending.length ? pendingRows
             : '<div class="kb-none">Nothing waiting. Upload a file above.</div>'}
+
+          <div class="kb-targets" role="radiogroup" aria-label="Ingest into">
+            <div class="kb-hint">Ingest into:</div>
+            ${(data.targets || []).map(t => `
+              <label class="kb-target ${t.key === target ? "sel" : ""}">
+                <input type="radio" name="kb-target" value="${esc(t.key)}"
+                       ${t.key === target ? "checked" : ""}
+                       ${running ? "disabled" : ""}>
+                ${esc(t.name)}</label>`).join("")}
+          </div>
 
           <button class="btn-big ${running ? "busy" : ""}" id="kb-ingest"
                   ${running || blocked ? "disabled" : ""}>
@@ -963,6 +996,10 @@ views.knowledge = async function () {
 
     const btn = $("#kb-ingest");
     if (btn && !btn.disabled) btn.onclick = ingest;
+
+    main.querySelectorAll('input[name="kb-target"]').forEach(r => {
+      r.onchange = () => { target = r.value; render(); };
+    });
 
     // Removing is two taps: ask, then confirm. A file can represent a long
     // upload, and there is no undo once it's off disk.
@@ -1070,7 +1107,11 @@ views.knowledge = async function () {
     msg.className = "kb-status";
     msg.textContent = "Starting…";
     try {
-      const r = await fetch("/api/knowledge/ingest", { method: "POST" });
+      const r = await fetch("/api/knowledge/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target }),
+      });
       const body = await r.json();
       if (!body.ok) {
         msg.className = "kb-status err";

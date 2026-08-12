@@ -460,6 +460,30 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .kb-row.done .kb-row-name { font-weight: 600; }
 
 .kb-none { color: var(--muted); font-size: 15.5px; padding: 6px 0 4px; }
+
+/* Ingest destination: stacked full-width radio rows, one obvious choice at a
+   time — same tunnel-vision rules as everything else (big text, ≥46px rows). */
+.kb-targets { margin-top: 16px; }
+.kb-target {
+  display: flex; align-items: center; gap: 12px;
+  min-height: 46px; padding: 4px 12px; margin-top: 6px;
+  border: 1px solid var(--grid); border-radius: 10px;
+  font-size: 17px; color: var(--ink); cursor: pointer;
+}
+.kb-target.sel { border-color: var(--accent); font-weight: 650; }
+.kb-target input { width: 22px; height: 22px; accent-color: var(--accent); }
+
+/* Conversation: whose thread is on screen. Stacked big buttons, one selected. */
+.agent-tabs { display: flex; flex-direction: column; gap: 8px; margin: 0 0 18px; }
+.agent-tab {
+  min-height: 46px; padding: 10px 14px; text-align: left;
+  border: 1px solid var(--grid); border-radius: 10px;
+  background: var(--card, transparent); color: var(--ink);
+  font-size: 17px; cursor: pointer;
+}
+.agent-tab.sel {
+  border-color: var(--accent); background: var(--accent-soft); font-weight: 700;
+}
 .kb-status { font-size: 16px; color: var(--ink-2); margin-top: 12px; line-height: 1.45; }
 .kb-status.ok { color: var(--good); font-weight: 650; }
 .kb-status.err { color: var(--critical); font-weight: 650; }

@@ -46,6 +46,12 @@ class ToolContext:
     # background thread as that persona (Claude.run_delegated_task) and the
     # result comes back as a spoken interjection between utterances.
     pending_delegations: list = field(default_factory=list)
+    # Per-session retrieval narrowing (set_focus): folded into store where=
+    # filters, e.g. {"strategy": "double_diagonal", "underlying": "SPX"}.
+    # Session state, deliberately never persisted — a stale focus outliving
+    # the session is exactly the failure mode that makes retrieval look
+    # broken. Values may be lists (the store turns them into $in).
+    focus: dict = field(default=None)
     # Factual notes about work a tool did *beyond* the string it returned — a
     # deferred save, or a sub-dialogue that ran in its own model memory. Only
     # a tool's return value lands in history automatically; anything that
@@ -102,6 +108,7 @@ from tools import discord_tools   # noqa: E402,F401
 from tools import time_tools      # noqa: E402,F401
 from tools import memory_tools    # noqa: E402,F401
 from tools import knowledge_tools # noqa: E402,F401
+from tools import focus_tools     # noqa: E402,F401
 from tools import model_tools     # noqa: E402,F401
 from tools import project_tools   # noqa: E402,F401
 from tools import agent_tools     # noqa: E402,F401

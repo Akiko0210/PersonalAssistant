@@ -1,10 +1,11 @@
-"""Named agent personas ("hats") over the one shared conversation.
+"""Named agent personas with strictly separate conversations and memory.
 
-Alice, Bob, and Tom are NOT separate agents with separate memories: they are
-per-turn configurations — system-prompt persona, tool allowlist, model, and
-TTS voice — applied to the single conversation loop and its single history.
-Switching hats never fragments context ("I told you five minutes ago" always
-works), it just changes who answers and with which specialty.
+Alice, Bob, and Tom each keep their OWN thread with the user (one history
+file per persona, llm.switch_to swaps them) and their own private stores.
+What one persona was told, another cannot see; context crosses over only as
+an ask_agent summary — ask Alice, and Alice answers from HER memory. The
+registry's `reads` grants are the one deliberate exception (a reviewer
+persona may be granted read access to a specialist's private stores).
 
 The registry below is the single source of truth: adding a fourth agent is one
 dict entry. The dashboard overlays user edits from data/agents.json onto these
@@ -41,6 +42,11 @@ AGENTS = {
         "tools": {"get_current_time", "describe_project",
                   "search_past_conversations", "get_current_model",
                   "set_conversation_model", "switch_agent", "ask_agent"},
+        # Other agents whose PRIVATE stores this hat may also read (empty =
+        # own stores only). Like tools, access control is code, not a
+        # dashboard edit — a future coach persona reviewing Tom's trades
+        # would be ("tom",).
+        "reads": (),
         "model": "haiku",       # key into cfg.CONVO_MODELS
         "tts_voice": "Zira",    # SAPI voice-name substring; None = default
         "tts_rate": None,       # words/min; None = cfg.TTS_RATE
@@ -82,6 +88,7 @@ AGENTS = {
                   "save_conversation_note", "search_past_conversations",
                   "get_current_time", "get_current_model",
                   "set_conversation_model", "switch_agent", "ask_agent"},
+        "reads": (),
         "model": "haiku",
         "tts_voice": "David",
         "tts_rate": None,
@@ -130,7 +137,12 @@ AGENTS = {
                   "trading_status", "get_quote", "list_expirations",
                   "build_strategy", "adjust_leg", "set_order_terms",
                   "review_order", "submit_order", "list_orders",
-                  "cancel_order", "get_positions", "get_pnl", "clear_ticket"},
+                  "cancel_order", "get_positions", "get_pnl", "clear_ticket",
+                  # Focus mode: "focus on my double diagonals" narrows every
+                  # retrieval until cleared. Tom-only — the other hats have no
+                  # strategy-tagged material for it to filter.
+                  "set_focus", "clear_focus", "get_focus"},
+        "reads": (),
         "model": "sonnet",      # analysis benefits from the stronger model
         # Only Zira + David are installed on this machine, so Tom shares
         # David's voice at a slower, more deliberate rate; the spoken
@@ -161,6 +173,18 @@ def registry_model(key):
     keys fall back to the global default model."""
     hat = AGENTS.get(key or "")
     return cfg.CONVO_MODELS.get(hat["model"], cfg.CONVO_MODEL) if hat else cfg.CONVO_MODEL
+
+
+def readable_owners(key):
+    """Private-store owners persona `key` may read: itself plus its `reads`
+    grants. Stores derive private collection names ONLY from this, and tools
+    pass ctx.active_agent and nothing else — so there is no parameter through
+    which a persona can name another persona's collection. Unknown/None keys
+    get an empty tuple (common stores only)."""
+    hat = AGENTS.get(key or "")
+    if hat is None:
+        return ()
+    return (key, *(g for g in hat.get("reads", ()) if g in AGENTS))
 
 
 def load_agents():
@@ -270,13 +294,18 @@ def roster_block(active):
                        for k, a in AGENTS.items() if k != active)
     return (
         f"\n\nYou are {me['name']} — {me['role']}. The user also works with: "
-        f"{others}. You all share ONE conversation memory: earlier assistant "
-        "turns may have been spoken by another persona — treat them as your "
-        "shared past, not someone else's words. When the user wants a task "
-        "done in another assistant's specialty without leaving you — saving "
-        "a note mid-discussion, a quick lookup — delegate it with the "
-        "ask_agent tool: they work in the background and speak up when done, "
-        "while your conversation continues. Hand the user over with the "
+        f"{others}. Each assistant keeps its OWN conversation with the user "
+        "and its own memory: this thread and everything you recall are yours "
+        "alone. If the user asks about another assistant's conversations, "
+        "say you don't have access and offer to ask them — use ask_agent and "
+        "relay their summary; never guess at what was said and never answer "
+        "with a bare 'I don't know'. Information meant for ALL assistants "
+        "belongs in a shared note or the common knowledge base, not in your "
+        "private thread. When the user wants a task done in another "
+        "assistant's specialty without leaving you — saving a note "
+        "mid-discussion, a quick lookup — delegate it with the ask_agent "
+        "tool: they work in the background and speak up when done, while "
+        "your conversation continues. Hand the user over with the "
         "switch_agent tool only when they actually want to talk to the other "
         "assistant, forwarding their question so it gets answered "
         "immediately. Every switch is announced aloud by the system, so "

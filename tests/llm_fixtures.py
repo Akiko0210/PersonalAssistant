@@ -67,14 +67,24 @@ def make_claude(responses=None, *, active=None, convo_model=_UNSET,
     c.store = None
     c.discord = None
     c.kb = None
-    c.memory = SimpleNamespace(record_dropped=lambda dropped: None)
+    c.memory = SimpleNamespace(record_dropped=lambda dropped, owner: None)
     c._ctx = ToolContext(
         active_agent=c.active,
         convo_model=(cfg.CONVO_MODELS["haiku"] if convo_model is _UNSET
                      else convo_model))
     c.history = list(history or [])
     c.idle = SimpleNamespace(start=lambda: None, stop=lambda: None)
-    c.saved = []  # snapshots of history at each persist
-    c._save_history = lambda: c.saved.append(list(c.history))
+    c.saved = []    # snapshots of history at each persist
+    c.threads = {}  # per-agent thread "files": what switch_to saves/loads
+
+    def _save():
+        c.saved.append(list(c.history))
+        c.threads[c.active] = list(c.history)
+
+    def _load():
+        return list(c.threads.get(c.active, []))
+
+    c._save_history = _save
+    c._load_history = _load
     c._write_agent_state = lambda: None  # no disk writes from tests
     return c

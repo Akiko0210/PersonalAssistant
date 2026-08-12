@@ -24,10 +24,13 @@ class TestSearchStaged(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.mem = ConversationMemory.__new__(ConversationMemory)  # skip ensure_dirs
-        self.mem._col = None
+        self.mem._cols = {}
 
     def _stage(self, *lines):
-        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines])
+        # owner=None = a legacy batch, readable by every caller — these tests
+        # exercise the staging mechanics, not the scoping (TestPerAgentStaging).
+        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines],
+                                None)
 
     def test_finds_aged_out_lines_by_keyword(self):
         # The exact trading-hat scenario: aged out, then asked about.
@@ -98,10 +101,13 @@ class TestRecallStaged(unittest.TestCase):
         self.mem = ConversationMemory.__new__(ConversationMemory)
         # A pre-set empty collection keeps search() from loading the real
         # embedding model + Chroma store inside a unit test.
-        self.mem._col = type("Col", (), {"count": lambda self: 0})()
+        self.mem._cols = {}
+        self.mem._col_for = lambda name: type("Col", (),
+                                              {"count": lambda self: 0})()
 
     def _stage(self, *lines):
-        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines])
+        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines],
+                                None)
 
     def test_llm_read_answers_complex_queries(self):
         # The staged text never contains the word "sizing" — a keyword scan
@@ -161,10 +167,13 @@ class TestFalseNegativeDoesNotHideStagedLines(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.mem = ConversationMemory.__new__(ConversationMemory)
-        self.mem._col = type("Col", (), {"count": lambda self: 0})()
+        self.mem._cols = {}
+        self.mem._col_for = lambda name: type("Col", (),
+                                              {"count": lambda self: 0})()
 
     def _stage(self, *lines):
-        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines])
+        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines],
+                                None)
 
     def test_keyword_hits_survive_a_nothing_relevant_verdict(self):
         # The 2026-07-27 failure in miniature: the read says nothing is
@@ -201,16 +210,17 @@ class TestArchiveFailureIsNotFatal(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         self.mem = ConversationMemory.__new__(ConversationMemory)
-        self.mem._col = None
+        self.mem._cols = {}
         self.ensure_calls = 0
 
     def _stage(self, *lines):
-        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines])
+        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines],
+                                None)
 
     def _break_chroma(self, error="Error creating hnsw segment reader: "
                                   "Nothing found on disk.", heal_on=None):
-        """Install an _ensure_chroma that yields a failing collection, and
-        optionally a working one from attempt `heal_on` onward."""
+        """Install a _col_for that yields a failing collection, and optionally
+        a working one from attempt `heal_on` onward."""
         outer = self
 
         class Col:
@@ -224,14 +234,15 @@ class TestArchiveFailureIsNotFatal(unittest.TestCase):
                 if not self.ok:
                     raise RuntimeError(error)
                 return {"documents": [["archived text"]],
-                        "metadatas": [[{"date": "2026-07-25"}]]}
+                        "metadatas": [[{"date": "2026-07-25"}]],
+                        "distances": [[0.3]]}
 
-        def fake_ensure():
+        def fake_col_for(name):
             outer.ensure_calls += 1
             ok = heal_on is not None and outer.ensure_calls >= heal_on
-            outer.mem._col = Col(ok)
+            return Col(ok)
 
-        self.mem._ensure_chroma = fake_ensure
+        self.mem._col_for = fake_col_for
 
     def test_staged_results_survive_an_archive_failure(self):
         self._stage("the kicker is sixty-five days out")
@@ -248,7 +259,7 @@ class TestArchiveFailureIsNotFatal(unittest.TestCase):
         self.assertNotIn("Nothing in past conversations matches", out)
 
     def test_it_retries_once_with_a_rebuilt_collection(self):
-        self._break_chroma(heal_on=2)  # second _ensure_chroma yields a good one
+        self._break_chroma(heal_on=2)  # second _col_for yields a good one
         out = self.mem.search("anything")
         self.assertEqual(self.ensure_calls, 2)
         self.assertIn("archived text", out)
@@ -261,12 +272,130 @@ class TestArchiveFailureIsNotFatal(unittest.TestCase):
 
 
 class TestEveryHatCanSearchMemory(unittest.TestCase):
-    def test_shared_memory_is_searchable_by_every_persona(self):
-        # The conversation memory is shared; a hat without the search tool
-        # cannot obey "review your memory" — the exact 2026-07-20 failure.
+    def test_own_memory_is_searchable_by_every_persona(self):
+        # A hat without the search tool cannot obey "review your memory" —
+        # the exact 2026-07-20 failure. Memory is per-agent now, but the rule
+        # stands: every persona must reliably reach its OWN past.
         from brain import agents
         for key, agent in agents.AGENTS.items():
             self.assertIn("search_past_conversations", agent["tools"], key)
+
+
+class TestPerAgentStaging(unittest.TestCase):
+    """Scoping: a caller reads its own staged batches (plus legacy and its
+    saved live window) and structurally cannot see another persona's."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        for name, value in (("MEMORY_PENDING_PATH",
+                             Path(self.dir) / "memory_pending.json"),
+                            ("DATA_DIR", Path(self.dir))):
+            p = mock.patch.object(cfg, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.mem = ConversationMemory.__new__(ConversationMemory)
+        self.mem._cols = {}
+        self.mem._col_for = lambda name: type("Col", (),
+                                              {"count": lambda self: 0})()
+
+    def _stage(self, owner, *lines):
+        self.mem.record_dropped([{"role": "user", "content": ln} for ln in lines],
+                                owner)
+
+    def test_batches_are_tagged_with_their_owner(self):
+        self._stage("tom", "the butterfly is on")
+        (batch,) = self.mem._load_pending()
+        self.assertEqual(batch["agent"], "tom")
+
+    def test_a_caller_never_sees_another_agents_batches(self):
+        self._stage("alice", "alice's secret plans")
+        self._stage("tom", "tom's butterfly")
+        out = self.mem.search("secret plans butterfly", caller="tom")
+        self.assertIn("butterfly", out)
+        self.assertNotIn("secret", out)
+
+    def test_legacy_batches_are_readable_by_everyone(self):
+        self._stage(None, "pre-isolation butterfly talk")
+        for caller in ("tom", "alice", None):
+            self.assertIn("butterfly",
+                          self.mem.search("butterfly", caller=caller))
+
+    def test_live_window_of_the_caller_is_searchable(self):
+        # The delegation gap: a delegated Alice starts with an empty message
+        # list, so her own current window must be reachable through search.
+        import brain.history as hist
+        hist.save(cfg.history_path("alice"),
+                  [{"role": "user", "content": "we chose the June butterfly"}])
+        out = self.mem.search("butterfly", caller="alice")
+        self.assertIn("June butterfly", out)
+        # ...and stays invisible to Tom.
+        self.assertNotIn("June butterfly",
+                         self.mem.search("butterfly", caller="tom"))
+
+
+class TestPerAgentConsolidation(unittest.TestCase):
+    """Consolidation groups by owner: each qualifying persona gets its own
+    summary in its own collection; under-threshold groups stay staged."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        patcher = mock.patch.object(cfg, "MEMORY_PENDING_PATH",
+                                    Path(self.dir) / "memory_pending.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.mem = ConversationMemory.__new__(ConversationMemory)
+        self.mem._cols = {}
+        self.upserts = {}  # collection name -> [(ids, docs, metas)]
+        outer = self
+
+        class Col:
+            def __init__(self, name):
+                self.name = name
+
+            def upsert(self, ids, documents, metadatas):
+                outer.upserts.setdefault(self.name, []).append(
+                    (ids, documents, metadatas))
+
+        self.mem._col_for = lambda name: Col(name)
+
+    def _stage(self, owner, n_lines):
+        self.mem.record_dropped(
+            [{"role": "user", "content": f"{owner or 'legacy'} line {i}"}
+             for i in range(n_lines)], owner)
+
+    def test_each_qualifying_group_lands_in_its_own_collection(self):
+        with mock.patch.object(cfg, "MEMORY_MIN_MESSAGES", 3):
+            self._stage("alice", 4)
+            self._stage(None, 5)
+            status = self.mem.consolidate(FakeClient(answer="a summary"))
+        self.assertIn(cfg.agent_memory_collection("alice"), self.upserts)
+        self.assertIn(cfg.MEMORY_COLLECTION, self.upserts)
+        self.assertIn("alice", status)
+        self.assertEqual(self.mem._load_pending(), [])
+
+    def test_an_under_threshold_group_stays_staged(self):
+        with mock.patch.object(cfg, "MEMORY_MIN_MESSAGES", 3):
+            self._stage("alice", 4)
+            self._stage("tom", 2)  # not enough on its own
+            self.mem.consolidate(FakeClient(answer="a summary"))
+        self.assertNotIn(cfg.agent_memory_collection("tom"), self.upserts)
+        (kept,) = self.mem._load_pending()
+        self.assertEqual(kept["agent"], "tom")
+
+    def test_an_unknown_owner_consolidates_into_the_legacy_archive(self):
+        # A renamed/removed persona's past has no collection to go to; the
+        # shared archive keeps it findable instead of orphaned forever.
+        with mock.patch.object(cfg, "MEMORY_MIN_MESSAGES", 3):
+            self._stage("zoe", 4)
+            self.mem.consolidate(FakeClient(answer="a summary"))
+        self.assertIn(cfg.MEMORY_COLLECTION, self.upserts)
+
+    def test_nothing_qualifying_makes_no_model_call(self):
+        client = FakeClient(answer="never used")
+        with mock.patch.object(cfg, "MEMORY_MIN_MESSAGES", 3):
+            self._stage("alice", 1)
+            self.assertIsNone(self.mem.consolidate(client))
+        self.assertEqual(client.prompts, [])
 
 
 if __name__ == "__main__":

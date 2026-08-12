@@ -152,19 +152,35 @@ cut off mid-thought.
 
 ## Conversation memory
 
-The conversation is saved to `data/history.json` after every turn and restored
-on the next start, so the agent remembers your last conversation across
-restarts. The live window keeps the most recent exchanges
+**Each persona keeps its own conversation.** Alice, Bob, and Tom each have
+their own thread (`data/history_<name>.json`), saved after every turn and
+restored on the next start. What you tell one, the others cannot see: ask Tom
+what you discussed with Alice and he'll say he doesn't have access — and
+offer to ask her. Accept, and Alice answers from her own memory as a spoken
+interjection. The live window keeps each thread's most recent exchanges
 (`HISTORY_MAX_MESSAGES` in `config.py`).
 
-Older conversation isn't lost when it ages out of that window: its text is
-staged to `data/memory_pending.json`, and at boot the agent consolidates the
-staged text — one quick model call summarises it into a dense memory record
-embedded in a persistent `conversations` collection in Chroma. Ask "what did we
-talk about last week?" or "didn't we discuss X before?" and the agent searches
-those archived summaries (`search_past_conversations`). Consolidation only runs
-when enough has accumulated, and if it fails (e.g. offline) the staged text is
-kept and retried next boot.
+Older conversation isn't lost when it ages out of a window: its text is
+staged to `data/memory_pending.json` tagged with its persona, and at boot the
+agent consolidates each persona's staged text — one quick model call
+summarises it into a dense memory record embedded in that persona's own
+`conversations_<name>` collection in Chroma. Ask "what did we talk about last
+week?" and the persona searches its own archive
+(`search_past_conversations`); conversations from before the per-persona
+split live in a shared legacy archive every persona can read, labelled as
+such. Consolidation only runs when enough has accumulated, and if it fails
+(e.g. offline) the staged text is kept and retried next boot.
+`scripts/seed_agent_memory.py` (run once, agent off) backfills each persona's
+archive from the session logs.
+
+Knowledge splits the same way: the dashboard's ingest has a target selector,
+so a document can go into the common knowledge base (all personas) or one
+persona's private collection — private material never shows up in another
+persona's searches. Tom additionally has **focus mode**: "focus on my double
+diagonals" narrows his retrieval to that strategy until you say to clear it.
+
+Anything meant for every persona belongs in a note or the common knowledge
+base — those are shared on purpose.
 
 You can also turn part of a conversation into a note without switching to
 note-taking mode: ask something ("what did we talk about trading?"), then say
@@ -189,7 +205,8 @@ data/Trading/        notes filed under "Trading"  (<id>.md + <id>.transcript.md)
 data/TherapyBooks/   notes filed under "Therapy book"
 data/General/        everything else
 data/pending/        transient: live transcript while a session is recording
-data/chroma/         semantic search index (note + knowledge collections)
+data/chroma/         semantic search index (notes, knowledge, conversations,
+                     plus per-persona private collections)
 data/index.json      ordered record of every note (title, date, category)
 knowledge/           reference PDFs/text/video you ingest + manifest.json (see below)
 logs/                dated session logs of everything that happened
@@ -359,9 +376,9 @@ hear:
 > "Bob here, running on Haiku 4.5."
 > "Tom here, running on DeepSeek V4 Pro."
 
-**Asking "what model are you on?" reads the real setting.** The personas share
-one conversation history, so it fills up with model talk that no longer applies
-— a switch Tom made, a choice from an hour ago. Left to answer from that, the
+**Asking "what model are you on?" reads the real setting.** A conversation
+history fills up with model talk that no longer applies — a choice from an
+hour ago, an old switch. Left to answer from that, the
 agent guesses, and it has guessed wrong (claiming Opus while on Haiku, and
 DeepSeek while on Opus). Every persona now has a `get_current_model` tool and a
 hard rule to call it before saying anything about models, so the answer is a

@@ -20,6 +20,7 @@ from stores.discord_data import DiscordData
 from stores.knowledge import KnowledgeStore
 from brain.memory import ConversationMemory
 from tools import ToolContext, api_tools, dispatch
+from tools.focus_tools import focus_prompt_block
 
 log = logging.getLogger("llm")
 
@@ -117,8 +118,9 @@ class Claude:
         # Long-term memory must exist before the history loads: anything the
         # rolling window drops is staged into it rather than lost.
         self.memory = ConversationMemory()
-        # Personas ("hats") over the one shared conversation: per-agent system
-        # prompt, tools, model, and voice — but a single history. The registry
+        # Personas: per-agent system prompt, tools, model, voice — and since
+        # the memory split, each keeps its OWN history thread (self.history is
+        # always the ACTIVE persona's; switch_to swaps files). The registry
         # defaults are overlaid with any dashboard edits first.
         agents.load_agents()
         self.active = agents.DEFAULT_AGENT
@@ -146,8 +148,10 @@ class Claude:
                                 active_agent=self.active)
         self._active_since = datetime.now()
         self._write_agent_state()
-        # Conversation memory: restore the last conversation (trimmed) so the agent
-        # remembers it across restarts; saved back to disk after every turn.
+        # Conversation memory: restore the active persona's own thread (trimmed)
+        # so it remembers its last conversation across restarts; saved back to
+        # disk after every turn. The pre-isolation shared file is parked first.
+        self._migrate_legacy_history()
         self.history = self._load_history()
         # Looped while we wait on the model, so the user hears the agent thinking.
         self.idle = idle if idle is not None else _NullIdle()
@@ -316,20 +320,28 @@ class Claude:
         save_conversation_note (the caller owns the folder dialogue, exactly
         as for a foreground save).
 
-        Deliberately runs on the persona's registry-default model: a
-        mid-session set_conversation_model choice belongs to the audible
-        conversation, and a background task must never silently bill whatever
-        expensive model a hat happens to be parked on. No idle "thinking"
-        sound either — the user may be mid-sentence with the foreground
+        Runs on the model the persona is parked on (model_for): "Bob is on
+        DeepSeek" must mean Bob answers on DeepSeek everywhere, or identity
+        answers lie — a delegated Alice on her registry default said "Haiku"
+        while parked Alice was on DeepSeek Flash, seconds before the switch
+        announcement contradicted her (session_2026-08-10.log 18:22; the
+        user's call, 2026-08-10). The cost consequence is accepted and
+        visible: the delegation log line names the model, and a hat parked on
+        an expensive model bills it for background asks too. No idle
+        "thinking" sound — the user may be mid-sentence with the foreground
         persona."""
         hat = agents.AGENTS[key]
-        model = agents.registry_model(key)
+        model = self.model_for(key)
         sub_ctx = ToolContext(store=self.store, discord=self.discord,
                               kb=self.kb, memory=self.memory,
                               client=self._ctx.client,
-                              convo_model=model, active_agent=key)
+                              convo_model=model, active_agent=key,
+                              # Focus is session state, not persona state: a
+                              # delegated lookup honours the same narrowing
+                              # the foreground conversation is under.
+                              focus=self._ctx.focus)
         system = (DELEGATION_PROMPT.format(name=hat["name"], role=hat["role"])
-                  + "\n\n" + hat["persona"])
+                  + "\n\n" + hat["persona"] + focus_prompt_block(self._ctx.focus))
         # No switching tools in the background: the worker has no user to hand
         # over or re-route, and a nested delegation could chain unboundedly.
         # No order mutation either — review-before-submit means the USER hears
@@ -356,13 +368,23 @@ class Claude:
                 sub_ctx.pending_note)
 
     # --- personas ("hats") ----------------------------------------------------
+    def model_for(self, key):
+        """API model id persona `key` answers with right now: the live setting
+        when it's the active hat, its remembered mid-session choice when
+        parked, else its registry default. The ONE resolver behind converse(),
+        delegation, and the switch announcement — when these disagreed, a
+        delegated Alice said "Haiku" seconds before the switch announcement
+        said "DeepSeek V4 Flash" (session_2026-08-10.log 18:22)."""
+        if key == self.active:
+            return self._ctx.convo_model or agents.registry_model(key)
+        return self._model_overrides.get(key) or agents.registry_model(key)
+
     @property
     def active_model(self):
-        """API model id the active persona answers with — its registry default
-        unless a mid-session set_conversation_model override is in play. Same
-        expression converse() resolves each call, exposed so callers (the switch
+        """API model id the active persona answers with. Same expression
+        converse() resolves each call, exposed so callers (the switch
         announcement) can report the model without reaching into _ctx."""
-        return self._ctx.convo_model or agents.registry_model(self.active)
+        return self.model_for(self.active)
 
     @property
     def active_model_label(self):
@@ -371,23 +393,19 @@ class Claude:
 
     def switch_to(self, key):
         """Make `key` the active persona: its system prompt, tool allowlist,
-        and model apply from the next converse() on. The history carries over
-        whole — hats share memory by design — with one marker appended naming
-        who took over.
-
-        That marker is the ONLY record of who spoke what. A message carries
-        just {role, content}, and role is only ever user/assistant, so an
-        assistant turn is anonymous; nothing else about a switch reaches the
-        model either — the spoken "Tom here." announcement goes to the TTS and
-        never to history, agent_state.json is write-only telemetry, and a
-        regex-routed switch (agents.match_address) leaves no tool call behind
-        the way switch_agent does. Without this, "was that Tom or Bob?" can
-        only be guessed at, and the model guesses confidently: it claimed
-        Haiku while Cobe was on Sonnet, off nothing but stale history
-        (session_2026-07-25.log 18:08). Same failure the model-identity rules
-        in cfg.model_identity_block were written for."""
+        model, AND history thread apply from the next converse() on. The
+        departing persona's thread is saved first, then the target's own
+        thread is loaded — nothing of the old conversation crosses over.
+        Attribution is structural now (a thread has exactly one persona), so
+        the old "(Tom took over...)" marker — once the ONLY record of who
+        spoke what — has no job left and is gone. Context transfers between
+        personas only as ask_agent summaries, by design: strict isolation is
+        the feature, not a limitation."""
         if key == self.active:
             return
+        # Save the departing thread BEFORE flipping self.active — after the
+        # flip, _save_history would write it over the target's file.
+        self._save_history()
         # Preserve a mid-session "switch to opus" for the hat it was made in.
         self._model_overrides[self.active] = self._ctx.convo_model
         self.active = key
@@ -396,17 +414,7 @@ class Claude:
                                  or agents.registry_model(key))
         self._active_since = datetime.now()
         self._write_agent_state()
-        # An assistant turn, like flush_tool_events' self-notes: the system's
-        # own record of what it did, never a fabricated user utterance.
-        # sanitize() folds it into the preceding reply so roles keep
-        # alternating; a marker left leading after a trim is dropped by
-        # hist.trim, which is correct — there is no prior speaker to attribute.
-        self.history.append(
-            {"role": "assistant",
-             "content": f"({agents.AGENTS[key]['name']} took over the "
-                        f"conversation here.)"})
-        self.history = hist.sanitize(self.history)
-        self._save_history()
+        self.history = self._load_history()
         log.info("active agent -> %s (%s)", key, self._ctx.convo_model)
 
     def _write_agent_state(self):
@@ -504,23 +512,48 @@ class Claude:
         dropped = history[:len(history) - len(kept)]
         if dropped:
             try:
-                self.memory.record_dropped(dropped)
+                self.memory.record_dropped(dropped, self.active)
             except Exception as e:  # staging must never break the conversation
                 log.warning("could not stage dropped history: %s", e)
         return kept
 
+    @staticmethod
+    def _migrate_legacy_history():
+        """One-shot: park the pre-isolation shared history.json as .bak. Its
+        turns are not staged anywhere — the session logs hold the same turns
+        WITH speaker attribution, and scripts/seed_agent_memory.py mines those
+        into each persona's own archive instead.
+
+        Never overwrites an existing backup. Path.replace is an atomic
+        rename that clobbers its destination silently, and this machine
+        already had a hand-made history.json.bak from a month earlier —
+        migrating over it would have destroyed the only copy."""
+        if not cfg.HISTORY_PATH.exists():
+            return
+        target = cfg.HISTORY_PATH.with_suffix(".json.bak")
+        n = 2
+        while target.exists():
+            target = cfg.HISTORY_PATH.with_suffix(f".json.bak{n}")
+            n += 1
+        try:
+            cfg.HISTORY_PATH.replace(target)
+            log.info("shared history.json parked as %s (threads are per-agent "
+                     "now; seed_agent_memory.py mines the logs)", target.name)
+        except OSError as e:
+            log.warning("could not park legacy history.json: %s", e)
+
     def _load_history(self):
-        h = hist.load(cfg.HISTORY_PATH)
+        h = hist.load(cfg.history_path(self.active))
         if h:
             h = self._trim_and_archive(h)
-            log.info("restored %d message(s) of conversation history", len(h))
+            log.info("restored %d message(s) of %s's thread", len(h), self.active)
         return h
 
     def _save_history(self):
         # Saved untrimmed: trimming happens on load / at each turn, where the
         # dropped part is staged into long-term memory. Trimming here instead
         # would silently discard the overflow on quit.
-        hist.save(cfg.HISTORY_PATH, self.history)
+        hist.save(cfg.history_path(self.active), self.history)
 
     def converse(self, user_text: str) -> str:
         # Trim in memory too, so a long-running session doesn't grow unbounded;
@@ -544,7 +577,11 @@ class Claude:
                 system_for=lambda model: (
                     cfg.CONVO_SYSTEM_BASE + "\n\n" + hat["persona"]
                     + agents.roster_block(self.active)
-                    + cfg.model_identity_block(cfg.convo_model_label(model))),
+                    + cfg.model_identity_block(cfg.convo_model_label(model))
+                    # Focus lives in the cached prefix, so set/clear costs one
+                    # prompt-cache miss — rare and user-initiated; the model
+                    # KNOWING its retrieval is narrowed is worth more.
+                    + focus_prompt_block(self._ctx.focus)),
                 default_model=lambda: agents.registry_model(self.active),
                 max_rounds=cfg.CONVO_MAX_TOOL_ROUNDS,
             )

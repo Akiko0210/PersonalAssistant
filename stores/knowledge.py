@@ -29,6 +29,7 @@ from stores import chroma_store
 from pypdf import PdfReader
 
 import config as cfg
+from brain import agents
 from lib.atomic_io import read_json, write_json_atomic
 
 log = logging.getLogger("knowledge")
@@ -44,19 +45,41 @@ def _hms(seconds) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
+def _focus_where(focus):
+    """Chroma where= clause for a focus dict ({"strategy": ..., "underlying":
+    ...}, values scalar or list), or None when there is nothing to filter."""
+    conds = [{key: {"$in": [str(v) for v in value]}} if isinstance(value, list)
+             else {key: value}
+             for key, value in (focus or {}).items() if value]
+    if not conds:
+        return None
+    return conds[0] if len(conds) == 1 else {"$and": conds}
+
+
+def _collection_name(target: str) -> str:
+    """Chroma collection for a manifest target label: 'common' is the shared
+    collection, anything else is that agent's private one."""
+    if target == cfg.COMMON_COLLECTION:
+        return cfg.KNOWLEDGE_COLLECTION
+    return cfg.agent_knowledge_collection(target)
+
+
 class KnowledgeStore:
     def __init__(self):
         cfg.ensure_dirs()
-        self._col = None  # Chroma collection, loaded lazily on first real use
+        self._cols = {}  # collection name -> Chroma collection, loaded lazily
         self._whisper = None  # transcription model, loaded only if media shows up
 
     # --- chroma --------------------------------------------------------------
-    def _ensure_chroma(self):
-        if self._col is not None:
-            return
-        log.info("loading embedding model + chroma (knowledge, first use)...")
-        self._col = chroma_store.collection(cfg.KNOWLEDGE_COLLECTION)
-        log.info("knowledge collection ready")
+    def _col_for(self, name: str):
+        """One store, many collections (common + per-agent private): all share
+        the one client/embedding model behind chroma_store, so an extra
+        collection costs a dict entry, not a second model load."""
+        col = self._cols.get(name)
+        if col is None:
+            log.info("loading chroma collection '%s' (first use)...", name)
+            col = self._cols[name] = chroma_store.collection(name)
+        return col
 
     # --- whisper -------------------------------------------------------------
     def _ensure_whisper(self):
@@ -112,18 +135,20 @@ class KnowledgeStore:
             if start + size >= len(text):
                 break
 
-    def _embed_sections(self, path, file_hash: str, title: str, sections) -> int:
-        """Chunk and upsert a sequence of ``(text, locator)`` sections. ``locator``
-        is extra metadata pinning the text to a place in its source -- ``{"page": n}``
-        for PDFs, ``{"t": seconds}`` for transcripts, ``None`` for formats like
-        plain text that have no such structure. Returns the chunk count."""
+    def _embed_sections(self, path, file_hash: str, title: str, sections,
+                        col) -> int:
+        """Chunk and upsert a sequence of ``(text, locator)`` sections into
+        ``col``. ``locator`` is extra metadata pinning the text to a place in its
+        source -- ``{"page": n}`` for PDFs, ``{"t": seconds}`` for transcripts,
+        ``None`` for formats like plain text that have no such structure.
+        Returns the chunk count."""
         ids, docs, metas = [], [], []
         n_chunks = 0
 
         def flush():
             nonlocal ids, docs, metas
             if ids:
-                self._col.upsert(ids=ids, documents=docs, metadatas=metas)
+                col.upsert(ids=ids, documents=docs, metadatas=metas)
                 ids, docs, metas = [], [], []
 
         for text, locator in sections:
@@ -140,7 +165,7 @@ class KnowledgeStore:
         flush()
         return n_chunks
 
-    def _ingest_pdf(self, path, file_hash: str) -> dict:
+    def _ingest_pdf(self, path, file_hash: str, col) -> dict:
         """Extract, chunk, and embed one PDF (page by page). Returns a manifest entry."""
         reader = PdfReader(str(path))
         title = path.stem
@@ -158,7 +183,7 @@ class KnowledgeStore:
                 except Exception as e:
                     log.warning("%s p.%d: extract failed: %s", path.name, page_no, e)
 
-        n_chunks = self._embed_sections(path, file_hash, title, pages())
+        n_chunks = self._embed_sections(path, file_hash, title, pages(), col)
         return {
             "source": path.name,
             "title": title,
@@ -167,11 +192,12 @@ class KnowledgeStore:
             "ingested": datetime.now().isoformat(timespec="seconds"),
         }
 
-    def _ingest_text(self, path, file_hash: str) -> dict:
+    def _ingest_text(self, path, file_hash: str, col) -> dict:
         """Chunk and embed a plain-text or markdown file (no page structure)."""
         title = path.stem
         text = path.read_text(encoding="utf-8", errors="replace")
-        n_chunks = self._embed_sections(path, file_hash, title, [(text, None)])
+        n_chunks = self._embed_sections(path, file_hash, title, [(text, None)],
+                                        col)
         return {
             "source": path.name,
             "title": title,
@@ -232,7 +258,7 @@ class KnowledgeStore:
                         on_progress(name, pct)
             yield seg
 
-    def _ingest_media(self, path, file_hash: str, on_progress=None) -> dict:
+    def _ingest_media(self, path, file_hash: str, col, on_progress=None) -> dict:
         """Transcribe one audio/video file and embed the transcript with
         timestamps. This is the slow path -- minutes per hour of material -- but
         the manifest means it is paid exactly once per file."""
@@ -250,6 +276,7 @@ class KnowledgeStore:
             path, file_hash, path.stem,
             self._media_windows(
                 self._with_progress(segments, duration, path.name, on_progress)),
+            col,
         )
         entry = {
             "source": path.name,
@@ -274,12 +301,20 @@ class KnowledgeStore:
             if p.name not in known
         )
 
-    def ingest_folder(self, include_media: bool = True, on_progress=None) -> str:
+    def ingest_folder(self, include_media: bool = True, on_progress=None,
+                      target: str = cfg.COMMON_COLLECTION) -> str:
         """Scan the knowledge folder and embed anything not already ingested.
 
         Idempotent and cheap when nothing is new: files whose content hash is
         already in the manifest are skipped before Chroma is even loaded. Returns a
         short human-readable summary suitable for logging.
+
+        ``target`` routes NEW files: ``COMMON_COLLECTION`` (the default, and
+        what every existing entry implies) or an agent key, whose private
+        collection then receives the chunks. A document lives in exactly one
+        collection — a known hash is never re-embedded, and if its recorded
+        collection differs from ``target`` the summary says so honestly
+        instead of silently leaving it where it was.
 
         ``include_media`` is False on the agent's boot scan: transcribing video
         would hold startup open for minutes, so new media is reported and left
@@ -290,6 +325,8 @@ class KnowledgeStore:
         gets that it is about to spend minutes on a transcription — and then
         repeatedly with a percentage while a recording is being transcribed. The
         dashboard uses it to drive its status line."""
+        if target != cfg.COMMON_COLLECTION and target not in agents.AGENTS:
+            raise ValueError(f"unknown ingest target '{target}'")
         exts = ["*.pdf", "*.txt", "*.md"]
         if include_media:
             exts += [f"*{ext}" for ext in cfg.KB_MEDIA_EXTS]
@@ -310,7 +347,7 @@ class KnowledgeStore:
                     "add some and run this again.")
 
         known_hashes = set(manifest)
-        added, skipped, failed = [], 0, 0
+        added, skipped, failed, elsewhere = [], 0, 0, []
 
         for path in files:
             try:
@@ -321,34 +358,47 @@ class KnowledgeStore:
                 continue
             if file_hash in known_hashes:
                 skipped += 1
+                # Only a deliberate private-target run warns about files that
+                # already live elsewhere — the every-boot common scan would
+                # otherwise nag about every private file, forever.
+                if target != cfg.COMMON_COLLECTION:
+                    where = manifest[file_hash].get("collection",
+                                                    cfg.COMMON_COLLECTION)
+                    if where != target:
+                        elsewhere.append(f"'{path.name}' (in {where})")
                 continue
             # Only now (a genuinely new file) do we pay the Chroma/model cost.
             if on_progress:
                 on_progress(path.name)
-            self._ensure_chroma()
+            col = self._col_for(_collection_name(target))
             try:
                 suffix = path.suffix.lower()
                 if suffix == ".pdf":
-                    entry = self._ingest_pdf(path, file_hash)
+                    entry = self._ingest_pdf(path, file_hash, col)
                 elif suffix in cfg.KB_MEDIA_EXTS:
-                    entry = self._ingest_media(path, file_hash, on_progress)
+                    entry = self._ingest_media(path, file_hash, col, on_progress)
                 else:
-                    entry = self._ingest_text(path, file_hash)
+                    entry = self._ingest_text(path, file_hash, col)
             except Exception as e:
                 log.warning("failed to ingest %s: %s", path.name, e)
                 failed += 1
                 continue
+            entry["collection"] = target
             manifest[file_hash] = entry
             self._save_manifest(manifest)  # persist per-file so a crash keeps progress
             known_hashes.add(file_hash)
             added.append(entry)
-            log.info("ingested %d chunks from '%s' (%s)",
-                     entry["chunks"], entry["title"], path.name)
+            log.info("ingested %d chunks from '%s' (%s) into %s",
+                     entry["chunks"], entry["title"], path.name, target)
 
         note = ""
         if deferred:
             note = (f" {len(deferred)} new video/audio file(s) not transcribed yet "
                     f"({', '.join(deferred)}) — run --ingest for those.")
+        if elsewhere:
+            note += (f" Already ingested elsewhere, NOT moved to {target}: "
+                     f"{', '.join(elsewhere)} — forget a source first to "
+                     "re-target it.")
 
         if not added:
             if skipped and not failed:
@@ -372,25 +422,56 @@ class KnowledgeStore:
         return summary + note
 
     # --- retrieval (used as a Claude tool) -----------------------------------
-    def search(self, query: str, n: int = None) -> str:
+    def _allowed_targets(self, caller):
+        """Manifest labels `caller` may read: common plus its own/granted
+        private stores (agents.readable_owners is the ONE access resolver —
+        isolation is which collections get queried, not a filter)."""
+        return (cfg.COMMON_COLLECTION, *agents.readable_owners(caller))
+
+    def search(self, query: str, n: int = None, caller: str = None,
+               focus: dict = None) -> str:
         n = n or cfg.KB_SEARCH_RESULTS
+        allowed = self._allowed_targets(caller)
         manifest = self._load_manifest()
-        if not manifest:
+        # Guard on the manifest *within scope*: a private-only ingest must not
+        # make the common-only caller think there is something to find.
+        in_scope = [e for e in manifest.values()
+                    if e.get("collection", cfg.COMMON_COLLECTION) in allowed]
+        if not in_scope:
             return ("No trading knowledge has been ingested yet. Add PDFs, text, "
                     "or video files to the knowledge folder and run "
                     "python voice_agent.py --ingest.")
-        self._ensure_chroma()
-        count = self._col.count()
-        if count == 0:
-            return "No trading knowledge has been ingested yet."
-        res = self._col.query(query_texts=[query], n_results=min(n, count))
-        docs = res.get("documents", [[]])[0]
-        metas = res.get("metadatas", [[]])[0]
-        if not docs:
+        # Same embedding space in every collection, so distances are
+        # comparable: query each readable collection, merge, keep the top n.
+        # Focus is a HARD filter on private collections (we tag those entries
+        # at write time) and a SOFT one on common — reference chunks aren't
+        # reliably strategy-tagged, so an empty filtered result falls back to
+        # unfiltered rather than hiding the textbook.
+        where = _focus_where(focus)
+        hits = []
+        for label in allowed:
+            col = self._col_for(_collection_name(label))
+            count = col.count()
+            if count == 0:
+                continue
+            kwargs = {"query_texts": [query], "n_results": min(n, count)}
+            if where is not None:
+                res = col.query(**kwargs, where=where)
+                if (label == cfg.COMMON_COLLECTION
+                        and not res.get("documents", [[]])[0]):
+                    res = col.query(**kwargs)
+            else:
+                res = col.query(**kwargs)
+            docs = res.get("documents", [[]])[0]
+            metas = res.get("metadatas", [[]])[0]
+            dists = res.get("distances", [[]])[0]
+            for doc, meta, dist in zip(docs, metas, dists):
+                hits.append((dist, doc, meta or {}))
+        if not hits:
             return "I couldn't find anything about that in your trading knowledge."
+        hits.sort(key=lambda h: h[0])
         out = []
-        for doc, meta in zip(docs, metas):
-            meta = meta or {}
+        for _, doc, meta in hits[:n]:
             title = meta.get("title", meta.get("source", "source"))
             page, at = meta.get("page"), meta.get("t")
             if page:
@@ -412,10 +493,13 @@ class KnowledgeStore:
         for entry in sorted(manifest.values(), key=lambda e: e.get("ingested", "")):
             pages, duration = entry.get("pages"), entry.get("duration")
             loc = f"{pages} pages, " if pages else (f"{duration}, " if duration else "")
+            target = entry.get("collection", cfg.COMMON_COLLECTION)
+            hat = agents.AGENTS.get(target)
+            priv = f", private to {hat['name']}" if hat else ""
             lines.append(
                 f"{entry.get('title', entry.get('source'))} "
                 f"({loc}{entry.get('chunks', '?')} chunks, "
-                f"ingested {entry.get('ingested', 'unknown')})"
+                f"ingested {entry.get('ingested', 'unknown')}{priv})"
             )
         return "Ingested knowledge sources:\n" + "\n".join(lines)
 
@@ -435,9 +519,10 @@ class KnowledgeStore:
         if match is None:
             return f"No ingested source matches '{name}'."
         h, entry = match
-        self._ensure_chroma()
+        col = self._col_for(_collection_name(
+            entry.get("collection", cfg.COMMON_COLLECTION)))
         try:
-            self._col.delete(where={"source": entry["source"]})
+            col.delete(where={"source": entry["source"]})
         except Exception as e:
             log.warning("chroma delete for %s: %s", entry["source"], e)
         manifest.pop(h, None)

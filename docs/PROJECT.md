@@ -250,9 +250,17 @@ unit-tested without a microphone, speakers, or an API key.
 
 ### Personas and background delegation
 
-Alice (general), Bob (notes/memory), and Tom (trading) are per-turn
-configurations — system prompt, tool allowlist, model, TTS voice — over ONE
-shared conversation (`brain/agents.py`). Switching never fragments memory.
+Alice (general), Bob (notes/memory), and Tom (trading) each keep their OWN
+conversation with the user (`brain/agents.py`, one history file per persona)
+and their own private memory. Switching personas swaps the whole thread
+(`Claude.switch_to`): what one persona was told, another cannot see, and
+context crosses over only as an `ask_agent` summary — ask Tom what you told
+Alice and he says he doesn't have access, then offers to ask her. Isolation
+is structural (which files and Chroma collections get read), never a prompt
+rule; the registry's `reads` grants are the one deliberate exception (a
+future reviewer persona may be granted read access to a specialist's private
+stores). Knowledge splits the same way: the shared `knowledge` collection
+plus a private `knowledge_<key>` per persona, chosen per ingest.
 
 A request can move between personas two ways, and the difference is the core
 of the design:
@@ -262,8 +270,10 @@ of the design:
   4.5") because the model is the one part of a switch you can't hear.
 - **`ask_agent` — a task moves.** The other persona runs it in the background
   (`Claude.run_delegated_task`: an isolated mini tool-loop on its own thread,
-  its own message list and `ToolContext` — the shared history never sees it),
-  while the user keeps talking to the persona they were with. The result is
+  its own message list and `ToolContext` scoped to the delegate — so a
+  delegated Alice searches ALICE's memory, which is what makes "ask Alice
+  what we discussed" work), while the user keeps talking to the persona they
+  were with. The result is
   queued as a spoken **interjection**, delivered in the worker persona's own
   voice at the next utterance boundary: after the current reply finishes, or
   immediately if the agent is idle (a `wake` event ends the listening wait,
@@ -272,9 +282,9 @@ of the design:
   the one moment the background work has to reach the user. If the task
   prepared a note, the interjection runs the normal folder-choice dialogue —
   so it is the *worker* persona's voice asking "which folder?". What happened
-  is folded back into the shared history via `record_tool_event`, and a note
-  still waiting for its folder question at quit is rescued into its suggested
-  folder rather than lost.
+  is folded back into the active persona's history via `record_tool_event`,
+  and a note still waiting for its folder question at quit is rescued into
+  its suggested folder rather than lost.
 
 ---
 
@@ -291,7 +301,10 @@ def my_tool(ctx, args):
 
 - **`ctx`** is the shared `ToolContext` (the stores: `store`, `discord`, `kb`,
   `memory`; plus mutable session state: `pending_note`, `pending_switch`,
-  `pending_delegations`, `convo_model`, `active_agent`).
+  `pending_delegations`, `convo_model`, `active_agent`, `focus`). Retrieval
+  tools pass `ctx.active_agent` as the caller and the stores resolve what it
+  may read (`agents.readable_owners`) — there is no parameter through which a
+  tool can name another persona's collection.
 - **`args`** is the raw input dict from the model.
 - The return string becomes the `tool_result` fed back to the model.
 
@@ -310,17 +323,26 @@ central list or dispatch chain.
 - **discord** (`discord_tools.py`): `get_recent_discord_messages`,
   `search_discord_messages`, `get_recent_trades`.
 - **time** (`time_tools.py`): `get_current_time`.
-- **memory** (`memory_tools.py`): `search_past_conversations`.
-- **knowledge** (`knowledge_tools.py`): `search_knowledge`.
+- **memory** (`memory_tools.py`): `search_past_conversations` — the caller's
+  OWN staging, archive, and saved live window (plus the pre-isolation shared
+  archive, labelled); never another persona's.
+- **knowledge** (`knowledge_tools.py`): `search_knowledge` — common plus the
+  caller's private collection(s), merged by distance.
+- **focus** (`focus_tools.py`, Tom only): `set_focus`, `clear_focus`,
+  `get_focus` — narrow retrieval to a strategy/underlying until cleared.
+  A hard metadata filter on private collections, soft (fall back to
+  unfiltered) on common; the active focus is folded into the system prompt so
+  the model knows its retrieval is narrowed. Session state, never persisted.
 - **model** (`model_tools.py`): `get_current_model` — a live read of which
   model and provider are answering, and as which persona. It resolves the same
   expression `converse()` routes the API call with, so it cannot disagree with
   reality. It exists because the model answers "which model are you?" from
-  conversation history, and that history is **shared by every persona**: it
-  carries switches other hats made and choices that have since changed. The
-  system prompt has always stated the truth, and the model overrode it from
-  history three times in one session — "I'm Opus" while on Haiku, "DeepSeek V4
-  Flash" while on Opus 5 (session_2026-07-31.log 11:32 / 11:48 / 12:23).
+  conversation history, which carries model choices that have since changed.
+  The system prompt has always stated the truth, and the model overrode it
+  from history three times in one session — "I'm Opus" while on Haiku,
+  "DeepSeek V4 Flash" while on Opus 5 (session_2026-07-31.log 11:32 / 11:48 /
+  12:23; histories were still shared across personas then, but a persona's
+  own stale turns reproduce the failure fine).
   `config.model_identity_block` therefore makes it a hard rule: identity
   questions are answered by this tool or not at all. The tool result lands at
   the *end* of the context, where it outweighs old turns, and leaves an
@@ -330,10 +352,14 @@ central list or dispatch chain.
   `DEEPSEEK_API_KEY` is set) DeepSeek V4 Flash / Pro by voice. DeepSeek runs
   through its Anthropic-compatible endpoint via `Claude.client_for`, so every
   model shares one code path; `config.model_provider` is the routing rule.
-  A mid-session choice is remembered **per persona** (`Claude._model_overrides`),
-  and `Claude.active_model` resolves what the current hat will actually answer
-  with — read by the switch announcement, which speaks it ("Bob here, running on
-  Haiku 4.5") because the model is the one part of a switch you can't hear.
+  A mid-session choice is remembered **per persona** (`Claude._model_overrides`)
+  and follows that persona everywhere: `Claude.model_for(key)` is the one
+  resolver behind `converse()`, background delegation, and the switch
+  announcement ("Bob here, running on Haiku 4.5" — spoken because the model is
+  the one part of a switch you can't hear). Delegation deliberately shares it:
+  when it ran on the registry default instead, a delegated Alice answered
+  "Haiku" seconds before the switch announcement said "DeepSeek V4 Flash"
+  (session_2026-08-10.log 18:22).
 - **project** (`project_tools.py`): `describe_project` — returns this document so
   the agent can answer questions about its own design.
 - **agents** (`agent_tools.py`): `switch_agent` — hand the user over to another
@@ -350,8 +376,9 @@ central list or dispatch chain.
 
 ## 6. Conversation history & the invariant that once bricked the app
 
-The live conversation is persisted to `data/history.json` after every turn and
-restored on the next boot. The Anthropic API enforces invariants a saved history
+Each persona's live conversation is persisted to `data/history_<key>.json`
+after every turn and restored on the next boot (the pre-isolation shared
+`history.json` is parked as `.bak` by a one-time migration). The Anthropic API enforces invariants a saved history
 can silently violate: every `tool_use` must be answered by a `tool_result` in the
 next turn, and roles must alternate. A turn abandoned mid-tool-loop (e.g. by the
 barge-in / listen-while-thinking path) could persist an assistant `tool_use` with
@@ -368,15 +395,25 @@ taking down the whole session.
 
 ---
 
-## 7. Memory: three layers
+## 7. Memory: three layers, each per persona
 
-1. **Live window** — recent turns in `data/history.json` (`HISTORY_MAX_MESSAGES`).
-2. **Long-term memory** — text that ages out of the window is staged to
-   `data/memory_pending.json`, then consolidated at boot into dense summaries
-   embedded in the Chroma `conversations` collection. `search_past_conversations`
-   retrieves them ("what did we talk about last week?").
+1. **Live window** — each persona's recent turns in `data/history_<key>.json`
+   (`HISTORY_MAX_MESSAGES` each).
+2. **Long-term memory** — text that ages out of a window is staged to
+   `data/memory_pending.json` tagged with its persona, then consolidated at
+   boot (one summary call per persona with enough material) into that
+   persona's Chroma collection `conversations_<key>`.
+   `search_past_conversations` reads the caller's own staging, archive, and
+   saved live window — plus the pre-isolation `conversations` collection,
+   whose mixed history is readable by all and labelled as legacy.
+   `scripts/seed_agent_memory.py` backfills the per-persona archives from the
+   session logs (every turn is attributable: boots start on the default
+   agent, switches are logged).
 3. **Notes** — deliberate, saved artifacts (recorded sessions or
-   conversation-derived), filed in category folders and semantically searchable.
+   conversation-derived), filed in category folders and semantically
+   searchable. Notes and the common `knowledge` collection are the SHARED
+   write paths: information meant for every persona belongs there, not in a
+   private thread.
 
 ---
 
@@ -385,11 +422,12 @@ taking down the whole session.
 ```
 data/<Folder>/       notes: <id>.md (summary + frontmatter) + <id>.transcript.md
 data/pending/        transient live transcript while recording
-data/chroma/         Chroma index: notes, knowledge, conversations collections
+data/chroma/         Chroma index: notes, knowledge, conversations, plus
+                     per-agent knowledge_<key> / conversations_<key>
 data/index.json      ordered record of every note (title, date, category)
 data/categories.json voice-created/renamed folders overlaid on the seed defaults
-data/history.json    live conversation window (sanitized on every save)
-data/memory_pending.json  staged text awaiting consolidation
+data/history_<key>.json  each persona's live window (sanitized on every save)
+data/memory_pending.json  staged text awaiting consolidation, tagged by persona
 knowledge/           reference PDFs/text/video you ingest + manifest.json
 logs/                dated session logs
 ```

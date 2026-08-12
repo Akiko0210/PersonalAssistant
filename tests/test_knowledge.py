@@ -14,12 +14,46 @@ from types import SimpleNamespace
 from unittest import mock
 
 import config as cfg
-from stores.knowledge import KnowledgeStore, _hms
+from brain import agents
+from stores.knowledge import KnowledgeStore, _collection_name, _hms
 
 
 def seg(text, start):
     """A stand-in for a faster-whisper segment (only .text/.start are read)."""
     return SimpleNamespace(text=text, start=start)
+
+
+class FakeCol:
+    """A Chroma collection double: records upserts, serves canned hits. Keeps
+    these tests loading neither Chroma nor the embedding model."""
+
+    def __init__(self, hits=()):
+        self.upserts = []                 # (ids, documents, metadatas)
+        self.hits = list(hits)            # (doc, meta, distance)
+        self.queries = 0
+
+    def upsert(self, ids, documents, metadatas):
+        self.upserts.append((list(ids), list(documents), list(metadatas)))
+
+    def count(self):
+        return len(self.hits) or sum(len(u[0]) for u in self.upserts)
+
+    def query(self, query_texts, n_results):
+        self.queries += 1
+        rows = self.hits[:n_results]
+        return {"documents": [[d for d, m, dist in rows]],
+                "metadatas": [[m for d, m, dist in rows]],
+                "distances": [[dist for d, m, dist in rows]]}
+
+
+def fake_store(cols):
+    """A KnowledgeStore whose _col_for serves from `cols` (name -> FakeCol),
+    creating on demand so tests can also assert which names were touched."""
+    store = KnowledgeStore.__new__(KnowledgeStore)
+    store._whisper = None
+    store._cols = {}
+    store._col_for = lambda name: cols.setdefault(name, FakeCol())
+    return store
 
 
 class TestHms(unittest.TestCase):
@@ -199,14 +233,9 @@ class TestCitations(unittest.TestCase):
     video, so the user can jump to the moment."""
 
     def search_over(self, metas):
-        store = KnowledgeStore.__new__(KnowledgeStore)
-        store._whisper = None
-        store._col = mock.Mock()
-        store._col.count.return_value = len(metas)
-        store._col.query.return_value = {
-            "documents": [["some passage" for _ in metas]],
-            "metadatas": [metas],
-        }
+        cols = {cfg.KNOWLEDGE_COLLECTION: FakeCol(
+            [("some passage", meta, 0.1) for meta in metas])}
+        store = fake_store(cols)
         with mock.patch.object(KnowledgeStore, "_load_manifest",
                                return_value={"h": {"source": "x"}}):
             return store.search("anything")
@@ -227,6 +256,154 @@ class TestCitations(unittest.TestCase):
     def test_plain_text_hit_cites_the_title_alone(self):
         out = self.search_over([{"title": "Scratch Notes"}])
         self.assertIn("[Scratch Notes]", out)
+
+
+class TestIngestTargeting(unittest.TestCase):
+    """A targeted ingest routes NEW files into that agent's private collection
+    and records the target in the manifest; a known hash is never re-embedded
+    under a second target (one document, one collection)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        for name, value in (("KNOWLEDGE_DIR", self.dir),
+                            ("KNOWLEDGE_MANIFEST", self.dir / "manifest.json")):
+            p = mock.patch.object(cfg, name, value)
+            p.start()
+            self.addCleanup(p.stop)
+        self.cols = {}
+        self.store = fake_store(self.cols)
+
+    def ingest(self, target=cfg.COMMON_COLLECTION):
+        return self.store.ingest_folder(include_media=False, target=target)
+
+    def test_private_target_routes_to_the_agents_collection(self):
+        (self.dir / "plan.txt").write_text("the trading plan", encoding="utf-8")
+        self.ingest(target="tom")
+        self.assertIn(cfg.agent_knowledge_collection("tom"), self.cols)
+        self.assertNotIn(cfg.KNOWLEDGE_COLLECTION, self.cols)
+        manifest = self.store._load_manifest()
+        (entry,) = manifest.values()
+        self.assertEqual(entry["collection"], "tom")
+
+    def test_default_target_is_common_and_untagged_entries_stay_valid(self):
+        (self.dir / "notes.txt").write_text("shared text", encoding="utf-8")
+        self.ingest()
+        (entry,) = self.store._load_manifest().values()
+        self.assertEqual(entry["collection"], cfg.COMMON_COLLECTION)
+        self.assertIn(cfg.KNOWLEDGE_COLLECTION, self.cols)
+
+    def test_known_hash_is_not_re_embedded_under_a_new_target(self):
+        (self.dir / "plan.txt").write_text("the trading plan", encoding="utf-8")
+        self.ingest()                       # lands in common
+        summary = self.ingest(target="tom")  # same bytes, new target
+        self.assertNotIn(cfg.agent_knowledge_collection("tom"), self.cols)
+        self.assertIn("NOT moved", summary)  # honest refusal, not silence
+        self.assertIn("forget", summary)
+
+    def test_boot_scan_does_not_nag_about_private_files(self):
+        (self.dir / "plan.txt").write_text("private plan", encoding="utf-8")
+        self.ingest(target="tom")
+        summary = self.ingest()  # the every-boot common scan
+        self.assertNotIn("NOT moved", summary)
+
+    def test_unknown_target_is_refused_before_any_work(self):
+        with self.assertRaises(ValueError):
+            self.ingest(target="mallory")
+
+
+class TestScopedSearch(unittest.TestCase):
+    """Isolation is which collections get queried: a caller reaches common plus
+    its own (and granted) private collections, and nothing else."""
+
+    def setUp(self):
+        self.cols = {}
+        self.store = fake_store(self.cols)
+
+    def manifest(self, *entries):
+        return mock.patch.object(
+            KnowledgeStore, "_load_manifest",
+            return_value={f"h{i}": e for i, e in enumerate(entries)})
+
+    def test_caller_reaches_common_plus_its_own_private(self):
+        self.cols[cfg.KNOWLEDGE_COLLECTION] = FakeCol(
+            [("common passage", {"title": "Book"}, 0.5)])
+        self.cols[cfg.agent_knowledge_collection("tom")] = FakeCol(
+            [("private passage", {"title": "Tom Plan"}, 0.1)])
+        with self.manifest({"source": "a"}, {"source": "b", "collection": "tom"}):
+            out = self.store.search("anything", caller="tom")
+        self.assertIn("Tom Plan", out)
+        self.assertIn("Book", out)
+
+    def test_other_agents_never_touch_a_private_collection(self):
+        self.cols[cfg.KNOWLEDGE_COLLECTION] = FakeCol(
+            [("common passage", {"title": "Book"}, 0.5)])
+        private = self.cols[cfg.agent_knowledge_collection("tom")] = FakeCol(
+            [("private passage", {"title": "Tom Plan"}, 0.1)])
+        with self.manifest({"source": "a"}, {"source": "b", "collection": "tom"}):
+            out = self.store.search("anything", caller="alice")
+        self.assertNotIn("Tom Plan", out)
+        # Structural: alice's search never even queried tom's collection.
+        self.assertEqual(private.queries, 0)
+
+    def test_a_reads_grant_opens_exactly_that_collection(self):
+        self.cols[cfg.agent_knowledge_collection("tom")] = FakeCol(
+            [("private passage", {"title": "Tom Plan"}, 0.1)])
+        original = agents.AGENTS["alice"]["reads"]
+        agents.AGENTS["alice"]["reads"] = ("tom",)
+        self.addCleanup(lambda: agents.AGENTS["alice"].__setitem__(
+            "reads", original))
+        with self.manifest({"source": "b", "collection": "tom"}):
+            out = self.store.search("anything", caller="alice")
+        self.assertIn("Tom Plan", out)
+
+    def test_results_merge_by_distance_across_collections(self):
+        self.cols[cfg.KNOWLEDGE_COLLECTION] = FakeCol(
+            [("far common", {"title": "Far"}, 0.9)])
+        self.cols[cfg.agent_knowledge_collection("tom")] = FakeCol(
+            [("near private", {"title": "Near"}, 0.1)])
+        with self.manifest({"source": "a"}, {"source": "b", "collection": "tom"}), \
+                mock.patch.object(cfg, "KB_SEARCH_RESULTS", 1):
+            out = self.store.search("anything", caller="tom")
+        self.assertIn("Near", out)
+        self.assertNotIn("Far", out)
+
+    def test_manifest_guard_is_scoped_to_the_caller(self):
+        # Only a Tom-private source exists: Tom searches, Alice (and a
+        # caller-less probe) get the honest nothing-ingested message.
+        self.cols[cfg.agent_knowledge_collection("tom")] = FakeCol(
+            [("private passage", {"title": "Tom Plan"}, 0.1)])
+        with self.manifest({"source": "b", "collection": "tom"}):
+            self.assertIn("Tom Plan", self.store.search("x", caller="tom"))
+            self.assertIn("No trading knowledge",
+                          self.store.search("x", caller="alice"))
+            self.assertIn("No trading knowledge", self.store.search("x"))
+
+    def test_forget_deletes_from_the_entrys_own_collection(self):
+        deleted = []
+        col = FakeCol()
+        col.delete = lambda where: deleted.append(where)
+        self.cols[cfg.agent_knowledge_collection("tom")] = col
+        manifest = {"h1": {"source": "plan.txt", "title": "Plan",
+                           "collection": "tom"}}
+        with mock.patch.object(KnowledgeStore, "_load_manifest",
+                               return_value=manifest), \
+                mock.patch.object(KnowledgeStore, "_save_manifest"):
+            self.store.forget("plan")
+        self.assertEqual(deleted, [{"source": "plan.txt"}])
+        self.assertEqual(set(self.cols),
+                         {cfg.agent_knowledge_collection("tom")})
+
+
+class TestCollectionName(unittest.TestCase):
+    def test_common_maps_to_the_shared_collection(self):
+        self.assertEqual(_collection_name(cfg.COMMON_COLLECTION),
+                         cfg.KNOWLEDGE_COLLECTION)
+
+    def test_agent_key_maps_to_its_private_collection(self):
+        self.assertEqual(_collection_name("tom"),
+                         cfg.agent_knowledge_collection("tom"))
 
 
 if __name__ == "__main__":
