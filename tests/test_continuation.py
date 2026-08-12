@@ -11,66 +11,14 @@ import logging
 import threading
 import unittest
 
-import numpy as np
-
 from voice_agent import Agent
-
-
-def _audio(n=4):
-    return np.ones(n, dtype=np.int16)
-
-
-class FakeAudio:
-    def __init__(self, poll_frames=None, utterances=None):
-        self._poll = list(poll_frames or [])
-        self._utterances = list(utterances or [])
-        self.pushed = []
-
-    def poll_speech(self, timeout=0.05, return_frame=False):
-        return self._poll.pop(0) if self._poll else None
-
-    def pushback(self, frames):
-        self.pushed.append(list(frames))
-
-    def collect_utterance(self, interrupt=None, endpoint_ms=None):
-        return self._utterances.pop(0) if self._utterances else None
-
-
-class FakeSTT:
-    def __init__(self, texts):
-        self._texts = list(texts)
-
-    def transcribe(self, audio):
-        return self._texts.pop(0) if self._texts else ""
-
-
-class FakeLLM:
-    def __init__(self):
-        self.calls = []
-        self.unanswered = []
-
-    def converse(self, text):
-        self.calls.append(text)
-        return f"reply::{text}"
-
-    def record_unanswered(self, text):
-        self.unanswered.append(text)
+from tests.agent_fixtures import FakeAudio, audio_chunk as _audio
+from tests.agent_fixtures import make_agent as _make_agent
 
 
 def make_agent(*, await_seq=None, stt=None, utterances=None, poll_frames=None):
-    agent = Agent.__new__(Agent)
-    agent.log = logging.getLogger("test")
-    agent.interrupt = threading.Event()
-    # Only note-taking and quit abandon a turn; mute stops the microphone and
-    # leaves the question to be answered (see test_mute_speech).
-    agent.silence = threading.Event()
-    agent.audio = FakeAudio(poll_frames=poll_frames, utterances=utterances)
-    agent.stt = FakeSTT(stt or [])
-    agent.llm = FakeLLM()
-    if await_seq is not None:
-        answers = iter(await_seq)
-        agent._await_continuation = lambda settle: next(answers)
-    return agent
+    return _make_agent(heard=stt or [], utterances=utterances,
+                       poll_frames=poll_frames, await_seq=await_seq)
 
 
 class TestOneConversePerTurn(unittest.TestCase):
@@ -142,11 +90,7 @@ class TestOneConversePerTurn(unittest.TestCase):
 
 class TestAwaitContinuation(unittest.TestCase):
     def make(self, poll_frames=None):
-        agent = Agent.__new__(Agent)
-        agent.log = logging.getLogger("test")
-        agent.interrupt = threading.Event()
-        agent.audio = FakeAudio(poll_frames=poll_frames)
-        return agent
+        return _make_agent(poll_frames=poll_frames)
 
     def test_returns_true_on_qualifying_speech(self):
         # pad ring holds 10 frames; >6 must qualify (is_speech + loud) to trigger

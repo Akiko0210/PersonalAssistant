@@ -17,6 +17,34 @@ async function api(path) {
   return r.json();
 }
 
+/* The one POST helper — controls, saves, and the trading page all use it.
+   The parsed body rides on the thrown Error (err.body) so callers can render
+   field-error maps ({errors: {...}}), not just the flat message. */
+async function apiPost(path, body) {
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    const err = new Error(data.error || r.statusText);
+    err.body = data;
+    throw err;
+  }
+  return data;
+}
+
+/* "field: message; field: message" from a thrown apiPost error, for the
+   save buttons; falls back to the plain message. */
+function errorList(e) {
+  const errs = e.body && e.body.errors;
+  if (errs && Object.keys(errs).length) {
+    return Object.entries(errs).map(([k, v]) => `${k}: ${v}`).join("; ");
+  }
+  return e.message;
+}
+
 function fmtDate(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -87,10 +115,90 @@ async function pollStatus() {
 setInterval(pollStatus, 5000);
 pollStatus();
 
+/* ---------- Live controls (polled) ----------
+   The agent's state, once every 2 s: it drives the sidebar mute button and —
+   when the Conversation page is open — its composer. A control POST returns
+   the resulting state synchronously, so there's no optimistic UI; the poll
+   exists to follow changes made elsewhere (the headset button). The mute
+   state is spelled out in words, the button goes red, and the tab title
+   carries it, because forgetting the microphone is muted is the exact
+   failure this is here to prevent. */
+const muteBtn = $("#mute-btn");
+let micState = null;   // last /api/control response
+let muteNote = "";     // why the last mute request didn't land
+
+function setMute(stateText, actionText, { on = false, live = false } = {}) {
+  muteBtn.classList.toggle("muted", on);
+  muteBtn.disabled = !live;
+  muteBtn.setAttribute("aria-pressed", String(on));
+  muteBtn.setAttribute("aria-label", `${stateText}. ${actionText}`);
+  $(".mute-state", muteBtn).textContent = stateText;
+  $(".mute-action", muteBtn).textContent = actionText;
+  document.title = on ? "🔇 MUTED — Voice Agent Dashboard"
+                      : "Voice Agent Dashboard";
+}
+
+function renderMute() {
+  if (!micState || typeof micState.muted !== "boolean") {
+    return setMute("Microphone", micState && !micState.agent_running
+                   ? "agent not running" : "state unknown");
+  }
+  // One short line only — a second clause wraps in the narrow sidebar.
+  setMute(micState.muted ? "🔇 MUTED" : "🎙 Mic on",
+          muteNote ? `${muteNote} · tap to retry`
+                   : (micState.muted ? "Tap to unmute" : "Tap to mute"),
+          { on: micState.muted, live: true });
+}
+
+async function pollControl() {
+  try { micState = await api("/api/control"); }
+  catch { micState = null; }
+  renderMute();
+  renderComposer();
+}
+
+/* The Conversation page's composer, kept in step by the same poll. A no-op
+   whenever that page isn't open, so the view owns its own markup and this
+   never has to know which page is showing. */
+function renderComposer() {
+  const input = $("#chat-text"), btn = $("#chat-send");
+  if (!input) return;
+  // A real `muted` boolean means the agent is in THIS process and we can call
+  // it. agent_running alone isn't enough: on the standalone dashboard it's
+  // true whenever an agent lives in its own process, which we cannot reach —
+  // the same distinction the server's two 409s draw.
+  const live = !!(micState && typeof micState.muted === "boolean");
+  input.disabled = btn.disabled = !live;
+  // The availability goes in the placeholder, not the status line — that line
+  // belongs to the last send, and the two would fight over it.
+  input.placeholder =
+    live ? "Type to the agent…"
+      : micState && micState.agent_running
+        ? "Chat lives on the agent's own dashboard — open port 8765"
+        : "The agent isn't running — start it to chat";
+}
+setInterval(pollControl, 2000);
+pollControl();
+
+muteBtn.addEventListener("click", async () => {
+  if (!micState || typeof micState.muted !== "boolean") return;
+  try {
+    const body = await apiPost("/api/control/mute", { muted: !micState.muted });
+    micState = { ...micState, muted: body.muted, mode: body.mode };
+    muteNote = "";
+  } catch (e) {
+    muteNote = e.message;
+  }
+  renderMute();
+});
+
 /* ---------- Router ---------- */
 const views = {};
+function currentView() {
+  return (location.hash.replace(/^#\//, "") || "overview").split("/")[0];
+}
 function route() {
-  const name = (location.hash.replace(/^#\//, "") || "overview").split("/")[0];
+  const name = currentView();
   document.querySelectorAll(".nav-links a").forEach(a =>
     a.classList.toggle("active", a.dataset.view === name));
   (views[name] || views.overview)();
@@ -225,7 +333,13 @@ views.agents = async function () {
         <div class="ac-grid">
           <label class="ac-field"><span>Role (one line)</span>
             <input class="f-text" data-agent-field="role" value="${esc(agentVal(a, "role"))}"></label>
-          <label class="ac-field"><span>Model</span>
+          <label class="ac-field"><span>Model${
+            // The dropdown is the configured DEFAULT. A voice "switch to
+            // DeepSeek" changes only the running conversation, so say so
+            // rather than letting the default read as current fact.
+            data.agent_running && a.live_differs
+              ? ` <span class="live-model">now on ${esc(a.live_model_label)}</span>`
+              : ""}</span>
             <select class="f-select" data-agent-field="model">
               ${data.models.map(m => `<option value="${esc(m.value)}"
                 ${m.value === agentVal(a, "model") ? "selected" : ""}>${esc(m.label)}</option>`).join("")}
@@ -313,30 +427,17 @@ views.agents = async function () {
     const msg = $("#agents-msg");
     msg.className = "save-msg"; msg.textContent = "Saving…";
     try {
-      const r = await fetch("/api/agents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(pending),
-      });
-      const body = await r.json();
-      if (body.ok) {
-        msg.className = "save-msg ok";
-        msg.textContent = "Saved. " + (data.agent_running
-          ? "Restart the agent to apply." : "Applied on next agent start.");
-        for (const k of Object.keys(pending)) delete pending[k];
-        data = await api("/api/agents");
-        render();
-        $("#agents-msg").className = "save-msg ok";
-        $("#agents-msg").textContent = "Saved. " + (data.agent_running
-          ? "Restart the agent to apply." : "Applied on next agent start.");
-      } else {
-        msg.className = "save-msg err";
-        msg.textContent = "Not saved: " + Object.entries(body.errors || {})
-          .map(([k, v]) => `${k}: ${v}`).join("; ");
-      }
+      await apiPost("/api/agents", pending);
+      for (const k of Object.keys(pending)) delete pending[k];
+      data = await api("/api/agents");
+      render();  // replaces the DOM — set the message on the fresh node, once
+      const fresh = $("#agents-msg");
+      fresh.className = "save-msg ok";
+      fresh.textContent = "Saved. " + (data.agent_running
+        ? "Restart the agent to apply." : "Applied on next agent start.");
     } catch (e) {
       msg.className = "save-msg err";
-      msg.textContent = "Save failed: " + e.message;
+      msg.textContent = "Not saved: " + errorList(e);
     }
   }
 
@@ -612,26 +713,14 @@ views.config = async function () {
     const msg = $("#save-msg");
     msg.className = "save-msg"; msg.textContent = "Saving…";
     try {
-      const r = await fetch("/api/config", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(pending),
-      });
-      const body = await r.json();
-      if (body.ok) {
-        msg.className = "save-msg ok";
-        msg.textContent = `Saved ${body.saved.length} override(s). ` +
-          (data.agent_running ? "Restart the agent to apply." : "Applied on next agent start.");
-        const banner = $("#cfg-banner");
-        banner.classList.add("saved");
-      } else {
-        msg.className = "save-msg err";
-        msg.textContent = "Not saved: " + Object.entries(body.errors || {})
-          .map(([k, v]) => `${k}: ${v}`).join("; ");
-      }
+      const body = await apiPost("/api/config", pending);
+      msg.className = "save-msg ok";
+      msg.textContent = `Saved ${body.saved.length} override(s). ` +
+        (data.agent_running ? "Restart the agent to apply." : "Applied on next agent start.");
+      $("#cfg-banner").classList.add("saved");
     } catch (e) {
       msg.className = "save-msg err";
-      msg.textContent = "Save failed: " + e.message;
+      msg.textContent = "Not saved: " + errorList(e);
     }
   }
 
@@ -639,10 +728,14 @@ views.config = async function () {
 };
 
 /* ================= Conversation ================= */
+let convoAgent = null;  // persona whose thread is shown; null = follow active
+
 views.conversation = async function () {
   main.innerHTML = header("Conversation", "The live history window — what the agent remembers verbatim right now.");
   let data;
-  try { data = await api("/api/history"); }
+  try {
+    data = await api("/api/history" + (convoAgent ? `?agent=${convoAgent}` : ""));
+  }
   catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
 
   function blockHtml(b, i) {
@@ -669,16 +762,82 @@ views.conversation = async function () {
       <div class="m-role">${m.role === "user" ? "You" : "Agent"}</div>${content}</div>`;
   }).join("");
 
+  /* Threads are per-persona: one stacked row of big buttons picks whose
+     conversation is on screen. */
+  const agentBtns = (data.agents || []).map(a => `
+    <button class="agent-tab ${a.key === data.agent ? "sel" : ""}"
+            data-agent="${esc(a.key)}">${esc(a.name)}</button>`).join("");
+
   main.innerHTML = header("Conversation",
-    `The live history window — ${data.total} message(s) persisted, restored on next boot.`) +
-    `<div class="chat">${msgs || '<div class="card empty">No conversation history yet</div>'}</div>`;
+    `${esc((data.agents || []).find(a => a.key === data.agent)?.name || data.agent)}'s thread — ${data.total} message(s) persisted, restored on next boot.`) +
+    `<div class="agent-tabs">${agentBtns}</div>
+     <div class="chat">${msgs || '<div class="card empty">No conversation history yet</div>'}</div>
+     <form class="composer" id="chat-form">
+       <input type="text" id="chat-text" aria-label="Message to the agent"
+              placeholder="Type to the agent…" autocomplete="off" disabled>
+       <button class="send-btn" id="chat-send" type="submit" disabled>Send</button>
+       <div class="send-note" id="chat-note" role="status"></div>
+     </form>`;
 
   main.querySelectorAll(".tool-chip").forEach(b => b.onclick = () => {
     const d = main.querySelector(`[data-detail="${b.dataset.tool}"]`);
     if (d) d.hidden = !d.hidden;
   });
+
+  main.querySelectorAll(".agent-tab").forEach(b => b.onclick = () => {
+    convoAgent = b.dataset.agent;
+    views.conversation();
+  });
+
+  const note = $("#chat-note");
+  $("#chat-form").addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const input = $("#chat-text"), text = input.value.trim();
+    if (!text || $("#chat-send").disabled) return;
+    try {
+      await apiPost("/api/control/send_message", { text });
+      input.value = "";
+      note.className = "send-note ok";
+      note.textContent = "Sent — the agent answers aloud.";
+      // Show it in the transcript straight away. It isn't in history yet (the
+      // agent writes that only once it has answered), so it's marked pending
+      // until the real exchange arrives and replaces it.
+      $(".chat").insertAdjacentHTML("beforeend",
+        `<div class="msg user pending"><div class="m-role">You · sending</div>
+         <div>${esc(text)}</div></div>`);
+      window.scrollTo(0, document.body.scrollHeight);
+      awaitReply(historySig(data), note);
+    } catch (e) {
+      note.className = "send-note err";
+      note.textContent = e.message;
+    }
+  });
+
+  renderComposer();  // don't wait up to 2 s for the poll to enable it
   window.scrollTo(0, document.body.scrollHeight);
 };
+
+/* Compare CONTENT, not the count: history is trimmed to HISTORY_MAX_MESSAGES,
+   so once it is at the cap a new turn pushes old messages off the front and
+   the total barely moves — watching `total` meant a typed message never
+   appeared until a manual reload. */
+const historySig = (h) => JSON.stringify(h.messages);
+
+/* History is written only once the agent has finished answering, so a typed
+   message and its reply land together, seconds later. Watch for it rather than
+   making the user reload; after ~40 s say so plainly instead of leaving the
+   pending bubble unexplained (a note dialogue can hold the floor far longer). */
+async function awaitReply(before, note) {
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    if (currentView() !== "conversation") return;  // user navigated away
+    const h = await api("/api/history" + (convoAgent ? `?agent=${convoAgent}` : ""))
+      .catch(() => null);
+    if (h && historySig(h) !== before) return views.conversation();
+  }
+  note.className = "send-note";
+  note.textContent = "Still no reply — the agent may be mid-note. Reload to check.";
+}
 
 /* ================= Memory ================= */
 views.memory = async function () {
@@ -690,7 +849,8 @@ views.memory = async function () {
   const batches = data.pending.map(p => `
     <div class="card">
       <h2>${esc(fmtDate(p.ts))}</h2>
-      <div class="card-sub">${(p.lines || []).length} line(s) staged</div>
+      <div class="card-sub">${(p.lines || []).length} line(s) staged · ${
+        p.agent ? `${esc(p.agent)}'s memory` : "shared (pre-isolation)"}</div>
       <div class="mono-list">${(p.lines || []).map(l => `<div>${esc(l)}</div>`).join("")}</div>
     </div>`).join("");
 
@@ -709,6 +869,7 @@ views.knowledge = async function () {
 
   let jobTimer = null;
   let confirming = null;   // name of the pending file asking "remove?"
+  let target = "common";   // where the next ingest routes new files
 
   /* Laid out for a narrow visual field: one column, big targets, each control
      next to the thing it acts on. Steps read top to bottom — add, then the
@@ -742,13 +903,17 @@ views.knowledge = async function () {
         </div>
       </div>`).join("");
 
+    const targetName = key =>
+      (data.targets || []).find(t => t.key === key)?.name || key;
     const docRows = data.docs.map(d => {
       const extent = d.pages ? `${d.pages} pages` : (d.duration ? d.duration : "text");
+      const where = (d.collection && d.collection !== "common")
+        ? ` · ${esc(targetName(d.collection))}` : "";
       return `<div class="kb-row done">
         <div class="kb-row-main">
           <div class="kb-row-name">${esc(d.title)}</div>
           <div class="kb-row-meta">${esc(extent)} · ${d.chunks} chunk${d.chunks === 1 ? "" : "s"}
-            · added ${esc(fmtDate(d.ingested))}</div>
+            · added ${esc(fmtDate(d.ingested))}${where}</div>
         </div>
       </div>`;
     }).join("");
@@ -781,6 +946,16 @@ views.knowledge = async function () {
           <h2><span class="kb-num">2</span> Waiting to add${pending.length ? ` (${pending.length})` : ""}</h2>
           ${pending.length ? pendingRows
             : '<div class="kb-none">Nothing waiting. Upload a file above.</div>'}
+
+          <div class="kb-targets" role="radiogroup" aria-label="Ingest into">
+            <div class="kb-hint">Ingest into:</div>
+            ${(data.targets || []).map(t => `
+              <label class="kb-target ${t.key === target ? "sel" : ""}">
+                <input type="radio" name="kb-target" value="${esc(t.key)}"
+                       ${t.key === target ? "checked" : ""}
+                       ${running ? "disabled" : ""}>
+                ${esc(t.name)}</label>`).join("")}
+          </div>
 
           <button class="btn-big ${running ? "busy" : ""}" id="kb-ingest"
                   ${running || blocked ? "disabled" : ""}>
@@ -821,6 +996,10 @@ views.knowledge = async function () {
 
     const btn = $("#kb-ingest");
     if (btn && !btn.disabled) btn.onclick = ingest;
+
+    main.querySelectorAll('input[name="kb-target"]').forEach(r => {
+      r.onchange = () => { target = r.value; render(); };
+    });
 
     // Removing is two taps: ask, then confirm. A file can represent a long
     // upload, and there is no undo once it's off disk.
@@ -928,7 +1107,11 @@ views.knowledge = async function () {
     msg.className = "kb-status";
     msg.textContent = "Starting…";
     try {
-      const r = await fetch("/api/knowledge/ingest", { method: "POST" });
+      const r = await fetch("/api/knowledge/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target }),
+      });
       const body = await r.json();
       if (!body.ok) {
         msg.className = "kb-status err";
@@ -1042,6 +1225,449 @@ views.logs = async function () {
     open(b.dataset.log);
   });
   if (data.files.length) open(data.files[0].name);
+};
+
+/* ================= Trading ================= */
+/* Real trading via the tastytrade API (see TRADING_PLAN.md). The page gets
+   real-time bid/ask itself: it fetches a DXLink token from the local API and
+   opens the websocket directly (same pattern as Tasty-Web), so quotes stream
+   straight into the browser with no server-side relay. */
+
+const TR = {
+  status: null, chain: null, ticket: null, dryRun: null,
+  ws: null, wsReady: false, wsSubs: new Set(), quotes: {}, wsErr: "",
+};
+
+function trStream() {
+  if (TR.ws) return;
+  api("/api/trading/quote-token").then(t => {
+    if (!t.url || !t.token) throw new Error("no token");
+    const ws = new WebSocket(t.url);
+    TR.ws = ws;
+    let authed = false;
+    ws.onopen = () => ws.send(JSON.stringify({
+      type: "SETUP", channel: 0, version: "0.1",
+      keepaliveTimeout: 60, acceptKeepaliveTimeout: 60 }));
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data);
+      if (m.type === "SETUP" && !authed) {
+        ws.send(JSON.stringify({ type: "AUTH", channel: 0, token: t.token }));
+      } else if (m.type === "AUTH_STATE" && m.state === "AUTHORIZED") {
+        authed = true;
+        ws.send(JSON.stringify({ type: "CHANNEL_REQUEST", channel: 1,
+          service: "FEED", parameters: { contract: "AUTO" } }));
+      } else if (m.type === "CHANNEL_OPENED" && m.channel === 1) {
+        ws.send(JSON.stringify({ type: "FEED_SETUP", channel: 1,
+          acceptAggregationPeriod: 0.1, acceptDataFormat: "COMPACT",
+          acceptEventFields: { Quote: ["eventSymbol", "bidPrice", "askPrice"],
+                               Trade: ["eventSymbol", "price"] } }));
+        TR.wsReady = true;
+        const subs = [...TR.wsSubs];
+        TR.wsSubs = new Set();
+        trSubscribe(subs);
+      } else if (m.type === "FEED_DATA") {
+        trFeedData(m.data || []);
+      } else if (m.type === "KEEPALIVE") {
+        ws.send(JSON.stringify({ type: "KEEPALIVE", channel: 0 }));
+      }
+    };
+    ws.onclose = () => { TR.ws = null; TR.wsReady = false; };
+    ws.onerror = () => { TR.wsErr = "quote stream error"; };
+  }).catch(e => {
+    TR.wsErr = e.message;
+    const el = $("#tr-stream-note");
+    if (el) el.textContent = "No live quotes: " + TR.wsErr;
+  });
+}
+
+function trSubscribe(symbols) {
+  const add = [];
+  for (const s of symbols) {
+    if (!s || TR.wsSubs.has(s)) continue;
+    TR.wsSubs.add(s);
+    add.push({ type: "Quote", symbol: s }, { type: "Trade", symbol: s });
+  }
+  if (add.length && TR.wsReady) {
+    TR.ws.send(JSON.stringify({ type: "FEED_SUBSCRIPTION", channel: 1, add }));
+  }
+}
+
+function trFeedData(data) {
+  for (let i = 0; i + 1 < data.length; i += 2) {
+    const type = data[i], v = data[i + 1];
+    if (!Array.isArray(v)) continue;
+    const stride = type === "Quote" ? 3 : type === "Trade" ? 2 : 0;
+    if (!stride) continue;
+    for (let j = 0; j + stride <= v.length; j += stride) {
+      const q = TR.quotes[v[j]] || (TR.quotes[v[j]] = {});
+      if (type === "Quote") { q.bid = v[j + 1]; q.ask = v[j + 2]; }
+      else q.last = v[j + 1];
+    }
+  }
+  trPaintQuotes();
+}
+
+const trNum = (x, dp = 2) =>
+  (x === null || x === undefined || Number.isNaN(x)) ? "—" : Number(x).toFixed(dp);
+const trMid = (q) => (q && q.bid != null && q.ask != null)
+  ? (q.bid + q.ask) / 2 : (q ? q.last : null);
+
+function trNetMid() {
+  if (!TR.ticket) return null;
+  let net = 0;
+  for (const leg of TR.ticket.legs) {
+    const m = trMid(TR.quotes[leg.streamer]);
+    if (m == null) return null;
+    net += (leg.side === "Short" ? m : -m) * leg.size;
+  }
+  return net;
+}
+
+function trPaintQuotes() {
+  document.querySelectorAll("[data-qsym]").forEach(el => {
+    const q = TR.quotes[el.dataset.qsym];
+    const f = el.dataset.qfield;
+    el.textContent = trNum(f === "mid" ? trMid(q) : q && q[f]);
+  });
+  const net = trNetMid();
+  const el = $("#tr-netmid");
+  if (el) el.textContent = net == null ? "—"
+    : `${trNum(Math.abs(net))} ${net > 0 ? "credit" : "debit"} (mid)`;
+}
+
+function trLegRow(leg, i) {
+  const ch = TR.chain;
+  const exps = ch ? ch.expirations : [leg.expiration];
+  const strikes = ch ? (ch.strikes[leg.expiration] || []) : [leg.strike];
+  const opt = (v, cur, label) =>
+    `<option value="${esc(v)}"${String(v) === String(cur) ? " selected" : ""}>${esc(label ?? v)}</option>`;
+  return `<tr data-leg="${i}">
+    <td><select class="f-select" data-f="side">
+      ${opt("Long", leg.side)}${opt("Short", leg.side)}</select></td>
+    <td><input class="f-num tr-size" data-f="size" type="number" min="1" value="${leg.size}"></td>
+    <td><select class="f-select" data-f="expiration">
+      ${exps.map(e => opt(e, leg.expiration)).join("")}</select></td>
+    <td><select class="f-select" data-f="strike">
+      ${strikes.map(s => opt(s, leg.strike)).join("")}</select></td>
+    <td><select class="f-select" data-f="cp">
+      ${opt("Call", leg.cp)}${opt("Put", leg.cp)}</select></td>
+    <td class="num" data-qsym="${esc(leg.streamer || "")}" data-qfield="bid">—</td>
+    <td class="num" data-qsym="${esc(leg.streamer || "")}" data-qfield="ask">—</td>
+    <td class="num" data-qsym="${esc(leg.streamer || "")}" data-qfield="mid">—</td>
+    <td><button class="btn-ghost tr-del" title="remove leg">✕</button></td>
+  </tr>`;
+}
+
+function trRenderTicket() {
+  const box = $("#tr-ticket");
+  if (!box) return;
+  const tk = TR.ticket;
+  if (!tk) {
+    box.innerHTML = '<div class="empty">No ticket — build a strategy above, or ask the agent by voice.</div>';
+    return;
+  }
+  const problems = (tk.problems || []).map(p => `<div class="tr-problem">⚠ ${esc(p)}</div>`).join("");
+  box.innerHTML = `
+    <div class="card-sub">${esc(tk.underlying)} · ${esc(tk.strategy || "custom")}
+      ${tk.review ? '<span class="badge">reviewed</span>' : ""}</div>
+    <table class="table tr-legs">
+      <thead><tr><th>Side</th><th>Qty</th><th>Expiration</th><th>Strike</th>
+        <th>C/P</th><th>Bid</th><th>Ask</th><th>Mid</th><th></th></tr></thead>
+      <tbody>${tk.legs.map(trLegRow).join("")}</tbody>
+    </table>
+    ${problems}
+    <div class="tr-terms">
+      <label>Limit <input id="tr-price" class="f-num" type="number" step="0.01" min="0"
+        value="${tk.limit_price ?? ""}" placeholder="price"></label>
+      <select id="tr-effect" class="f-select">
+        <option value="">effect…</option>
+        <option value="Credit"${tk.price_effect === "Credit" ? " selected" : ""}>Credit</option>
+        <option value="Debit"${tk.price_effect === "Debit" ? " selected" : ""}>Debit</option>
+      </select>
+      <select id="tr-tif" class="f-select">
+        <option${tk.tif === "Day" ? " selected" : ""}>Day</option>
+        <option${tk.tif === "GTC" ? " selected" : ""}>GTC</option>
+      </select>
+      <span class="card-sub">net <span id="tr-netmid">—</span></span>
+      <button id="tr-usemid" class="btn-ghost">Use mid</button>
+      <span style="flex:1"></span>
+      <button id="tr-clear" class="btn-ghost">Clear</button>
+      <button id="tr-review" class="btn-primary">Review (dry run)</button>
+    </div>
+    <div id="tr-dryrun"></div>`;
+
+  if (TR.chain) trSubscribe(tk.legs.map(l => l.streamer).filter(Boolean));
+  trPaintQuotes();
+
+  const push = () => trPushTicket();
+  box.querySelectorAll("select[data-f],input[data-f]").forEach(el =>
+    el.onchange = push);
+  box.querySelectorAll(".tr-del").forEach((b, idx) => b.onclick = () => {
+    TR.ticket.legs.splice(idx, 1); trPushTicket();
+  });
+  $("#tr-price").onchange = push;
+  $("#tr-effect").onchange = push;
+  $("#tr-tif").onchange = push;
+  $("#tr-usemid").onclick = () => {
+    const net = trNetMid();
+    if (net == null) return;
+    $("#tr-price").value = Math.abs(net).toFixed(2);
+    $("#tr-effect").value = net > 0 ? "Credit" : "Debit";
+    push();
+  };
+  $("#tr-clear").onclick = async () => {
+    await apiPost("/api/trading/ticket", { op: "clear" });
+    TR.ticket = null; TR.dryRun = null; trRenderTicket();
+  };
+  $("#tr-review").onclick = trReview;
+}
+
+function trReadTicketDom() {
+  const legs = [];
+  document.querySelectorAll("#tr-ticket tr[data-leg]").forEach(tr => {
+    const g = (f) => tr.querySelector(`[data-f="${f}"]`).value;
+    legs.push({ side: g("side"), size: parseInt(g("size"), 10) || 1,
+      expiration: g("expiration"), strike: parseFloat(g("strike")),
+      cp: g("cp") });
+  });
+  return {
+    op: "set",
+    underlying: TR.ticket.underlying,
+    strategy: TR.ticket.strategy,
+    legs,
+    tif: $("#tr-tif") ? $("#tr-tif").value : "Day",
+    limit_price: $("#tr-price") && $("#tr-price").value !== "" ? $("#tr-price").value : null,
+    price_effect: $("#tr-effect") ? $("#tr-effect").value || null : null,
+  };
+}
+
+async function trPushTicket() {
+  try {
+    const body = TR.ticket.legs.length && document.querySelector("#tr-ticket tr[data-leg]")
+      ? trReadTicketDom()
+      : { op: "set", underlying: TR.ticket.underlying, strategy: TR.ticket.strategy,
+          legs: TR.ticket.legs, tif: TR.ticket.tif,
+          limit_price: TR.ticket.limit_price, price_effect: TR.ticket.price_effect };
+    const r = await apiPost("/api/trading/ticket", body);
+    TR.ticket = r.ticket; TR.dryRun = null;
+    trRenderTicket();
+  } catch (e) {
+    const el = $("#tr-dryrun");
+    if (el) el.innerHTML = `<div class="tr-problem">⚠ ${esc(e.message)}</div>`;
+  }
+}
+
+async function trReview() {
+  const el = $("#tr-dryrun");
+  el.innerHTML = '<div class="empty">Running dry run…</div>';
+  let r;
+  try { r = await apiPost("/api/trading/dry-run", {}); }
+  catch (e) { el.innerHTML = `<div class="tr-problem">⚠ ${esc(e.message)}</div>`; return; }
+  TR.dryRun = r;
+  if (r.ticket) TR.ticket = r.ticket;
+  if (!r.ok) {
+    el.innerHTML = r.errors.map(x => `<div class="tr-problem">✕ ${esc(x)}</div>`).join("");
+    return;
+  }
+  const env = TR.status ? TR.status.env : "?";
+  el.innerHTML = `
+    <div class="tr-review">
+      <div><strong>Dry run OK.</strong>
+        Buying-power effect ${trNum(r.buying_power_change)} ·
+        fees ${trNum(r.total_fees)} ·
+        new buying power ${trNum(r.new_buying_power)}</div>
+      ${r.warnings.map(w => `<div class="tr-problem">⚠ ${esc(w)}</div>`).join("")}
+      <button id="tr-submit" class="btn-primary">Submit to ${esc(env)}…</button>
+    </div>`;
+  $("#tr-submit").onclick = async () => {
+    const desc = TR.ticket.description || "this order";
+    if (!window.confirm(`Place with ${env.toUpperCase()} account?\n\n${desc}`)) return;
+    try {
+      const s = await apiPost("/api/trading/submit",
+        { confirm: true, fingerprint: r.fingerprint });
+      el.innerHTML = `<div class="tr-review"><strong>Submitted.</strong>
+        Order ${esc(s.order.id)} — ${esc(s.order.status)}</div>`;
+      trLoadOrders();
+    } catch (e2) {
+      el.innerHTML = `<div class="tr-problem">✕ ${esc(e2.message)}</div>`;
+    }
+  };
+}
+
+async function trLoadOrders() {
+  const box = $("#tr-orders");
+  if (!box) return;
+  let data;
+  try { data = await api("/api/trading/orders"); }
+  catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const rows = data.orders.map(o => `
+    <tr><td>${esc(o.id)}</td><td>${esc(o.underlying)}</td>
+      <td>${esc(o.status)}</td>
+      <td class="num">${o.price != null ? trNum(o.price) + " " + esc(o.price_effect || "") : "—"}</td>
+      <td>${o.legs.map(l => esc(`${l.action} ${l.quantity} ${l.symbol}`)).join("<br>")}</td>
+      <td>${o.working ? `<button class="btn-ghost tr-cancel" data-id="${esc(o.id)}">Cancel</button>` : ""}</td>
+    </tr>`).join("");
+  const log = (data.log || []).slice(-12).reverse().map(e =>
+    `<div>${esc(e.at)} · ${esc(e.env)} · ${esc(e.kind)}${e.order_id ? " #" + esc(e.order_id) : ""}</div>`).join("");
+  box.innerHTML = `
+    <table class="table">
+      <thead><tr><th>Id</th><th>Under</th><th>Status</th><th>Price</th><th>Legs</th><th></th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="6" class="empty">No orders today</td></tr>'}</tbody>
+    </table>
+    <div class="card-sub" style="margin-top:8px">Audit log</div>
+    <div class="mono-list">${log || '<div class="empty">empty</div>'}</div>`;
+  box.querySelectorAll(".tr-cancel").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { await apiPost("/api/trading/cancel", { order_id: b.dataset.id }); }
+    catch (e) { window.alert("Cancel failed: " + e.message); }
+    trLoadOrders();
+  });
+}
+
+async function trLoadPositions() {
+  const box = $("#tr-positions");
+  if (!box) return;
+  let data;
+  try { data = await api("/api/trading/positions"); }
+  catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const rows = data.positions.map(p => `
+    <tr><td>${esc(p.symbol)}</td><td class="num">${p.quantity}</td>
+      <td class="num">${trNum(p.avg_open)}</td>
+      <td class="num">${p.streamer
+        ? `<span data-qsym="${esc(p.streamer)}" data-qfield="mid">${trNum(p.mark)}</span>`
+        : trNum(p.mark)}</td>
+      <td class="num ${p.unrealized > 0 ? "tr-pos" : p.unrealized < 0 ? "tr-neg" : ""}">${trNum(p.unrealized)}</td>
+    </tr>`).join("");
+  box.innerHTML = `
+    <table class="table">
+      <thead><tr><th>Symbol</th><th>Qty</th><th>Avg open</th><th>Mark</th><th>Unrealized</th></tr></thead>
+      <tbody>${rows || '<tr><td colspan="5" class="empty">No open positions</td></tr>'}</tbody>
+    </table>
+    <div class="card-sub" style="margin-top:8px">
+      Total unrealized: <strong>${trNum(data.total_unrealized)}</strong>
+      ${data.unmarked ? ` · ${data.unmarked} unmarked` : ""}</div>`;
+  trSubscribe(data.positions.map(p => p.streamer).filter(Boolean));
+}
+
+async function trLoadPnl() {
+  const box = $("#tr-pnl-out");
+  box.innerHTML = '<div class="empty">Crunching transactions…</div>';
+  const qs = new URLSearchParams({
+    start: $("#tr-pnl-start").value, end: $("#tr-pnl-end").value });
+  const u = $("#tr-pnl-under").value.trim();
+  if (u) qs.set("underlying", u);
+  let rep;
+  try { rep = await api("/api/trading/pnl?" + qs); }
+  catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+  const by = Object.entries(rep.by_underlying || {})
+    .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+    .map(([k, v]) => `<tr><td>${esc(k)}</td>
+      <td class="num ${v > 0 ? "tr-pos" : v < 0 ? "tr-neg" : ""}">${trNum(v)}</td></tr>`).join("");
+  const events = (rep.events || []).slice(-10).reverse().map(ev =>
+    `<div>${esc((ev.closed_at || "").slice(0, 16))} · ${esc(ev.symbol)} ×${ev.quantity} → ${trNum(ev.pnl)}</div>`).join("");
+  box.innerHTML = `
+    <div class="tr-pnl-head">
+      Realized <strong class="${rep.realized > 0 ? "tr-pos" : rep.realized < 0 ? "tr-neg" : ""}">${trNum(rep.realized)}</strong>
+      · fees ${trNum(rep.fees)} · ${rep.events.length} closes
+      ${rep.unrealized != null ? ` · unrealized now <strong>${trNum(rep.unrealized)}</strong>` : ""}
+    </div>
+    ${rep.note ? `<div class="tr-problem">${esc(rep.note)}</div>` : ""}
+    <div class="two-col">
+      <div><div class="card-sub">By underlying</div>
+        <table class="table"><tbody>${by || '<tr><td class="empty">none</td></tr>'}</tbody></table></div>
+      <div><div class="card-sub">Recent closes</div>
+        <div class="mono-list">${events || '<div class="empty">none</div>'}</div></div>
+    </div>`;
+}
+
+views.trading = async function () {
+  main.innerHTML = header("Trading", "Loading trading status…");
+  let st;
+  try { st = await api("/api/trading/status"); }
+  catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
+  TR.status = st;
+
+  const today = new Date().toISOString().slice(0, 10);
+  const envBadge = `<span class="badge tr-env ${st.env === "live" ? "tr-live" : ""}">${esc(st.env.toUpperCase())}</span>`;
+  main.innerHTML = header("Trading",
+    "Multi-leg options on the tastytrade API — the same ticket the voice agent builds.") + `
+    <div class="card">
+      <div class="tr-status">${envBadge}
+        ${st.configured
+          ? `account <code>${esc(st.account || "?")}</code> · stream: ${esc(st.stream || "n/a")}`
+          : `<span class="tr-problem">${esc(st.problem || "not configured")}</span>`}
+        <span id="tr-stream-note" class="card-sub"></span>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Strategy builder</h2>
+      <div class="tr-build">
+        <input id="tr-sym" class="f-text" placeholder="SPX, /ES, AAPL…" value="SPX">
+        <select id="tr-strat" class="f-select">
+          ${(st.strategies || []).map(s => `<option>${esc(s)}</option>`).join("")}
+        </select>
+        <input id="tr-size" class="f-num" type="number" min="1" value="1" title="contracts per leg">
+        <button id="tr-build" class="btn-primary">Build</button>
+      </div>
+      <div id="tr-ticket"><div class="empty">Loading ticket…</div></div>
+    </div>
+    <div class="two-col">
+      <div class="card"><h2>Orders</h2><div id="tr-orders"><div class="empty">Loading…</div></div></div>
+      <div class="card"><h2>Positions</h2><div id="tr-positions"><div class="empty">Loading…</div></div></div>
+    </div>
+    <div class="card">
+      <h2>P&amp;L</h2>
+      <div class="tr-build">
+        <label>from <input id="tr-pnl-start" class="f-text" type="date" value="${today}"></label>
+        <label>to <input id="tr-pnl-end" class="f-text" type="date" value="${today}"></label>
+        <input id="tr-pnl-under" class="f-text" placeholder="underlying (optional)">
+        <button id="tr-pnl-run" class="btn-primary">Report</button>
+      </div>
+      <div id="tr-pnl-out" class="card-sub">Pick a period and run the report.</div>
+    </div>`;
+
+  if (!st.configured) {
+    const note = '<div class="empty">Waiting for trading credentials (see status above).</div>';
+    $("#tr-ticket").innerHTML = note;
+    $("#tr-orders").innerHTML = note;
+    $("#tr-positions").innerHTML = note;
+    return;
+  }
+  trStream();
+
+  $("#tr-build").onclick = async () => {
+    const btn = $("#tr-build");
+    btn.disabled = true; btn.textContent = "Building…";
+    try {
+      const r = await apiPost("/api/trading/ticket", {
+        op: "build", symbol: $("#tr-sym").value,
+        strategy: $("#tr-strat").value,
+        size: parseInt($("#tr-size").value, 10) || 1 });
+      TR.ticket = r.ticket;
+      TR.chain = await api("/api/trading/chain?symbol=" +
+        encodeURIComponent(r.ticket.underlying));
+      trSubscribe([TR.chain.underlying_streamer]);
+      trRenderTicket();
+    } catch (e) {
+      $("#tr-ticket").innerHTML = `<div class="tr-problem">⚠ ${esc(e.message)}</div>`;
+    }
+    btn.disabled = false; btn.textContent = "Build";
+  };
+  $("#tr-pnl-run").onclick = trLoadPnl;
+
+  // Existing ticket (e.g. built by voice) — load it and its chain.
+  try {
+    const t = await api("/api/trading/ticket");
+    TR.ticket = t.ticket;
+    if (t.ticket) {
+      TR.chain = await api("/api/trading/chain?symbol=" +
+        encodeURIComponent(t.ticket.underlying));
+      trSubscribe([TR.chain.underlying_streamer]);
+    }
+  } catch { TR.ticket = null; }
+  trRenderTicket();
+  trLoadOrders();
+  trLoadPositions();
 };
 
 route();

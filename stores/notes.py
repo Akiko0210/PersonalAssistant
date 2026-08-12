@@ -12,29 +12,14 @@ import logging
 import re
 from datetime import datetime
 
-import chromadb
-from chromadb.utils import embedding_functions
+from stores import chroma_store
 
-import categories
+from stores import categories
 import config as cfg
-from atomic_io import write_json_atomic, write_text_atomic
+from lib.atomic_io import read_json, write_json_atomic, write_text_atomic
+from lib.frontmatter import parse_frontmatter
 
 log = logging.getLogger("notes")
-
-
-def parse_frontmatter(text):
-    """Parse the YAML-ish frontmatter block save_summary writes (--- key: value
-    lines ---). Returns ({fields}, body). Tolerant: missing or malformed
-    frontmatter yields ({}, whole text)."""
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, re.DOTALL)
-    if not m:
-        return {}, text
-    fields = {}
-    for line in m.group(1).splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            fields[key.strip()] = value.strip()
-    return fields, text[m.end():]
 
 
 class NoteStore:
@@ -82,27 +67,17 @@ class NoteStore:
         if self._col is not None:
             return
         log.info("loading embedding model + chroma (first use)...")
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=cfg.EMBED_MODEL
-        )
-        client = chromadb.PersistentClient(path=str(cfg.CHROMA_DIR))
-        self._col = client.get_or_create_collection(
-            name="notes", embedding_function=ef
-        )
+        self._col = chroma_store.collection("notes")
         log.info("chroma ready")
 
     # --- index helpers -------------------------------------------------------
     def _load_index(self):
-        # Guarded like history.load(): a corrupt index (Dropbox conflict copy,
-        # pre-atomic-write crash) must never block startup — fall back to empty
-        # and let --resync rebuild it from the note files on disk.
-        try:
-            if cfg.INDEX_PATH.exists():
-                return json.loads(cfg.INDEX_PATH.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
-            log.warning("index.json unreadable (%s) — starting with an empty "
-                        "index; run --resync to rebuild it", e)
-        return {}
+        # A corrupt index (Dropbox conflict copy, pre-atomic-write crash) must
+        # never block startup — fall back to empty; --resync rebuilds it.
+        return read_json(cfg.INDEX_PATH, {},
+                         warn=lambda e: log.warning(
+                             "index.json unreadable (%s) — starting with an "
+                             "empty index; run --resync to rebuild it", e))
 
     def _save_index(self):
         write_json_atomic(cfg.INDEX_PATH, self.index)
@@ -192,7 +167,7 @@ class NoteStore:
         return slug, None
 
     def _note_category(self, note_id: str) -> str:
-        return (self.index.get(note_id) or {}).get("category") or categories.DEFAULT_CATEGORY
+        return categories.slug_of(self.index.get(note_id))
 
     def search_notes(self, query: str, n: int = None, folder: str = None) -> str:
         n = n or cfg.SEARCH_RESULTS
@@ -247,7 +222,7 @@ class NoteStore:
         )
 
     def read_note(self, note_id: str) -> str:
-        cat = (self.index.get(note_id) or {}).get("category", categories.DEFAULT_CATEGORY)
+        cat = categories.slug_of(self.index.get(note_id))
         path = categories.category_dir(cat) / f"{note_id}.md"
         if path.exists():
             return path.read_text(encoding="utf-8")
@@ -255,7 +230,7 @@ class NoteStore:
         return transcript or f"No note found with id {note_id}."
 
     def _category_label(self, note_id: str) -> str:
-        cat = (self.index.get(note_id) or {}).get("category", categories.DEFAULT_CATEGORY)
+        cat = categories.slug_of(self.index.get(note_id))
         return categories.NOTE_CATEGORIES.get(cat, {}).get("display", cat)
 
     @staticmethod
@@ -345,7 +320,7 @@ class NoteStore:
         """Move one note into another category, keeping every copy of its category
         consistent: files on disk, frontmatter, index, and Chroma metadata."""
         info = self.index[note_id]
-        self._move_note_files(note_id, info.get("category", categories.DEFAULT_CATEGORY), to_slug)
+        self._move_note_files(note_id, categories.slug_of(info), to_slug)
         info["category"] = to_slug
         self._rewrite_category(note_id, to_slug)
         # Always sync Chroma too (loading it if needed): folder-scoped queries and
@@ -372,7 +347,7 @@ class NoteStore:
         if to_slug is None:
             known = ", ".join(m["display"] for m in categories.NOTE_CATEGORIES.values())
             return f"I don't have a folder called '{to_folder}'. Your folders are: {known}."
-        if info.get("category", categories.DEFAULT_CATEGORY) == to_slug:
+        if categories.slug_of(info) == to_slug:
             return f"That note is already in {categories.NOTE_CATEGORIES[to_slug]['display']}."
         title = info.get("title", note_id)
         self._reassign(note_id, to_slug)
@@ -510,7 +485,7 @@ class NoteStore:
             dest = categories.DEFAULT_CATEGORY
 
         note_ids = [nid for nid, info in self.index.items()
-                    if info.get("category", categories.DEFAULT_CATEGORY) == slug]
+                    if categories.slug_of(info) == slug]
         for nid in note_ids:
             self._reassign(nid, dest)
         if note_ids:
@@ -528,7 +503,7 @@ class NoteStore:
 
     def count_notes(self, folder: str = None) -> str:
         counts = collections.Counter(
-            (info.get("category") or categories.DEFAULT_CATEGORY) for info in self.index.values()
+            categories.slug_of(info) for info in self.index.values()
         )
         if not folder:
             total = sum(counts.values())

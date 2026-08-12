@@ -2,7 +2,7 @@
 
 import unittest
 
-import agents
+from brain import agents
 from tools import _REGISTRY
 
 
@@ -26,6 +26,19 @@ class TestRegistryIntegrity(unittest.TestCase):
     def test_default_agent_exists(self):
         self.assertIn(agents.DEFAULT_AGENT, agents.AGENTS)
 
+    def test_reads_grants_name_real_agents(self):
+        # A typo'd grant would silently open no collection at all; same
+        # catch-it-at-test-time shape as the tool-allowlist check above.
+        for key, agent in agents.AGENTS.items():
+            for grant in agent["reads"]:
+                self.assertIn(grant, agents.AGENTS,
+                              f"{key} reads unknown agent {grant}")
+
+    def test_readable_owners_is_self_plus_grants(self):
+        self.assertEqual(agents.readable_owners("tom"), ("tom",))
+        self.assertEqual(agents.readable_owners(None), ())
+        self.assertEqual(agents.readable_owners("nobody"), ())
+
     def test_every_agent_can_switch_and_change_model(self):
         # Without switch_agent an agent is a roach motel; without
         # set_conversation_model "make this smarter" breaks in that hat.
@@ -33,11 +46,16 @@ class TestRegistryIntegrity(unittest.TestCase):
             self.assertIn("switch_agent", agent["tools"], key)
             self.assertIn("set_conversation_model", agent["tools"], key)
 
-    def test_roster_mentions_the_others_and_shared_memory(self):
+    def test_roster_mentions_the_others_and_private_memory(self):
         block = agents.roster_block("alice")
         self.assertIn("Bob", block)
         self.assertIn("Tom", block)
-        self.assertIn("share", block.lower())
+        # The memory model inverted (2026-08): each persona's thread is its
+        # own, and the referral path — offer to ask, never guess, never bare
+        # silence — is the incident-shaped guardrail (agents.py 2026-07-20).
+        self.assertIn("OWN conversation", block)
+        self.assertIn("ask_agent", block)
+        self.assertIn("offer to ask", block)
 
     def test_resolve_tolerates_aliases_and_case(self):
         self.assertEqual(agents.resolve("Thom"), "tom")

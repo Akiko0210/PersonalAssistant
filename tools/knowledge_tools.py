@@ -22,4 +22,5 @@ from tools import tool
     },
 })
 def search_knowledge(ctx, args):
-    return ctx.kb.search(args["query"])
+    return ctx.kb.search(args["query"], caller=ctx.active_agent,
+                         focus=ctx.focus)

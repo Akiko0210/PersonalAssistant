@@ -20,3 +20,6 @@ pypdf>=4.0
 # encrypted (often just to disable printing), and without it they fail to ingest
 # with "cryptography>=3.1 is required for AES algorithm".
 cryptography>=3.1
+# Trading (tastytrade REST + DXLink streaming quotes) — see TRADING_PLAN.md
+requests>=2.31
+websocket-client>=1.7

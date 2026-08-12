@@ -20,7 +20,7 @@ INDEX_PATH = DATA_DIR / "index.json"
 LOCK_PATH = DATA_DIR / "agent.lock"
 # Detailed project description — the knowledge source the describe_project tool
 # reads so the agent can answer questions about its own design.
-PROJECT_DOC_PATH = BASE_DIR / "PROJECT.md"
+PROJECT_DOC_PATH = BASE_DIR / "docs" / "PROJECT.md"
 # User-created / renamed folders are persisted here and overlaid on the built-in
 # NOTE_CATEGORIES defaults below at startup (see load_categories).
 CATEGORIES_PATH = DATA_DIR / "categories.json"
@@ -32,6 +32,13 @@ AGENTS_PATH = DATA_DIR / "agents.json"
 # switch so the dashboard can show who the user is talking to. Read-only
 # telemetry — nothing in the agent reads it back.
 AGENT_STATE_PATH = DATA_DIR / "agent_state.json"
+# The dashboard's port. The agent serves the dashboard from inside its own
+# process (dashboard.serve_embedded), live controls included; `python
+# -m web.server` standalone serves the same UI for browsing/config/ingest while
+# the agent is off. Soft dependency for the agent — if the port can't be bound
+# it logs a warning and runs without a web UI. One value here: it used to live
+# in three places (the server module, launch.json, docs prose).
+DASHBOARD_PORT = 8765
 # Live transcripts are appended here while recording, then moved into the chosen
 # category folder when the note is saved (the category isn't known until the end).
 PENDING_DIR = DATA_DIR / "pending"
@@ -42,11 +49,21 @@ PENDING_DIR = DATA_DIR / "pending"
 # tool, never pasted into the conversation.
 KNOWLEDGE_DIR = BASE_DIR / "knowledge"
 KNOWLEDGE_MANIFEST = KNOWLEDGE_DIR / "manifest.json"  # {sha256: {source,title,...}}
-# Conversation memory: the chat history is saved here after every turn and
-# restored (trimmed) on the next boot, so the agent remembers the last
-# conversation across restarts.
+# Conversation memory: each persona keeps its OWN thread with the user, saved
+# after every turn and restored (trimmed) on the next boot. Isolation is
+# structural — Tom's file simply never contains Alice's turns — so "what did I
+# tell Alice?" is answered by asking Alice (ask_agent), not by filtering.
+HISTORY_MAX_MESSAGES = 40   # messages kept when persisting/restoring a thread
+
+
+def history_path(key):
+    return DATA_DIR / f"history_{key}.json"
+
+
+# The pre-isolation single shared history. Only the one-time migration in
+# llm.py touches it (renames to .bak); scripts/seed_agent_memory.py mines the
+# session logs instead, which cover the same turns with attribution.
 HISTORY_PATH = DATA_DIR / "history.json"
-HISTORY_MAX_MESSAGES = 40   # messages kept when persisting/restoring history
 # Long-term memory: messages that fall off the window above are not lost — their
 # text is staged here, then consolidated (summarised by the model and embedded
 # into a persistent Chroma collection) so older conversations stay searchable
@@ -91,6 +108,21 @@ SEARCH_RESULTS = 5
 
 # --- Knowledge base (ingested PDFs, text, and video/audio) --------------------
 KNOWLEDGE_COLLECTION = "knowledge"   # Chroma collection, separate from "notes"
+# Per-agent private stores live as extra collections in the SAME Chroma DB —
+# one client, one embedding model (chromadb caches it by name), so isolation
+# is a collection name, not a second database. A wrong name returns nothing,
+# which is the point: no where= filter to forget.
+COMMON_COLLECTION = "common"         # manifest label for the shared collection
+
+
+def agent_knowledge_collection(key):
+    return f"knowledge_{key}"
+
+
+def agent_memory_collection(key):
+    return f"conversations_{key}"
+
+
 KB_CHUNK_CHARS = 1000                # target characters per embedded chunk
 KB_CHUNK_OVERLAP = 150               # characters shared between adjacent chunks
 KB_SEARCH_RESULTS = 5                # chunks returned per search_knowledge call
@@ -393,7 +425,7 @@ def model_identity_block(label: str) -> str:
 
 
 # --- Dashboard config overrides ----------------------------------------------
-# The web dashboard (dashboard.py) lets the user adjust tunables visually. Its
+# The web dashboard (web/server.py) lets the user adjust tunables visually. Its
 # edits are persisted to this file and applied here, at import time, on top of
 # the defaults above — so a dashboard change reaches the agent on its next
 # start without anyone editing this module. Only the whitelisted names below
@@ -465,11 +497,8 @@ def apply_overrides(data):
 def _load_overrides():
     for name in OVERRIDABLE:
         CONFIG_DEFAULTS[name] = globals()[name]
-    try:
-        data = json.loads(OVERRIDES_PATH.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return
-    apply_overrides(data)
+    from lib.atomic_io import read_json  # here, not at top: atomic_io is leaf-only
+    apply_overrides(read_json(OVERRIDES_PATH, {}))
 
 
 _load_overrides()
@@ -478,7 +507,7 @@ _load_overrides()
 def ensure_dirs():
     # Imported here, not at module top: categories.py imports config for its
     # paths, so a top-level import would be circular.
-    import categories
+    from stores import categories
 
     DATA_DIR.mkdir(parents=True, exist_ok=True)  # needed before reading categories.json
     categories.load_categories()  # bring in any voice-created / renamed folders

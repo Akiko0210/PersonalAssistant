@@ -9,7 +9,7 @@ import os
 import tempfile
 import unittest
 
-import history
+from brain import history
 
 
 def user(text):

@@ -1,9 +1,9 @@
-"""Tests for notes.parse_frontmatter — the parser resync's orphan adoption
-relies on to rebuild an index entry from a note file alone."""
+"""Tests for frontmatter.parse_frontmatter — the parser resync's orphan
+adoption relies on to rebuild an index entry from a note file alone."""
 
 import unittest
 
-from notes import parse_frontmatter
+from lib.frontmatter import parse_frontmatter
 
 
 class TestParseFrontmatter(unittest.TestCase):

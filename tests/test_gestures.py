@@ -3,7 +3,7 @@
 import time
 import unittest
 
-from gestures import ClickGestureDecoder
+from buttons.gestures import ClickGestureDecoder
 
 
 class TestGestures(unittest.TestCase):

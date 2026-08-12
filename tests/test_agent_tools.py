@@ -2,7 +2,7 @@
 
 import unittest
 
-import agents
+from brain import agents
 from tools import ToolContext, api_tools, dispatch, _REGISTRY
 
 

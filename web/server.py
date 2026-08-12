@@ -14,8 +14,15 @@ Design constraints:
   stays a voice feature; the dashboard's search is a plain substring scan.
 - Read-mostly: it writes data/config_overrides.json (via atomic_io, same as
   every other state file), and accepts uploads into knowledge/. Config changes
-  are picked up by config.py at the agent's next start — the dashboard never
-  reaches into a live process.
+  are picked up by config.py at the agent's next start — the dashboard does not
+  reach into a live process, with the one exception below.
+- Live controls (the mute button, typed messages) are that exception, because
+  they're worthless if they only take effect at the next start. The agent
+  serves this same dashboard from inside its own process (serve_embedded), so
+  a button click on that page is a direct method call on the live Agent. Run
+  standalone (this file's main()), there is no agent in-process; the control
+  routes then answer honestly — "agent not running", or "the agent is running,
+  use its dashboard" when the lock says one is alive elsewhere.
 - Localhost only: binds 127.0.0.1; this is a private control panel, not a web
   service.
 
@@ -28,27 +35,31 @@ single-instance lock for the duration, because embedding writes the same Chroma
 store the agent has open and two writers would corrupt it. That means an ingest
 and a running agent are mutually exclusive by design, not by oversight.
 
-Run:  python dashboard.py [--port 8765] [--no-browser]
+Run:  python -m web.server [--port 8765] [--no-browser]   (or dashboard.bat)
 """
 
 import argparse
 import json
+import logging
 import re
 import threading
+import time
 import webbrowser
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-import agents as agents_registry
-import categories
+from brain import agents as agents_registry
+from stores import categories
 import config as cfg
-from atomic_io import write_json_atomic
-from single_instance import AlreadyRunning, SingleInstance
+from lib.atomic_io import read_json, write_json_atomic
+from lib.frontmatter import parse_frontmatter
+from lib.single_instance import AlreadyRunning, SingleInstance
 
-STATIC_DIR = cfg.BASE_DIR / "dashboard"
-DEFAULT_PORT = 8765
+log = logging.getLogger("dashboard")
+
+STATIC_DIR = cfg.BASE_DIR / "web" / "static"
 
 NOTE_ID_RE = re.compile(r"^note_[\w.-]+$")
 LOG_NAME_RE = re.compile(r"^session_[\w.-]+\.log$")
@@ -258,36 +269,42 @@ def validate_payload(payload):
 
 # --- Data readers (all straight off disk, fresh per request) ------------------
 
-def _read_json(path, fallback):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return fallback
+# The lock probe below is cheap but not free: when no agent holds the lock, the
+# probe takes it and releasing DELETES the lock file. The sidebar polls it from
+# every open tab, in a folder Dropbox is watching — so the answer is memoised
+# for a moment. Staleness is bounded by the TTL and harmless: this drives
+# display and the standalone controls' error message. The ingest job does NOT
+# use this — it proves the agent is absent by taking the real lock
+# (see _run_ingest).
+_RUNNING_TTL_S = 1.0
+_running_cache = (0.0, False)
+_running_lock = threading.Lock()
 
-
-def parse_frontmatter(text):
-    # Mirror of notes.parse_frontmatter — duplicated so the dashboard never
-    # imports notes.py (which drags in chromadb + the embedding stack).
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, re.DOTALL)
-    if not m:
-        return {}, text
-    fields = {}
-    for line in m.group(1).splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            fields[key.strip()] = value.strip()
-    return fields, text[m.end():]
+# Set by serve_embedded: this process IS the agent. Probing our own lock
+# happened to answer True by accident (acquire raises AlreadyRunning against
+# our own held handle); say it on purpose instead.
+_embedded_agent = None
 
 
 def agent_running():
     """True if the voice agent currently holds the single-instance lock."""
-    try:
-        with SingleInstance(cfg.LOCK_PATH):
-            return False
-    except AlreadyRunning:
+    global _running_cache
+    if _embedded_agent is not None:
         return True
-    except OSError:
-        return False
+    with _running_lock:
+        checked, value = _running_cache
+        now = time.monotonic()
+        if now - checked < _RUNNING_TTL_S:
+            return value
+        try:
+            with SingleInstance(cfg.LOCK_PATH):
+                value = False
+        except AlreadyRunning:
+            value = True
+        except OSError:
+            value = False
+        _running_cache = (now, value)
+        return value
 
 
 def folder_registry():
@@ -296,7 +313,7 @@ def folder_registry():
 
 
 def note_index():
-    return _read_json(cfg.INDEX_PATH, {})
+    return read_json(cfg.INDEX_PATH, {})
 
 
 def api_overview():
@@ -304,11 +321,14 @@ def api_overview():
     folders = folder_registry()
     counts = {}
     for info in index.values():
-        slug = info.get("category") or categories.DEFAULT_CATEGORY
+        slug = categories.slug_of(info)
         counts[slug] = counts.get(slug, 0) + 1
-    history = _read_json(cfg.HISTORY_PATH, [])
-    pending = _read_json(cfg.MEMORY_PENDING_PATH, [])
-    manifest = _read_json(cfg.KNOWLEDGE_MANIFEST, {})
+    # Histories are per-agent files; the overview stat is the sum of all
+    # live windows.
+    n_history = sum(len(read_json(cfg.history_path(k), []))
+                    for k in agents_registry.AGENTS)
+    pending = read_json(cfg.MEMORY_PENDING_PATH, [])
+    manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     logs = sorted(cfg.LOG_DIR.glob("session_*.log")) if cfg.LOG_DIR.exists() else []
 
     # Notes per day over the last 30 days, for the activity chart.
@@ -331,14 +351,14 @@ def api_overview():
             {"slug": slug, "count": n} for slug, n in counts.items()
             if slug not in folders
         ],
-        "history_messages": len(history),
+        "history_messages": n_history,
         "memory_pending": len(pending),
         "knowledge_docs": len(manifest),
         "log_files": len(logs),
         "convo_model": cfg.convo_model_label(cfg.CONVO_MODEL),
         "summary_model": cfg.SUMMARY_MODEL,
         "whisper_model": cfg.WHISPER_MODEL,
-        "overrides_active": len(_read_json(cfg.OVERRIDES_PATH, {})),
+        "overrides_active": len(read_json(cfg.OVERRIDES_PATH, {})),
         "activity": [{"day": d, "count": by_day[d]} for d in days],
         "recent_notes": [
             {"id": nid, **info}
@@ -353,7 +373,7 @@ def api_notes(folder=None):
     items = sorted(index.items(), reverse=True)
     if folder:
         items = [(nid, info) for nid, info in items
-                 if (info.get("category") or categories.DEFAULT_CATEGORY) == folder]
+                 if categories.slug_of(info) == folder]
     return {
         "folders": [
             {"slug": slug, "display": meta["display"],
@@ -370,7 +390,7 @@ def api_note(note_id):
     if not info or not NOTE_ID_RE.match(note_id):
         return None
     folders = folder_registry()
-    slug = info.get("category") or categories.DEFAULT_CATEGORY
+    slug = categories.slug_of(info)
     folder = folders.get(slug, {}).get("folder", slug)
     base = cfg.DATA_DIR / folder
     summary, transcript = "", ""
@@ -399,7 +419,7 @@ def api_search(query):
     folders = folder_registry()
     results = []
     for nid, info in sorted(index.items(), reverse=True):
-        slug = info.get("category") or categories.DEFAULT_CATEGORY
+        slug = categories.slug_of(info)
         folder = folders.get(slug, {}).get("folder", slug)
         title = info.get("title", "")
         snippet = ""
@@ -426,8 +446,84 @@ def api_search(query):
 def talking_to():
     """Which persona is active, from the state file llm.switch_to writes.
     Meaningful only while the agent runs; the dashboard greys it out otherwise."""
-    state = _read_json(cfg.AGENT_STATE_PATH, {})
+    state = read_json(cfg.AGENT_STATE_PATH, {})
     return state if isinstance(state, dict) else {}
+
+
+# --- Live controls ------------------------------------------------------------
+# Embedded in the agent process, a control is a direct method call on the live
+# Agent (self.server.agent, attached by build_server). To add one: write a
+# handler here that validates its payload (raise ValueError for a bad one →
+# 400), register it in CONTROL_ACTIONS, and give the front-end a button that
+# POSTs /api/control/<name>. The dispatch below never changes — and it carries
+# the ONE provenance log line, so no action ever grows a log-only wrapper.
+
+MAX_MESSAGE_CHARS = 4000  # sanity bound; a "message" is a question, not a document
+
+
+def _control_state(agent, **extra):
+    return {"muted": agent.audio.muted.is_set(), "mode": agent.status, **extra}
+
+
+def _ctl_mute(agent, payload):
+    """{"muted": true|false} -> the resulting state. A state, not a toggle, so
+    a stale page or double-tap can't land on the opposite of what was asked."""
+    muted = payload.get("muted") if isinstance(payload, dict) else None
+    if not isinstance(muted, bool):
+        raise ValueError('expected {"muted": true|false}')
+    agent.set_mute(muted)
+    return _control_state(agent, ok=True)
+
+
+def _ctl_send(agent, payload):
+    """{"text": "..."} -> queued ack. The reply is spoken at the next gap in
+    conversation — seconds later, so it can't ride back on this response; the
+    Conversation page shows the exchange."""
+    text = payload.get("text") if isinstance(payload, dict) else None
+    text = text.strip() if isinstance(text, str) else ""
+    if not text:
+        raise ValueError("message text may not be empty")
+    if len(text) > MAX_MESSAGE_CHARS:
+        raise ValueError(f"message is over {MAX_MESSAGE_CHARS} characters")
+    agent.queue_typed_message(text)
+    return {"ok": True, "queued": True}
+
+
+CONTROL_ACTIONS = {"mute": _ctl_mute, "send_message": _ctl_send}
+
+
+def api_control(agent):
+    """GET /api/control — the state behind the sidebar controls. Standalone
+    (agent=None) reports `muted` as None: the page shows unknown and disables
+    the buttons rather than guessing at a microphone it can't see."""
+    if agent is not None:
+        return {"agent_running": True, **_control_state(agent)}
+    return {"agent_running": agent_running(), "muted": None, "mode": None}
+
+
+def api_control_post(agent, name, payload):
+    """POST /api/control/<name> -> (status, body). A request that can't be
+    delivered is an error the user is told about — silently accepting it would
+    look exactly like one that worked."""
+    action = CONTROL_ACTIONS.get(name)
+    if action is None:
+        return 404, {"ok": False, "error": "no such action"}
+    if agent is None:
+        if agent_running():
+            # An agent IS alive — in its own process, serving its own copy of
+            # this dashboard. This standalone page can't reach into it.
+            return 409, {"ok": False, "error":
+                         "The agent is running — use its dashboard at "
+                         f"http://127.0.0.1:{cfg.DASHBOARD_PORT}/"}
+        return 409, {"ok": False, "error": "The voice agent isn't running."}
+    log.info("control: %s", name)
+    try:
+        return 200, action(agent, payload)
+    except ValueError as e:
+        return 400, {"ok": False, "error": str(e)}
+    except Exception as e:  # noqa: BLE001 - a bad request must not kill the server
+        log.exception("control %s failed", name)
+        return 500, {"ok": False, "error": str(e)}
 
 
 def api_voices():
@@ -456,10 +552,17 @@ def api_agents():
     """The persona registry: coded defaults overlaid with data/agents.json,
     plus who's active. Editable fields only — tool lists are shown read-only."""
     agents_registry.load_agents()  # pick up saved edits fresh, like folder_registry
-    overlay = _read_json(cfg.AGENTS_PATH, {})
+    overlay = read_json(cfg.AGENTS_PATH, {})
     defaults = agents_registry.defaults()
+    # What each persona is ACTUALLY answering with right now. The "model" field
+    # below is the configured default; a mid-session "switch to DeepSeek" lives
+    # only in the agent process, which publishes it here (llm._write_agent_state).
+    # Without this the page confidently showed Haiku during a DeepSeek
+    # conversation — same stale-by-construction problem as model identity.
+    live_models = talking_to().get("models") or {}
     out = []
     for key, agent in agents_registry.AGENTS.items():
+        live = live_models.get(key)
         out.append({
             "key": key,
             "name": agent["name"],
@@ -467,6 +570,13 @@ def api_agents():
             "persona": agent["persona"],
             "aliases": list(agent["aliases"]),
             "model": agent["model"],
+            "live_model": live,
+            "live_model_label": cfg.convo_model_label(live) if live else None,
+            # Compared here, not in the page: "model" is a registry KEY
+            # ("haiku") and the published live value is a model ID
+            # ("claude-haiku-4-5").
+            "live_differs": bool(
+                live and live != cfg.CONVO_MODELS.get(agent["model"])),
             "tts_voice": agent["tts_voice"],
             "tts_rate": agent["tts_rate"],
             "tools": sorted(agent["tools"]),
@@ -490,7 +600,7 @@ def save_agents(payload):
     if not isinstance(payload, dict):
         return {"ok": False, "errors": {"_": "expected an object"}}
     agents_registry.load_agents()
-    overlay = _read_json(cfg.AGENTS_PATH, {})
+    overlay = read_json(cfg.AGENTS_PATH, {})
     if not isinstance(overlay, dict):
         overlay = {}
     errors = {}
@@ -562,7 +672,7 @@ def save_agents(payload):
 
 
 def api_config():
-    overrides = _read_json(cfg.OVERRIDES_PATH, {})
+    overrides = read_json(cfg.OVERRIDES_PATH, {})
     out = []
     for meta in TUNABLES:
         key = meta["key"]
@@ -592,18 +702,28 @@ def save_config(payload):
     return {"ok": True, "saved": sorted(overrides)}
 
 
-def api_history(limit=200):
-    messages = _read_json(cfg.HISTORY_PATH, [])
-    return {"messages": messages[-limit:], "total": len(messages)}
+def api_history(limit=200, agent=None):
+    """One persona's thread (histories are per-agent now). Default: whoever is
+    active per agent_state.json, so the page opens on the live conversation."""
+    if agent not in agents_registry.AGENTS:
+        agent = (read_json(cfg.AGENT_STATE_PATH, {}).get("active")
+                 or agents_registry.DEFAULT_AGENT)
+        if agent not in agents_registry.AGENTS:
+            agent = agents_registry.DEFAULT_AGENT
+    messages = read_json(cfg.history_path(agent), [])
+    return {"messages": messages[-limit:], "total": len(messages),
+            "agent": agent,
+            "agents": [{"key": k, "name": a["name"]}
+                       for k, a in agents_registry.AGENTS.items()]}
 
 
 def api_memory():
-    return {"pending": _read_json(cfg.MEMORY_PENDING_PATH, []),
+    return {"pending": read_json(cfg.MEMORY_PENDING_PATH, []),
             "min_messages": cfg.MEMORY_MIN_MESSAGES}
 
 
 def api_knowledge():
-    manifest = _read_json(cfg.KNOWLEDGE_MANIFEST, {})
+    manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     docs = [{"hash": h[:12], **info} for h, info in manifest.items()]
     docs.sort(key=lambda d: d.get("ingested", ""), reverse=True)
     ingested = {d.get("source") for d in docs}
@@ -620,9 +740,14 @@ def api_knowledge():
                 "bytes": path.stat().st_size,
                 "media": path.suffix.lower() in cfg.KB_MEDIA_EXTS,
             })
+    # Ingest targets for the UI selector: common plus each agent's private
+    # collection, by display name.
+    targets = ([{"key": cfg.COMMON_COLLECTION, "name": "Common (all agents)"}]
+               + [{"key": k, "name": f"{a['name']} only"}
+                  for k, a in agents_registry.AGENTS.items()])
     return {"docs": docs, "dir": str(cfg.KNOWLEDGE_DIR), "pending": pending,
             "accept": sorted(UPLOAD_EXTS), "agent_running": agent_running(),
-            "job": job_status()}
+            "targets": targets, "job": job_status()}
 
 
 # --- Knowledge ingestion job --------------------------------------------------
@@ -646,7 +771,7 @@ def _set_job(**fields):
         _job.update(fields)
 
 
-def _run_ingest():
+def _run_ingest(target=cfg.COMMON_COLLECTION):
     try:
         lock = SingleInstance(cfg.LOCK_PATH).acquire()
     except AlreadyRunning:
@@ -655,18 +780,21 @@ def _run_ingest():
         return _set_job(
             state="error", file="",
             message=("The voice agent is running. Close it first — ingesting "
-                     "writes the same search index the agent has open."),
+                     "writes the same search index the agent has open — then "
+                     "run the ingest from a standalone dashboard "
+                     "(dashboard.bat)."),
             finished=datetime.now().isoformat(timespec="seconds"))
     except OSError as e:
         return _set_job(state="error", file="", message=f"Could not take the lock: {e}",
                         finished=datetime.now().isoformat(timespec="seconds"))
     try:
-        from knowledge import KnowledgeStore  # heavy; only for a real job
+        from stores.knowledge import KnowledgeStore  # heavy; only for a real job
 
         _set_job(message="Loading models…")
         store = KnowledgeStore()
         summary = store.ingest_folder(
             include_media=True,
+            target=target,
             on_progress=lambda name, pct=None: _set_job(
                 file=name,
                 message=(f"Ingesting {name}…" if pct is None
@@ -680,8 +808,12 @@ def _run_ingest():
         lock.release()
 
 
-def start_ingest():
-    """Kick off a background ingest unless one is already in flight."""
+def start_ingest(target=cfg.COMMON_COLLECTION):
+    """Kick off a background ingest unless one is already in flight. `target`
+    routes new files: 'common' or an agent key (validated here, before the
+    thread, so a bad value is a 400 and not a background failure)."""
+    if target != cfg.COMMON_COLLECTION and target not in agents_registry.AGENTS:
+        return {"ok": False, "error": f"unknown ingest target '{target}'"}
     with _job_lock:
         if _job["state"] == "running":
             return {"ok": False, "error": "An ingest is already running."}
@@ -691,7 +823,7 @@ def start_ingest():
     # block for the rest of a half-hour transcription. Interrupting is safe --
     # the manifest is written per file, and chunk ids derive from the file hash,
     # so a re-run overwrites rather than duplicates.
-    threading.Thread(target=_run_ingest, daemon=True).start()
+    threading.Thread(target=_run_ingest, args=(target,), daemon=True).start()
     return {"ok": True}
 
 
@@ -752,7 +884,7 @@ def remove_pending(name):
     path = cfg.KNOWLEDGE_DIR / name
     if not path.is_file():
         return 404, {"ok": False, "error": f"'{name}' is no longer in the folder"}
-    manifest = _read_json(cfg.KNOWLEDGE_MANIFEST, {})
+    manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     if any(entry.get("source") == name for entry in manifest.values()):
         return 409, {"ok": False,
                      "error": f"'{name}' is already in the knowledge base — "
@@ -860,10 +992,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, api_config())
             if route == "/api/agents":
                 return self._send(200, api_agents())
+            if route == "/api/control":
+                return self._send(200, api_control(self.server.agent))
             if route == "/api/voices":
                 return self._send(200, api_voices())
             if route == "/api/history":
-                return self._send(200, api_history(int(arg("limit", "200"))))
+                return self._send(200, api_history(int(arg("limit", "200")),
+                                                   arg("agent", None)))
             if route == "/api/memory":
                 return self._send(200, api_memory())
             if route == "/api/knowledge":
@@ -877,14 +1012,44 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/log":
                 log = api_log(arg("name", ""), int(arg("lines", "300")))
                 return self._send(200, log) if log else self._send(404, {"error": "no such log"})
+            if route.startswith("/api/trading/"):
+                return self._trading(route, arg)
             return self._send(404, {"error": "not found"})
         except Exception as e:  # one bad request must not kill the server
             return self._send(500, {"error": str(e)})
 
+    def _trading(self, route, arg, body=None):
+        # Trading is imported lazily so the dashboard keeps its instant,
+        # stdlib-only start; the requests/websocket deps load only when a
+        # Trading page is actually used.
+        from trading import web_api as tw
+        get_routes = {
+            "/api/trading/status": lambda: tw.status(),
+            "/api/trading/quote-token": lambda: tw.quote_token(),
+            "/api/trading/chain": lambda: tw.chain(arg("symbol", "")),
+            "/api/trading/ticket": lambda: tw.ticket_get(),
+            "/api/trading/orders": lambda: tw.orders_list(arg("start")),
+            "/api/trading/positions": lambda: tw.positions(),
+            "/api/trading/pnl": lambda: tw.pnl(arg("start"), arg("end"),
+                                               arg("underlying")),
+        }
+        post_routes = {
+            "/api/trading/ticket": lambda: tw.ticket_post(body),
+            "/api/trading/dry-run": lambda: tw.dry_run(),
+            "/api/trading/submit": lambda: tw.submit(body),
+            "/api/trading/cancel": lambda: tw.cancel(body),
+        }
+        fn = (post_routes if body is not None else get_routes).get(route)
+        if fn is None:
+            return self._send(404, {"error": "not found"})
+        result = fn()
+        bad = isinstance(result, dict) and "error" in result
+        return self._send(400 if bad else 200, result)
+
     def do_POST(self):
         url = urlparse(self.path)
         # Uploads carry raw file bytes, not JSON, and are streamed to disk —
-        # so they're handled before the read-the-whole-body savers below.
+        # so they're handled before the read-the-whole-body routes below.
         if url.path == "/api/knowledge/upload":
             try:
                 name = parse_qs(url.query).get("name", [""])[0]
@@ -896,7 +1061,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 return self._send(500, {"ok": False, "error": str(e)})
         if url.path == "/api/knowledge/ingest":
-            result = start_ingest()
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length) or b"{}")
+            except (ValueError, TypeError) as e:
+                return self._send(400, {"ok": False, "error": f"bad request: {e}"})
+            result = start_ingest(payload.get("target", cfg.COMMON_COLLECTION))
+            if result.get("error", "").startswith("unknown"):
+                return self._send(400, result)
             return self._send(200 if result["ok"] else 409, result)
         if url.path == "/api/knowledge/remove":
             try:
@@ -906,14 +1078,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(status, body)
             except (ValueError, TypeError) as e:
                 return self._send(400, {"ok": False, "error": f"bad request: {e}"})
-
-        savers = {"/api/config": save_config, "/api/agents": save_agents}
-        saver = savers.get(url.path)
-        if saver is None:
-            return self._send(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length) or b"{}")
+            if url.path.startswith("/api/control/"):
+                # Generic: /api/control/<action> dispatches through
+                # CONTROL_ACTIONS, so a new control needs no route added here.
+                status, body = api_control_post(
+                    self.server.agent, url.path[len("/api/control/"):], payload)
+                return self._send(status, body)
+            if url.path.startswith("/api/trading/"):
+                return self._trading(url.path, None, body=payload)
+            savers = {"/api/config": save_config, "/api/agents": save_agents}
+            saver = savers.get(url.path)
+            if saver is None:
+                return self._send(404, {"error": "not found"})
             result = saver(payload)
             return self._send(200 if result["ok"] else 400, result)
         except (ValueError, TypeError) as e:
@@ -922,15 +1101,91 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(500, {"error": str(e)})
 
 
+# --- Server construction ------------------------------------------------------
+
+class _Server(ThreadingHTTPServer):
+    daemon_threads = True
+    # Windows quirk: with the inherited allow_reuse_address=True a second bind
+    # on the same port silently SUCCEEDS, so a port conflict would go
+    # undetected instead of producing the honest error/soft-fail below.
+    allow_reuse_address = False
+
+
+def build_server(port, agent=None):
+    """The dashboard server, not yet serving. `agent` is the live Agent when
+    embedded in the agent process, None standalone; Handler reads it via
+    self.server.agent. Raises OSError if the port can't be bound."""
+    server = _Server(("127.0.0.1", port), Handler)
+    server.agent = agent
+    return server
+
+
+class _Embedded:
+    """Handle for a dashboard served inside the agent process. `server` is
+    None when the bind failed — every method stays safe to call."""
+
+    def __init__(self, server):
+        self._server = server
+        self._thread = None
+
+    @property
+    def port(self):
+        return self._server.server_address[1] if self._server else None
+
+    def start(self):
+        if self._server is None:
+            return self
+        # Tight poll so stop() (which waits out one poll) returns promptly.
+        self._thread = threading.Thread(
+            target=lambda: self._server.serve_forever(poll_interval=0.1),
+            daemon=True, name="dashboard")
+        self._thread.start()
+        log.info("dashboard on http://127.0.0.1:%s/", self.port)
+        return self
+
+    def stop(self):
+        if self._server is None:
+            return
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=1.0)
+        self._server = None
+
+
+def serve_embedded(agent, port=None):
+    """Host the dashboard inside the agent process, on a daemon thread, its
+    controls wired straight to `agent` (set_mute / queue_typed_message — the
+    same cross-thread calls the headset-button thread already makes; no extra
+    locking). Fails SOFT on a taken port: log a warning and return a dead
+    handle, because a web page must never stop the voice agent from starting.
+    Never opens a browser."""
+    global _embedded_agent
+    try:
+        server = build_server(cfg.DASHBOARD_PORT if port is None else port,
+                              agent=agent)
+    except OSError as e:
+        log.warning("could not bind the dashboard port %s (%s) — the agent "
+                    "runs without a web UI",
+                    cfg.DASHBOARD_PORT if port is None else port, e)
+        return _Embedded(None)
+    _embedded_agent = agent
+    return _Embedded(server).start()
+
+
 def main():
     ap = argparse.ArgumentParser(description="Voice agent dashboard")
-    ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument("--port", type=int, default=cfg.DASHBOARD_PORT)
     ap.add_argument("--no-browser", action="store_true",
                     help="don't open the dashboard in the default browser")
     args = ap.parse_args()
 
     cfg.ensure_dirs()
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    try:
+        server = build_server(args.port)
+    except OSError:
+        print(f"Port {args.port} is taken — if the voice agent is running, "
+              f"its dashboard is already at http://127.0.0.1:{args.port}/")
+        raise SystemExit(1)
     url = f"http://127.0.0.1:{args.port}/"
     print(f"Voice agent dashboard: {url}  (Ctrl+C to stop)")
     if not args.no_browser:

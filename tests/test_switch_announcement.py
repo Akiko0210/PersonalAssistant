@@ -7,31 +7,17 @@ it touches — a real Agent would boot audio, TTS, Whisper and the note stores.
 import unittest
 from types import SimpleNamespace
 
-import agents
+from brain import agents
 import config as cfg
-from llm import Claude
-from tools import ToolContext
 from voice_agent import Agent
-
-
-def make_llm():
-    """A Claude with only what switch_to / active_model need."""
-    c = Claude.__new__(Claude)
-    c.active = agents.DEFAULT_AGENT
-    c._model_overrides = {}
-    c._ctx = ToolContext(active_agent=c.active,
-                         convo_model=cfg.CONVO_MODELS["haiku"])
-    c.history = []  # switch_to appends its took-over marker here
-    c._save_history = lambda: None       # no disk writes from tests
-    c._write_agent_state = lambda: None
-    return c
+from tests.llm_fixtures import make_claude
 
 
 class _AgentShell:
     """Just the surface _switch_agent uses."""
 
     def __init__(self):
-        self.llm = make_llm()
+        self.llm = make_claude()
         self.tts = SimpleNamespace(set_voice=lambda *a: None,
                                    current_voice=lambda: "voice")
         self._speaking_voice = None
@@ -40,6 +26,9 @@ class _AgentShell:
 
     def say(self, text, **kw):
         self.spoken.append(text)
+
+    def _use_voice(self, hat):
+        return Agent._use_voice(self, hat)
 
 
 class TestSwitchAnnouncement(unittest.TestCase):

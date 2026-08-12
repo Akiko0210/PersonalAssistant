@@ -20,6 +20,13 @@
     <div class="agent-status" id="agent-status">
       <span class="dot"></span><span class="status-text">checking…</span>
     </div>
+    <!-- The mute button lives here, on screen whichever page is open: losing
+         track of the microphone state is the problem it exists to solve.
+         Typing to the agent belongs with the conversation, not here. -->
+    <button class="mute-btn" id="mute-btn" type="button" aria-pressed="false" disabled>
+      <span class="mute-state">Microphone</span>
+      <span class="mute-action">checking…</span>
+    </button>
     <div class="nav-links">
       <a href="#/overview" data-view="overview"><span class="nav-ico">◧</span>Overview</a>
       <a href="#/agents" data-view="agents"><span class="nav-ico">🎭</span>Agents</a>
@@ -29,6 +36,7 @@
       <a href="#/memory" data-view="memory"><span class="nav-ico">◔</span>Memory</a>
       <a href="#/knowledge" data-view="knowledge"><span class="nav-ico">📚</span>Knowledge</a>
       <a href="#/discord" data-view="discord"><span class="nav-ico">📈</span>Discord</a>
+      <a href="#/trading" data-view="trading"><span class="nav-ico">💹</span>Trading</a>
       <a href="#/logs" data-view="logs"><span class="nav-ico">≣</span>Logs</a>
     </div>
     <div class="sidebar-foot">local · 127.0.0.1</div>

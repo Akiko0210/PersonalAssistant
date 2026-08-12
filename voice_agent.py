@@ -24,19 +24,20 @@ except ImportError:
 
 import anthropic
 
-import agents
-import categories
+from brain import agents
+from stores import categories
 import config as cfg
-from audio import AudioEngine
-from barge_in import BargeInDetector
-from gestures import ClickGestureDecoder
-from stt import Transcriber
-from tts import Announcer, Speaker
-from notes import NoteStore
-from knowledge import KnowledgeStore
-from llm import Claude
-from sound import IdleSound
-from single_instance import SingleInstance, AlreadyRunning
+from web import server as dashboard
+from speech.audio import AudioEngine
+from speech.barge_in import BargeInDetector
+from buttons.gestures import ClickGestureDecoder
+from speech.stt import Transcriber
+from speech.tts import Announcer, Speaker
+from stores.notes import NoteStore
+from stores.knowledge import KnowledgeStore
+from brain.llm import Claude
+from speech.sound import IdleSound
+from lib.single_instance import SingleInstance, AlreadyRunning
 
 
 def explain_error(e: Exception) -> str:
@@ -168,6 +169,9 @@ class Agent:
         self.interjections: "queue.Queue[dict]" = queue.Queue()
         self.interject = threading.Event()
         self._delegation_threads = []
+        # Messages typed into the dashboard (queue_typed_message). Drained one
+        # per turn at utterance boundaries, same as interjections.
+        self.typed: "queue.Queue[str]" = queue.Queue()
 
     # --- command plumbing ----------------------------------------------------
     def _push(self, cmd):
@@ -199,26 +203,93 @@ class Agent:
         self.silence.clear()
         return signals
 
+    def set_mute(self, muted: bool):
+        """Put the microphone into `muted` and say so — the shared body of
+        every mute, whatever asked for it: the headset click (via _toggle_mute)
+        or the dashboard's button, arriving on a web handler thread.
+
+        A *state*, not a toggle, because the dashboard names the state it
+        wants and two sources flipping a shared toggle would race. A request
+        for the state we're already in is applied silently: there is nothing
+        to announce, and re-announcing would talk over the reply for no
+        reason. A dashboard mute skips the headset's click dance entirely —
+        there is no dongle here waiting to see a pause honoured, so nothing
+        touches playback; a playing reply carries on."""
+        changed = muted != self.audio.muted.is_set()
+        if muted:
+            self.audio.muted.set()
+        else:
+            self.audio.muted.clear()
+        if not changed:
+            return
+        self.log.info("muted — not listening" if muted else "unmuted — listening")
+        # The acknowledgement goes out on the *second* voice, so it lands with
+        # the button press instead of queueing behind a reply that may have
+        # twenty seconds left to run. Only if that voice is unavailable does it
+        # fall back to the main one, spoken at the next drain.
+        notice = "Muted." if muted else "Listening."
+        if not self.announcer.announce(notice, avoid_voice=self._speaking_voice):
+            self._push("announce_mute")
+
     def _toggle_mute(self):
         """Flip the microphone, from the button thread, the instant the gesture
         resolves — not when the main loop next drains. The reply is still
         playing (mute no longer cuts it off), and the microphone must already
         be deaf while it plays: otherwise the tail of the reply stays
-        interruptible by the very person who just asked not to be heard.
+        interruptible by the very person who just asked not to be heard."""
+        self.set_mute(not self.audio.muted.is_set())
 
-        The acknowledgement goes out on the *second* voice, so it lands with
-        the button press instead of queueing behind a reply that may have
-        twenty seconds left to run. Only if that voice is unavailable does it
-        fall back to the main one, spoken at the next drain."""
-        if self.audio.muted.is_set():
-            self.audio.muted.clear()
-        else:
-            self.audio.muted.set()
-        notice = "Muted." if self.audio.muted.is_set() else "Listening."
-        self.log.info("muted — not listening" if self.audio.muted.is_set()
-                      else "unmuted — listening")
-        if not self.announcer.announce(notice, avoid_voice=self._speaking_voice):
-            self._push("announce_mute")
+    def queue_typed_message(self, text: str):
+        """A message typed into the dashboard, arriving on a web handler
+        thread. Queued, not answered here: the turn loop picks it up at the
+        next utterance boundary, so it never cuts off speech in progress. The
+        wake event is honoured while muted — typing is exactly what a muted
+        user does — and honoured only between utterances, so it cannot
+        truncate one."""
+        self.typed.put(text)
+        self.interject.set()
+
+    def _handle_typed_message(self, text: str):
+        """Answer one typed message as a spoken turn. Same tail as a spoken
+        utterance (_respond) minus the mic-specific parts: no continuation
+        settle (followups=False — that window listens to the microphone and
+        would merge room noise into typed text), and no backchannel/resume
+        handling (fillers are things the mic hears)."""
+        self.log.info("you (typed): %s", text)
+        self._respond(text, followups=False)
+
+    def _respond(self, text: str, *, followups: bool):
+        """The shared tail of every user turn, typed or spoken: persona
+        addressing ("Tom, ..." switches, exactly like saying it), the model
+        call, the empty-reply honesty, speaking the reply, and _after_reply's
+        deferred-slot draining.
+
+        followups: capture mid-thought continuations from the microphone
+        before calling the model (_converse_with_followups) — spoken turns
+        only. A typed message is already complete, and the settle window
+        would merge unrelated room speech into it."""
+        target, remainder = agents.match_address(text)
+        if target and target != self.llm.active:
+            self._switch_agent(target)
+            if not remainder:
+                return  # a pure switch — back to listening in the new voice
+            text = remainder
+        reply = (self._converse_with_followups(text) if followups
+                 else self.llm.converse(text))
+        if not reply:
+            # Expected only when note-taking or quit cut the turn short. An
+            # empty reply with nothing silencing it means the model produced
+            # nothing — that must never pass silently again (a truncated tool
+            # call once died here unnoticed, and the user heard nothing for 12
+            # minutes).
+            if not self.silence.is_set():
+                self.log.warning("model returned an empty reply for: %r", text)
+                self.say("I came back with an empty reply — something went "
+                         "wrong. Try that again.", voice=False, commands=False)
+            return
+        self.log.info("agent: %s", reply)
+        interrupted = self.say(reply, save_resume=True)
+        self._after_reply(interrupted)
 
     def _toggle_note(self):
         self.silence.set()  # a new note (or the end of one) stops the reply
@@ -288,7 +359,7 @@ class Agent:
         self._listener.start()
 
         try:
-            from media_control import MediaButtonListener
+            from buttons.media_control import MediaButtonListener
 
             def on_play_pause():
                 self.log.info("media button (SMTC) received (speaking=%s)",
@@ -332,6 +403,15 @@ class Agent:
             self.run_notetaking()
             return
         if utt is None or utt.size == 0:
+            # No speech — but perhaps a typed message ended the idle wait (its
+            # arrival sets self.interject, the wake event). One per turn, so a
+            # burst of messages interleaves with the mic instead of locking
+            # the floor.
+            try:
+                typed = self.typed.get_nowait()
+            except queue.Empty:
+                return
+            self._handle_typed_message(typed)
             return
         text = self.stt.transcribe(utt)
         if not text:
@@ -359,33 +439,7 @@ class Agent:
 
         self._interrupted_reply = None
         self._interrupted_remaining = None
-
-        # Spoken agent addressing: "Bob, what's my last note?" or "switch to
-        # Tom". Detected on the transcript directly — zero model calls; any
-        # free-form phrasing the regex misses is covered by the switch_agent
-        # tool the active persona can call.
-        target, remainder = agents.match_address(text)
-        if target and target != self.llm.active:
-            self._switch_agent(target)
-            if not remainder:
-                return  # a pure switch — back to listening in the new voice
-            text = remainder
-
-        reply = self._converse_with_followups(text)
-        if not reply:
-            # Expected only when note-taking or quit cut the turn short. An
-            # empty reply with nothing silencing it means the model produced
-            # nothing — that must never pass silently again (a truncated tool
-            # call once died here unnoticed, and the user heard nothing for 12
-            # minutes).
-            if not self.silence.is_set():
-                self.log.warning("model returned an empty reply for: %r", text)
-                self.say("I came back with an empty reply — something went "
-                         "wrong. Try that again.", voice=False, commands=False)
-            return
-        self.log.info("agent: %s", reply)
-        interrupted = self.say(reply, save_resume=True)
-        self._after_reply(interrupted)
+        self._respond(text, followups=True)
 
     def _after_reply(self, interrupted: bool):
         """Everything a turn leaves behind once its reply is spoken: background
@@ -459,6 +513,15 @@ class Agent:
             # the next between-turns gap instead.)
             self._deliver_interjections()
 
+    def _use_voice(self, hat):
+        """Speak as `hat`: set the SAPI voice AND refresh the cached
+        _speaking_voice the announcer contrasts against (announce(avoid_voice=
+        ...)). Always both — the startup site used to skip the refresh,
+        leaving the mute acknowledgement able to land on the same voice as
+        the reply it was speaking over."""
+        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
+        self._speaking_voice = self.tts.current_voice()
+
     def _switch_agent(self, key):
         """Flip the active persona everywhere it shows: model/tools/prompt
         (llm.switch_to), the speaking voice, and a short spoken announcement —
@@ -471,8 +534,7 @@ class Agent:
         conversation model is exactly the thing you can't hear."""
         self.llm.switch_to(key)
         hat = agents.AGENTS[key]
-        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
-        self._speaking_voice = self.tts.current_voice()
+        self._use_voice(hat)
         model = self.llm.active_model_label
         self.log.info("=== talking to %s (%s) ===", hat["name"], model)
         self.say(f"{hat['name']} here, running on {model}.",
@@ -550,15 +612,13 @@ class Agent:
         note = item.get("note")
         if note:
             active = agents.AGENTS[self.llm.active]
-            self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
-            self._speaking_voice = self.tts.current_voice()
+            self._use_voice(hat)
             try:
                 self.say(f"{hat['name']} here — your note is ready to file.",
                          voice=False, commands=False)
                 self._save_pending_note(note, saver=hat["name"])
             finally:
-                self.tts.set_voice(active["tts_voice"], active["tts_rate"])
-                self._speaking_voice = self.tts.current_voice()
+                self._use_voice(active)
             return False
         self.llm.record_tool_event(
             f"{hat['name']} finished a background task (ask_agent) and "
@@ -956,11 +1016,16 @@ class Agent:
     def run(self):
         self.audio.start()
         self.start_hotkeys()
+        # The dashboard — live controls included — is served from inside this
+        # process, so its buttons call straight into the methods that own the
+        # state. Fails soft if the port is taken: a web page must never stop
+        # the voice agent from starting.
+        self._web = dashboard.serve_embedded(self)
         self.log.info(
             "Ready. Headset button: 1-click=mute  2-click=note  3-click=quit"
         )
         hat = agents.AGENTS[self.llm.active]
-        self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
+        self._use_voice(hat)  # also refreshes the announcer's avoid_voice
         self.say(f"Voice agent ready. {hat['name']} speaking.",
                  voice=False, commands=False)
         try:
@@ -982,6 +1047,11 @@ class Agent:
             pass
         finally:
             self._rescue_background_notes()
+            # The port closes with the process anyway, but stopping cleanly
+            # means an in-flight dashboard request gets a response, not a
+            # reset.
+            if getattr(self, "_web", None) is not None:
+                self._web.stop()
             self.audio.stop()
             if getattr(self, "_media", None) is not None:
                 self._media.stop()
@@ -1087,6 +1157,10 @@ def main():
                         help="Ingest PDFs/text/video from the knowledge/ folder into "
                              "the knowledge base, then exit (video is transcribed, "
                              "which can take minutes per hour of material)")
+    parser.add_argument("--target", default=cfg.COMMON_COLLECTION,
+                        help="Where --ingest routes NEW files: 'common' (default) "
+                             "or an agent key (e.g. tom) for that agent's "
+                             "private collection")
     parser.add_argument("--kb-list", action="store_true",
                         help="List ingested knowledge sources, then exit")
     parser.add_argument("--resync", action="store_true",
@@ -1121,7 +1195,7 @@ def main():
         if args.selftest:
             selftest()
         elif args.ingest:
-            print(KnowledgeStore().ingest_folder())
+            print(KnowledgeStore().ingest_folder(target=args.target))
         elif args.resync:
             print(NoteStore().resync())
         else:

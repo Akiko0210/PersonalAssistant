@@ -17,7 +17,7 @@ sentence-transformers) are all on-device. No UI — just your voice and hotkeys 
 but everything is logged to `logs/`.
 
 For a detailed technical walkthrough — module map, data flows, the tool
-registry, and extension points — see **[PROJECT.md](PROJECT.md)**. (You can also
+registry, and extension points — see **[PROJECT.md](docs/PROJECT.md)**. (You can also
 just ask the agent: "tell me about this project.")
 
 ## Setup
@@ -81,7 +81,7 @@ reply to end; on a machine with more than one voice installed it deliberately
 uses a different one, so you can tell the two apart. There's a brief hitch
 where the click landed: playback pauses the instant the button goes down,
 because the wireless dongle only passes on the *next* click of a double/triple
-if the host really stops (see `MEDIA_CONTROL.md`), and the reply picks up again
+if the host really stops (see `docs/MEDIA_CONTROL.md`), and the reply picks up again
 as soon as the click turns out to be a single.
 
 Muting while the agent is still *thinking* doesn't cancel anything either —
@@ -91,7 +91,7 @@ triple-click (quit) do end a reply immediately, and to cut one short without
 changing anything, just start talking (barge-in, below).
 
 Button presses are listened for on two channels at once (see
-`MEDIA_CONTROL.md`): a keyboard hook (how wired headsets and USB wireless
+`docs/MEDIA_CONTROL.md`): a keyboard hook (how wired headsets and USB wireless
 dongles deliver presses) and a Windows media session (SMTC — how
 Bluetooth-native headsets like AirPods deliver them; those never appear as key
 events). A press arriving on both channels is counted once. Multi-click
@@ -101,7 +101,36 @@ instead; those map to the same double/triple actions. A silent keepalive
 stream runs continuously (`MEDIA_KEEPALIVE` in `config.py`) so the headset's
 audio link never spins up from silence — wireless dongles drop presses during
 those first seconds — and every click briefly pauses it so state-tracking
-dongles stay in sync (see `MEDIA_CONTROL.md`).
+dongles stay in sync (see `docs/MEDIA_CONTROL.md`).
+
+### Dashboard controls (mute button, chat box)
+
+The same mute, without the headset: the dashboard sidebar carries a **mute
+button** on every page, showing whether the microphone is live (`🎙 Mic on`) or
+deaf (`🔇 MUTED`, in red — and the browser tab title says so too, so a glance
+at the taskbar answers "am I muted?"). Clicking it does exactly what a single
+click on the headset does, spoken confirmation included; a reply already
+playing carries on. Mute from the headset and the dashboard follows within a
+couple of seconds.
+
+**Typing instead of speaking** lives on the **Conversation page**, as a chat
+box under the transcript: type a message and the agent answers aloud, exactly
+as if you'd said it — persona addressing included ("Tom, …" typed works like
+"Tom, …" spoken). The message is answered at the next gap in conversation,
+never cutting off speech in progress, and typing works while muted — that's
+rather the point of typing. During note-taking it waits until the note ends.
+The exchange then appears in the transcript above like any spoken turn; the
+page watches for it, since the agent writes history only once it has finished
+answering.
+
+How it works: the agent **serves the dashboard itself** (localhost:8765, from
+inside its own process — `web/server.py`'s `serve_embedded`), so a button
+click is a direct method call on the running agent. A standalone dashboard
+(`dashboard.bat`, for browsing/config/ingest while the agent is off) answers
+control clicks honestly instead: "agent not running", or "the agent is
+running — use its dashboard" when one is alive in its own process. Adding a
+future control is one handler in `web/server.py`'s `CONTROL_ACTIONS` table,
+one public method on the Agent, and a button; the routing doesn't change.
 
 ### Barge-in (interrupt the agent)
 
@@ -123,19 +152,35 @@ cut off mid-thought.
 
 ## Conversation memory
 
-The conversation is saved to `data/history.json` after every turn and restored
-on the next start, so the agent remembers your last conversation across
-restarts. The live window keeps the most recent exchanges
+**Each persona keeps its own conversation.** Alice, Bob, and Tom each have
+their own thread (`data/history_<name>.json`), saved after every turn and
+restored on the next start. What you tell one, the others cannot see: ask Tom
+what you discussed with Alice and he'll say he doesn't have access — and
+offer to ask her. Accept, and Alice answers from her own memory as a spoken
+interjection. The live window keeps each thread's most recent exchanges
 (`HISTORY_MAX_MESSAGES` in `config.py`).
 
-Older conversation isn't lost when it ages out of that window: its text is
-staged to `data/memory_pending.json`, and at boot the agent consolidates the
-staged text — one quick model call summarises it into a dense memory record
-embedded in a persistent `conversations` collection in Chroma. Ask "what did we
-talk about last week?" or "didn't we discuss X before?" and the agent searches
-those archived summaries (`search_past_conversations`). Consolidation only runs
-when enough has accumulated, and if it fails (e.g. offline) the staged text is
-kept and retried next boot.
+Older conversation isn't lost when it ages out of a window: its text is
+staged to `data/memory_pending.json` tagged with its persona, and at boot the
+agent consolidates each persona's staged text — one quick model call
+summarises it into a dense memory record embedded in that persona's own
+`conversations_<name>` collection in Chroma. Ask "what did we talk about last
+week?" and the persona searches its own archive
+(`search_past_conversations`); conversations from before the per-persona
+split live in a shared legacy archive every persona can read, labelled as
+such. Consolidation only runs when enough has accumulated, and if it fails
+(e.g. offline) the staged text is kept and retried next boot.
+`scripts/seed_agent_memory.py` (run once, agent off) backfills each persona's
+archive from the session logs.
+
+Knowledge splits the same way: the dashboard's ingest has a target selector,
+so a document can go into the common knowledge base (all personas) or one
+persona's private collection — private material never shows up in another
+persona's searches. Tom additionally has **focus mode**: "focus on my double
+diagonals" narrows his retrieval to that strategy until you say to clear it.
+
+Anything meant for every persona belongs in a note or the common knowledge
+base — those are shared on purpose.
 
 You can also turn part of a conversation into a note without switching to
 note-taking mode: ask something ("what did we talk about trading?"), then say
@@ -160,7 +205,8 @@ data/Trading/        notes filed under "Trading"  (<id>.md + <id>.transcript.md)
 data/TherapyBooks/   notes filed under "Therapy book"
 data/General/        everything else
 data/pending/        transient: live transcript while a session is recording
-data/chroma/         semantic search index (note + knowledge collections)
+data/chroma/         semantic search index (notes, knowledge, conversations,
+                     plus per-persona private collections)
 data/index.json      ordered record of every note (title, date, category)
 knowledge/           reference PDFs/text/video you ingest + manifest.json (see below)
 logs/                dated session logs of everything that happened
@@ -269,6 +315,38 @@ One limitation worth knowing: only the spoken audio is captured. Whatever is dra
 on a chart or slide is lost, so an instructor saying "as you can see here" ingests
 as exactly that.
 
+## Real trading by voice (tastytrade)
+
+The agent can build and place real multi-leg option orders on the tastytrade
+API — SPX and stock options, /ES and /MES futures options — with live bid/ask,
+a mandatory spoken review before any submit, order cancel, positions, and
+realized/unrealized P&L. The dashboard has a matching **Trading** page (same
+ticket, live DXLink quotes, review/submit/cancel, P&L reports).
+
+Setup — add your tastytrade OAuth credentials to `.env`:
+
+```
+TASTY_CLIENT_SECRET=...   # my.tastytrade.com -> My Profile -> API -> OAuth app
+TASTY_REFRESH_TOKEN=...   # "Create Grant" on the same page (never expires)
+TASTY_ACCOUNT_ID=...
+TASTY_ENV=sandbox         # orders go to the cert sandbox until you set: live
+```
+
+If you already run the Tasty-Web project, point at its `.env` instead of
+copying keys: `TASTY_ENV_FILE=C:\Home\Proj\Tasty-Web\.env` (its
+`CLIENT_SECRET`/`REFRESH_TOKEN`/`TASTYWORKS_ACCOUNT_ID` names are accepted).
+**The safety gate is `TASTY_ENV`**: anything other than exactly `live` uses
+the sandbox, so real money always requires that explicit opt-in.
+
+Then, in conversation: *"set up an iron condor on SPX"* → *"move the put side
+down ten"* → *"price it at mid"* → *"review it"* (the agent speaks cost,
+buying-power effect, fees, warnings) → *"submit it"*. Submission only works
+after a review of that exact ticket and your explicit go-ahead; any edit
+invalidates the review. *"Cancel the order"*, *"what are my positions?"*, and
+*"how much did I make this week on SPX?"* work as expected. Design and API
+research: [TRADING_PLAN.md](docs/TRADING_PLAN.md),
+[TRADING_RESEARCH.md](docs/TRADING_RESEARCH.md).
+
 ## Switching the model by voice
 
 Conversation defaults to **Haiku 4.5** for low latency. Ask for a different model
@@ -298,9 +376,9 @@ hear:
 > "Bob here, running on Haiku 4.5."
 > "Tom here, running on DeepSeek V4 Pro."
 
-**Asking "what model are you on?" reads the real setting.** The personas share
-one conversation history, so it fills up with model talk that no longer applies
-— a switch Tom made, a choice from an hour ago. Left to answer from that, the
+**Asking "what model are you on?" reads the real setting.** A conversation
+history fills up with model talk that no longer applies — a choice from an
+hour ago, an old switch. Left to answer from that, the
 agent guesses, and it has guessed wrong (claiming Opus while on Haiku, and
 DeepSeek while on Opus). Every persona now has a `get_current_model` tool and a
 hard rule to call it before saying anything about models, so the answer is a
@@ -311,25 +389,28 @@ live read rather than a recollection — and it shows up as a `tool_use` line in
 
 The agent can answer questions about its own design — "how does barge-in work?",
 "where are my notes stored?", "what tools do you have?", "how do I switch models?".
-It reads [PROJECT.md](PROJECT.md) (via the `describe_project` tool) and answers
+It reads [PROJECT.md](docs/PROJECT.md) (via the `describe_project` tool) and answers
 from it, so its self-knowledge stays in sync with the documentation.
 
 ## Project layout
 
 ```
 voice_agent.py   entry point + Agent orchestration (main loop, modes, say/barge-in)
-audio.py stt.py tts.py sound.py     mic/VAD, transcription, speech, thinking cue
-barge_in.py gestures.py media_control.py   interrupt logic, button decode, SMTC
-llm.py history.py memory.py         Claude loop, history repair, long-term memory
-notes.py knowledge.py discord_data.py categories.py   stores + folder registry
 config.py        shared constants (paths, audio params, models, system prompt)
+speech/          audio (mic/VAD), stt, tts, sound (thinking cue), barge_in
+buttons/         gestures (click decode), media_control (SMTC / headset button)
+brain/           llm (Claude loop), agents (personas), history, memory
+stores/          notes, knowledge, categories, discord_data, chroma_store
+lib/             atomic_io, single_instance, frontmatter — leaf utilities
+web/             server.py (the dashboard, embedded in the agent) + static/
+docs/            PROJECT.md, MEDIA_CONTROL.md, TODO.md, TRADING_*.md
 tools/           tool registry — one file per domain (notes, discord, model, ...)
 tests/           unittest suite over the pure logic (no hardware needed)
 scripts/         manual hardware probes used while developing button handling
 ```
 
 Adding a capability is one decorated function under `tools/` — see
-[PROJECT.md](PROJECT.md) §5. Run the tests with:
+[PROJECT.md](docs/PROJECT.md) §5. Run the tests with:
 
 ```sh
 python -m unittest discover tests

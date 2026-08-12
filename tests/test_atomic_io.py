@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from atomic_io import write_text_atomic, write_json_atomic
+from lib.atomic_io import write_text_atomic, write_json_atomic
 
 
 class TestAtomicWrite(unittest.TestCase):
@@ -71,7 +71,7 @@ class TestAtomicWrite(unittest.TestCase):
                 raise PermissionError(13, "sharing violation", dst)
             return real_replace(src, dst)
 
-        with mock.patch("atomic_io.os.replace", side_effect=flaky_replace):
+        with mock.patch("lib.atomic_io.os.replace", side_effect=flaky_replace):
             write_text_atomic(self.path, "survived the sync client")
         self.assertEqual(self._read(), "survived the sync client")
         self.assertEqual(calls["n"], 3)
@@ -79,9 +79,9 @@ class TestAtomicWrite(unittest.TestCase):
 
     def test_persistent_permission_error_still_raises(self):
         write_text_atomic(self.path, "ORIGINAL")
-        with mock.patch("atomic_io.os.replace",
+        with mock.patch("lib.atomic_io.os.replace",
                         side_effect=PermissionError(13, "held forever")), \
-             mock.patch("atomic_io.time.sleep"):  # don't actually back off
+             mock.patch("lib.atomic_io.time.sleep"):  # don't actually back off
             with self.assertRaises(PermissionError):
                 write_text_atomic(self.path, "NEVER-LANDS")
         self.assertEqual(self._read(), "ORIGINAL")

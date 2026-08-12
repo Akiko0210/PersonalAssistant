@@ -15,6 +15,26 @@ import tempfile
 import time
 
 
+def read_json(path, fallback, *, expect=None, warn=None):
+    """Read JSON from `path`; `fallback` when the file is missing, unreadable,
+    or (with `expect`) the wrong top-level type. The read half of
+    write_json_atomic — eight modules used to hand-roll this try/except.
+
+    A missing file is normal (first run) and never warned. A corrupt one calls
+    warn(exc), so each caller keeps its own load-bearing message (the note
+    index's points at --resync)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        return fallback
+    except (OSError, ValueError) as e:
+        if warn is not None:
+            warn(e)
+        return fallback
+    return data if expect is None or isinstance(data, expect) else fallback
+
+
 def write_json_atomic(path, obj, *, indent=2, ensure_ascii=False):
     """Atomically write `obj` as JSON to `path`. Thin convenience over
     write_text_atomic for the common case (indent=2, ensure_ascii=False) — the

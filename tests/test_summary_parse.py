@@ -2,8 +2,8 @@
 
 import unittest
 
-import categories
-from llm import Claude
+from stores import categories
+from brain.llm import Claude
 
 
 class TestParseSummary(unittest.TestCase):

@@ -1,17 +1,21 @@
-"""Long-term conversation memory.
+"""Long-term conversation memory — per persona.
 
-The live chat history is a rolling window (cfg.HISTORY_MAX_MESSAGES); anything
-older would be lost. Instead, messages that fall off the window are staged here
-(their plain text — tool chatter is skipped) and later *consolidated*: one cheap
-model call summarises the staged excerpt into a dense memory record, which is
-embedded into a persistent Chroma collection. The agent can then answer "what
-did we talk about last month?" via the search_past_conversations tool.
+Each persona's live thread is a rolling window (cfg.HISTORY_MAX_MESSAGES);
+anything older would be lost. Instead, messages that fall off the window are
+staged here tagged with the persona that owned them, and later *consolidated*:
+one cheap model call per persona summarises its staged excerpt into a dense
+memory record, embedded into that persona's own Chroma collection
+(conversations_<key>). Retrieval is scoped the same way — a caller searches
+its own staging, its own archive, and its own saved live window (plus any
+registry `reads` grants), and structurally cannot touch another persona's.
+The pre-isolation `conversations` collection and untagged staged batches are
+legacy: genuinely shared history, readable by all, labelled as such.
 
 Staging is free (a JSON append, no model call), so it happens inline whenever
-the window trims. Consolidation runs at boot, and only once enough material has
-accumulated (cfg.MEMORY_MIN_MESSAGES), so most boots skip it entirely. If the
-model call fails (offline, etc.) the staged text is kept and retried next boot —
-nothing is dropped.
+the window trims. Consolidation runs at boot, and only for personas with
+enough material (cfg.MEMORY_MIN_MESSAGES each), so most boots skip it. If the
+model call fails (offline, etc.) that persona's staged text is kept and
+retried next boot — nothing is dropped.
 """
 
 import json
@@ -19,11 +23,11 @@ import logging
 import re
 from datetime import datetime
 
-import chromadb
-from chromadb.utils import embedding_functions
+from stores import chroma_store
 
 import config as cfg
-from atomic_io import write_json_atomic
+from brain import agents
+from lib.atomic_io import read_json, write_json_atomic
 
 log = logging.getLogger("memory")
 
@@ -69,20 +73,20 @@ RECALL_MODEL = cfg.CONVO_MODELS["sonnet"]
 class ConversationMemory:
     def __init__(self):
         cfg.ensure_dirs()
-        self._col = None  # Chroma collection, loaded lazily on first real use
+        self._cols = {}  # collection name -> Chroma collection, loaded lazily
 
-    def _ensure_chroma(self):
-        if self._col is not None:
-            return
-        log.info("loading embedding model + chroma (memory, first use)...")
-        ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name=cfg.EMBED_MODEL
-        )
-        client = chromadb.PersistentClient(path=str(cfg.CHROMA_DIR))
-        self._col = client.get_or_create_collection(
-            name=cfg.MEMORY_COLLECTION, embedding_function=ef
-        )
-        log.info("memory collection ready")
+    def _col_for(self, name: str):
+        col = self._cols.get(name)
+        if col is None:
+            log.info("loading chroma collection '%s' (first use)...", name)
+            col = self._cols[name] = chroma_store.collection(name)
+        return col
+
+    @staticmethod
+    def _readable(caller):
+        """Staged-batch owners `caller` may read. None (legacy, pre-isolation
+        batches) is always readable — that history was genuinely shared."""
+        return {None, *agents.readable_owners(caller)}
 
     # --- staging (free — no model call) ---------------------------------------
     @staticmethod
@@ -104,79 +108,122 @@ class ConversationMemory:
         return f"{role}: {text}" if text else None
 
     def _load_pending(self) -> list:
-        if cfg.MEMORY_PENDING_PATH.exists():
-            try:
-                data = json.loads(cfg.MEMORY_PENDING_PATH.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    return data
-            except (OSError, ValueError):
-                log.warning("memory staging file unreadable; starting fresh")
-        return []
+        return read_json(cfg.MEMORY_PENDING_PATH, [], expect=list,
+                         warn=lambda e: log.warning(
+                             "memory staging file unreadable; starting fresh"))
 
     def _save_pending(self, pending: list):
         # Atomic (temp + rename) so a power loss mid-save can't corrupt the
         # staging file and lose not-yet-consolidated memory.
         write_json_atomic(cfg.MEMORY_PENDING_PATH, pending)
 
-    def record_dropped(self, messages) -> int:
-        """Stage messages that fell off the history window. Returns how many
-        lines were kept (plain user/assistant text; tool traffic is dropped)."""
+    def record_dropped(self, messages, owner) -> int:
+        """Stage messages that fell off `owner`'s history window. The owner is
+        captured HERE, at drop time — by the boot-time consolidate the active
+        persona is long gone, so a batch without its owner could only ever be
+        legacy. Returns how many lines were kept (plain user/assistant text;
+        tool traffic is dropped)."""
         lines = [t for m in messages if (t := self._message_text(m))]
         if not lines:
             return 0
         pending = self._load_pending()
         pending.append(
-            {"ts": datetime.now().isoformat(timespec="seconds"), "lines": lines}
+            {"ts": datetime.now().isoformat(timespec="seconds"),
+             "agent": owner, "lines": lines}
         )
         self._save_pending(pending)
-        log.info("staged %d line(s) for long-term memory", len(lines))
+        log.info("staged %d line(s) for %s's long-term memory", len(lines), owner)
         return len(lines)
 
-    # --- consolidation (one model call, run at boot) ---------------------------
+    # --- consolidation (one model call per persona, run at boot) ---------------
     def consolidate(self, client) -> str | None:
-        """Summarise staged text into one memory record and embed it. Returns a
-        status line, or None when there wasn't enough staged to bother."""
+        """Summarise each persona's staged text into its own archive. The
+        MEMORY_MIN_MESSAGES threshold applies PER persona — two Tom lines must
+        not get consolidated just because Alice staged twenty. At most one
+        model call per persona with enough material (bounded and rare — most
+        boots stage nothing at all). Returns a combined status line, or None
+        when no group had enough."""
         pending = self._load_pending()
-        n_lines = sum(len(batch.get("lines", [])) for batch in pending)
-        if n_lines < cfg.MEMORY_MIN_MESSAGES:
-            return None
-
-        blocks = []
+        groups = {}  # owner key (None = legacy) -> [batch, ...] in order
         for batch in pending:
-            ts = batch.get("ts", "")
-            day = ts[:10] if ts else "unknown date"
-            blocks.append(f"[{day}]\n" + "\n".join(batch.get("lines", [])))
-        transcript = "\n\n".join(blocks)
+            owner = batch.get("agent")
+            if owner is not None and owner not in agents.AGENTS:
+                owner = None  # a renamed/removed persona's past is legacy now
+            groups.setdefault(owner, []).append(batch)
 
-        resp = client.messages.create(
-            model=cfg.CONVO_MODEL,
-            max_tokens=cfg.MEMORY_MAX_TOKENS,
-            thinking={"type": "disabled"},
-            messages=[{"role": "user", "content": CONSOLIDATE_PROMPT + transcript}],
-        )
-        summary = "".join(b.text for b in resp.content if b.type == "text").strip()
-        if not summary:
-            log.warning("memory consolidation returned no text; keeping staged")
+        done, statuses = set(), []  # id()s of batches already embedded
+        for owner, batches in groups.items():
+            n_lines = sum(len(b.get("lines", [])) for b in batches)
+            if n_lines < cfg.MEMORY_MIN_MESSAGES:
+                continue
+
+            blocks = []
+            for batch in batches:
+                ts = batch.get("ts", "")
+                day = ts[:10] if ts else "unknown date"
+                blocks.append(f"[{day}]\n" + "\n".join(batch.get("lines", [])))
+            transcript = "\n\n".join(blocks)
+
+            resp = client.messages.create(
+                model=cfg.CONVO_MODEL,
+                max_tokens=cfg.MEMORY_MAX_TOKENS,
+                thinking={"type": "disabled"},
+                messages=[{"role": "user",
+                           "content": CONSOLIDATE_PROMPT + transcript}],
+            )
+            summary = "".join(b.text for b in resp.content
+                              if b.type == "text").strip()
+            if not summary:
+                log.warning("consolidation for %s returned no text; keeping "
+                            "staged", owner or "legacy")
+                continue
+
+            first = (batches[0].get("ts") or "")[:10]
+            last = (batches[-1].get("ts") or "")[:10]
+            date = first if first == last else f"{first} to {last}"
+
+            name = (cfg.agent_memory_collection(owner) if owner
+                    else cfg.MEMORY_COLLECTION)
+            doc_id = datetime.now().strftime("conv_%Y-%m-%d_%H%M%S")
+            self._col_for(name).upsert(
+                ids=[doc_id],
+                documents=[summary],
+                metadatas=[{"date": date, "messages": n_lines}],
+            )
+            # Clear THIS group from staging as soon as its embed lands: a
+            # failure in a later group must keep only that group staged, not
+            # re-archive this one as a duplicate next boot.
+            done.update(id(b) for b in batches)
+            self._save_pending([b for b in pending if id(b) not in done])
+            statuses.append(f"{n_lines} message(s) for "
+                            f"{owner or 'the shared archive'} ({date})")
+
+        if not statuses:
             return None
-
-        first = (pending[0].get("ts") or "")[:10]
-        last = (pending[-1].get("ts") or "")[:10]
-        date = first if first == last else f"{first} to {last}"
-
-        self._ensure_chroma()
-        doc_id = datetime.now().strftime("conv_%Y-%m-%d_%H%M%S")
-        self._col.upsert(
-            ids=[doc_id],
-            documents=[summary],
-            metadatas=[{"date": date, "messages": n_lines}],
-        )
-        # Clear staging only after the embed succeeded — a failure above keeps
-        # everything staged for the next boot.
-        self._save_pending([])
-        return f"archived {n_lines} message(s) into long-term memory ({date})"
+        return "archived " + "; ".join(statuses)
 
     # --- retrieval (used as a Claude tool) -------------------------------------
-    def recall_staged(self, client, query: str) -> str | None:
+    def _staged_batches(self, caller) -> list:
+        """Staged batches `caller` may read, plus a synthetic batch per
+        readable persona's SAVED live thread. The live read is what makes
+        "ask Alice what we discussed" work at all: a delegate starts with an
+        empty message list (llm.run_delegated_task), so without it anything
+        still inside Alice's 40-message window would be invisible to her.
+        The files are on disk and saved every turn — this is a read, not IO
+        machinery."""
+        readable = self._readable(caller)
+        batches = [b for b in self._load_pending()
+                   if (b.get("agent") if b.get("agent") in agents.AGENTS
+                       else None) in readable]
+        for k in agents.readable_owners(caller):
+            msgs = read_json(cfg.history_path(k), [], expect=list)
+            lines = [t for m in msgs
+                     if isinstance(m, dict) and (t := self._message_text(m))]
+            if lines:
+                batches.append({"ts": "current session", "lines": lines})
+        return batches
+
+    def recall_staged(self, client, query: str, caller=None) -> str | None:
         """LLM read over the staged, not-yet-consolidated lines: hand the
         WHOLE staged text to a cheap model with the query and let it extract
         what's relevant. No retrieval step means no retrieval misses — this is
@@ -190,7 +237,7 @@ class ConversationMemory:
         found nothing relevant (a real answer — don't fall back); None when
         there is nothing staged or the call failed (caller should fall back
         to the offline keyword scan)."""
-        batches = self._load_pending()
+        batches = self._staged_batches(caller)
         lines = []
         for batch in batches:
             ts = (batch.get("ts") or "")[:16].replace("T", " ")
@@ -224,7 +271,8 @@ class ConversationMemory:
             return ""
         return answer
 
-    def search_staged(self, query: str, max_lines: int = 12) -> list:
+    def search_staged(self, query: str, max_lines: int = 12,
+                      caller=None) -> list:
         """Keyword scan over the staged, NOT-yet-consolidated lines — the
         verbatim text of messages that fell off the window since the last
         boot. Consolidation only runs at startup, so without this a long
@@ -237,16 +285,16 @@ class ConversationMemory:
         if not words:
             return []
         hits = []
-        for batch in self._load_pending():
+        for batch in self._staged_batches(caller):
             ts = (batch.get("ts") or "")[:16].replace("T", " ")
             for line in batch.get("lines", []):
                 if any(w in line.lower() for w in words):
                     hits.append(f"[{ts}] {' '.join(line.split())[:300]}")
         return hits[-max_lines:]  # most recent matches win the budget
 
-    def _archive_section(self, query: str, n: int):
-        """(section text or None, record count or None, error text or None)
-        from the Chroma archive. Never raises.
+    def _query_archive(self, name: str, query: str, n: int):
+        """One collection's hits as (distance, doc, meta) rows, plus its record
+        count and error text. Never raises.
 
         A broken archive must not cost the caller the staged results it has
         already gathered: this used to be one bare query() whose exception
@@ -263,33 +311,57 @@ class ConversationMemory:
         error = None
         for attempt in (1, 2):
             try:
-                self._ensure_chroma()
-                count = self._col.count()
+                col = self._col_for(name)
+                count = col.count()
                 if not count:
-                    return None, 0, None
-                res = self._col.query(query_texts=[query],
-                                      n_results=min(n, count))
+                    return [], 0, None
+                res = col.query(query_texts=[query], n_results=min(n, count))
                 docs = res.get("documents", [[]])[0]
                 metas = res.get("metadatas", [[]])[0]
-                archived = [f"[{(meta or {}).get('date', 'unknown date')}] "
-                            f"{' '.join(doc.split())[:800]}"
-                            for doc, meta in zip(docs, metas)]
-                if not archived:
-                    return None, count, None
-                return ("From archived conversations:\n"
-                        + "\n\n".join(archived)), count, None
+                dists = res.get("distances", [[]])[0]
+                return list(zip(dists, docs, metas)), count, None
             except Exception as e:  # noqa: BLE001 - reported, never raised
                 error = str(e)
                 if attempt == 1:
-                    log.warning("archive search failed (%s); rebuilding the "
-                                "collection and retrying once", e)
-                    self._col = None
+                    log.warning("archive search of %s failed (%s); rebuilding "
+                                "the collection and retrying once", name, e)
+                    self._cols.pop(name, None)
                 else:
-                    log.error("archive search still failing after a "
-                              "reconnect: %s", e)
-        return None, None, error
+                    log.error("archive search of %s still failing after a "
+                              "reconnect: %s", name, e)
+        return [], None, error
 
-    def search(self, query: str, n: int = None, client=None) -> str:
+    def _archive_section(self, query: str, n: int, caller=None):
+        """(section text or None, record count or None, error text or None)
+        across every archive `caller` may read: its own conversations_<key>
+        (plus grants) and the legacy shared collection, whose hits are
+        labelled so the model knows they predate per-agent memory. One
+        embedding space, so distances merge honestly."""
+        sources = [(cfg.agent_memory_collection(k), False)
+                   for k in agents.readable_owners(caller)]
+        sources.append((cfg.MEMORY_COLLECTION, True))
+        hits, total, error = [], 0, None
+        for name, legacy in sources:
+            rows, count, err = self._query_archive(name, query, n)
+            hits.extend((dist, doc, meta, legacy) for dist, doc, meta in rows)
+            if count is None:
+                error = error or err
+            else:
+                total += count
+        if not hits:
+            return None, (None if error and not total else total), error
+        hits.sort(key=lambda h: h[0])
+        archived = []
+        for _, doc, meta, legacy in hits[:n]:
+            tag = " (from the shared archive, before per-agent memory)" \
+                if legacy else ""
+            archived.append(f"[{(meta or {}).get('date', 'unknown date')}{tag}] "
+                            f"{' '.join(doc.split())[:800]}")
+        return ("From archived conversations:\n"
+                + "\n\n".join(archived)), total, error
+
+    def search(self, query: str, n: int = None, client=None,
+               caller=None) -> str:
         n = n or cfg.MEMORY_SEARCH_RESULTS
         sections = []
 
@@ -297,7 +369,8 @@ class ConversationMemory:
         # record and verbatim, so when both match, these are the better answer.
         # Preferred path is the LLM read (handles queries the literal words
         # can't match); the keyword scan backs it up.
-        recalled = self.recall_staged(client, query) if client is not None else None
+        recalled = (self.recall_staged(client, query, caller=caller)
+                    if client is not None else None)
         if recalled:
             sections.append("From earlier in this session (not yet archived):\n"
                             + recalled)
@@ -309,7 +382,7 @@ class ConversationMemory:
             # literal words were sitting in the staged lines. The scan is free
             # (no model call), so it runs either way and its hits are labelled
             # by how much they can be trusted.
-            staged = self.search_staged(query)
+            staged = self.search_staged(query, caller=caller)
             if staged:
                 header = ("From earlier in this session (not yet archived)"
                           if recalled is None else
@@ -318,7 +391,7 @@ class ConversationMemory:
                           "irrelevant, so weigh them yourself)")
                 sections.append(header + ":\n" + "\n".join(staged))
 
-        archive, count, error = self._archive_section(query, n)
+        archive, count, error = self._archive_section(query, n, caller=caller)
         if archive:
             sections.append(archive)
 

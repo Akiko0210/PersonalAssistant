@@ -10,63 +10,21 @@ dropped switch.
 Fake clients and agent shells throughout, in the house pattern of
 test_hats.py and test_switch_announcement.py."""
 
+import functools
 import queue
 import threading
 import unittest
 from types import SimpleNamespace
 
-import agents
+from brain import agents
 import config as cfg
-from llm import Claude
-from tools import ToolContext
 from voice_agent import Agent
+from tests.llm_fixtures import (FakeBlock, make_claude as _make_claude,
+                                text_reply, tool_reply)
 
-
-class FakeBlock:
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
-
-    def model_dump(self, exclude_none=False):
-        return dict(self.__dict__)
-
-
-class ScriptedMessages:
-    """messages.create returning canned responses in order, capturing calls."""
-
-    def __init__(self, responses):
-        self.calls = []
-        self._responses = list(responses)
-
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
-        return self._responses.pop(0)
-
-
-def text_reply(text):
-    return SimpleNamespace(stop_reason="end_turn",
-                           content=[FakeBlock(type="text", text=text)])
-
-
-def tool_reply(name, args, block_id="tu_1"):
-    return SimpleNamespace(stop_reason="tool_use",
-                           content=[FakeBlock(type="tool_use", name=name,
-                                              input=args, id=block_id)])
-
-
-def make_claude(responses):
-    """A Claude shell with only what run_delegated_task touches."""
-    c = Claude.__new__(Claude)
-    c.client = SimpleNamespace(messages=ScriptedMessages(responses))
-    c._deepseek = None
-    c.active = "tom"
-    c._model_overrides = {}
-    c.store = None
-    c.discord = None
-    c.kb = None
-    c.memory = None
-    c._ctx = ToolContext(active_agent="tom",
-                         convo_model=cfg.CONVO_MODELS["sonnet"])
-    return c
+# The shell run_delegated_task touches, active as Tom.
+make_claude = functools.partial(_make_claude, active="tom",
+                                convo_model=cfg.CONVO_MODELS["sonnet"])
 
 
 class TestRunDelegatedTask(unittest.TestCase):
@@ -84,14 +42,50 @@ class TestRunDelegatedTask(unittest.TestCase):
         # via the return value, never via the shared pending slot.
         self.assertIsNone(c._ctx.pending_note)
 
-    def test_runs_on_registry_default_not_the_active_override(self):
-        # The user parking the foreground hat on an expensive model must not
-        # silently price up background work.
+    def test_active_hats_override_never_leaks_to_a_different_delegate(self):
+        # Tom parked on Opus must not price up a background ask to Bob — the
+        # override belongs to the hat it was made in, nobody else.
         c = make_claude([text_reply("done")])
-        c._ctx.convo_model = cfg.CONVO_MODELS["opus"]
+        c._ctx.convo_model = cfg.CONVO_MODELS["opus"]  # Tom is active
         c.run_delegated_task("bob", "task")
         self.assertEqual(c.client.messages.calls[0]["model"],
                          cfg.CONVO_MODELS["haiku"])
+
+    def test_runs_on_the_delegates_parked_model(self):
+        # "Bob is on X" must mean Bob answers on X everywhere: a delegate on
+        # its registry default while parked elsewhere is how Alice claimed
+        # Haiku seconds before the switch announcement said DeepSeek Flash
+        # (session_2026-08-10.log 18:22). Parked on a Claude model here so
+        # the fake client serves the call — the resolver doesn't care which
+        # provider the override names.
+        c = make_claude([text_reply("done")])
+        c._model_overrides["bob"] = cfg.CONVO_MODELS["opus"]
+        c.run_delegated_task("bob", "task")
+        self.assertEqual(c.client.messages.calls[0]["model"],
+                         cfg.CONVO_MODELS["opus"])
+
+    def test_delegated_identity_answer_matches_the_parked_model(self):
+        # The exact log failure, end to end: asked which model she's on, a
+        # delegated persona must answer with her parked conversation model —
+        # the same one the switch announcement would speak.
+        c = make_claude([
+            tool_reply("get_current_model", {}),
+            text_reply("done"),
+        ])
+        c._model_overrides["alice"] = cfg.CONVO_MODELS["opus"]
+        c.run_delegated_task("alice", "which model are you on?")
+        # The tool result fed back to the model names Opus, not Haiku.
+        result_turn = c.client.messages.calls[1]["messages"][-1]
+        self.assertIn("Opus", str(result_turn))
+        self.assertNotIn("Haiku", str(result_turn))
+
+    def test_delegating_to_the_active_hat_uses_its_live_model(self):
+        # model_for's active branch: the live setting, not a stale override.
+        c = make_claude([text_reply("done")])
+        c._ctx.convo_model = cfg.CONVO_MODELS["opus"]  # Tom, live
+        c.run_delegated_task("tom", "task")
+        self.assertEqual(c.client.messages.calls[0]["model"],
+                         cfg.CONVO_MODELS["opus"])
 
     def test_background_loop_carries_no_switching_tools(self):
         c = make_claude([text_reply("done")])
@@ -101,6 +95,46 @@ class TestRunDelegatedTask(unittest.TestCase):
         self.assertNotIn("switch_agent", names)
         self.assertNotIn("ask_agent", names)
         self.assertNotIn("set_conversation_model", names)
+
+    def test_delegate_memory_search_is_scoped_to_the_delegate(self):
+        # "Tom asks Alice what we discussed" only works if the delegated
+        # Alice searches ALICE's memory — the sub-context's active_agent is
+        # what the store scopes by, so it must carry the delegate's key.
+        c = make_claude([
+            tool_reply("search_past_conversations", {"query": "diagonals"}),
+            text_reply("we discussed diagonals"),
+        ])
+        callers = []
+        c.memory = SimpleNamespace(
+            record_dropped=lambda dropped, owner: None,
+            search=lambda q, client=None, caller=None:
+                callers.append(caller) or "nothing found")
+        c.run_delegated_task("alice", "what did we discuss?")
+        self.assertEqual(callers, ["alice"])
+
+    def test_background_loop_cannot_mutate_orders(self):
+        # Review-before-submit means the user HEARS the review; a background
+        # worker is out of earshot, so it must never submit or cancel — while
+        # read-only trading lookups stay delegable.
+        c = make_claude([text_reply("done")])
+        c.run_delegated_task("tom", "check my positions")
+        names = {t["name"] for t in c.client.messages.calls[0]["tools"]}
+        self.assertIn("get_positions", names)
+        self.assertIn("get_pnl", names)
+        self.assertNotIn("submit_order", names)
+        self.assertNotIn("cancel_order", names)
+
+    def test_truncated_delegated_reply_is_reported_honestly(self):
+        # The delegated loop used to lack converse()'s max_tokens honesty —
+        # a truncated tool call died silently. The shared _tool_loop fixed
+        # that; this pins it.
+        resp = SimpleNamespace(
+            stop_reason="max_tokens",
+            content=[FakeBlock(type="tool_use", id="t1",
+                               name="save_conversation_note",
+                               input={"title": "T"})])
+        text, _ = make_claude([resp]).run_delegated_task("bob", "save this")
+        self.assertIn("did not complete", text)
 
     def test_round_cap_reports_honestly(self):
         c = make_claude([tool_reply("get_current_time", {}, f"tu_{i}")
@@ -162,6 +196,9 @@ class _Shell:
 
     def _switch_agent(self, key):
         self.switched.append(key)
+
+    def _use_voice(self, hat):
+        return Agent._use_voice(self, hat)
 
     def _speak_interjection(self, item):
         return Agent._speak_interjection(self, item)

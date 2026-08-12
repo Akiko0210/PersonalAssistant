@@ -16,6 +16,7 @@ from unittest import mock
 
 import config as cfg
 from voice_agent import Agent
+from tests.agent_fixtures import FakeAudio
 
 
 class FakeTTS:
@@ -87,18 +88,6 @@ class FakeAnnouncer:
             return False
         self.announced.append((text, avoid_voice))
         return True
-
-
-class FakeAudio:
-    def __init__(self):
-        self.muted = threading.Event()
-        self.pushed = []
-
-    def poll_speech(self, timeout=0.1, return_frame=False):
-        return None  # a quiet room: nothing ever barges in
-
-    def pushback(self, frames):
-        self.pushed.append(list(frames))
 
 
 def make_agent(announcer_available=True, **tts_kwargs):

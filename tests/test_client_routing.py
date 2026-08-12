@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import config as cfg
-from llm import Claude
+from brain.llm import Claude
 
 
 class _Shell:
