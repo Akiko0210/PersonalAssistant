@@ -73,6 +73,25 @@ class TestCached(unittest.TestCase):
     def test_empty(self):
         self.assertEqual(cached([]), [])
 
+    def test_spoken_user_turn_carries_its_time_as_text(self):
+        # The ts field itself never goes out; it is rendered into the text so
+        # the model can see time pass between messages (the 9am "nothing to do
+        # tonight" failure, session_2026-08-11.log 2026-08-20 09:04).
+        wire = cached(self.HISTORY)
+        self.assertEqual(wire[0]["content"], "(9:00am 8/11/2026) hi")
+
+    def test_assistant_and_unstamped_messages_stay_bare(self):
+        wire = cached([
+            {"role": "user", "content": "old"},  # pre-feature: no ts
+            {"role": "assistant", "content": "sure", "ts": "2026-08-11T09:00:04+09:00"},
+            {"role": "user", "content": [  # tool_result turn: blocks, not speech
+                {"type": "tool_result", "tool_use_id": "t", "content": "ok"}],
+             "ts": "2026-08-11T09:00:05+09:00"},
+        ])
+        self.assertEqual(wire[0]["content"], "old")
+        self.assertEqual(wire[1]["content"], "sure")
+        self.assertEqual(wire[2]["content"][0]["type"], "tool_result")
+
 
 if __name__ == "__main__":
     unittest.main()

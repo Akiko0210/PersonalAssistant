@@ -476,16 +476,22 @@ def _ctl_mute(agent, payload):
 
 
 def _ctl_send(agent, payload):
-    """{"text": "..."} -> queued ack. The reply is spoken at the next gap in
-    conversation — seconds later, so it can't ride back on this response; the
-    Conversation page shows the exchange."""
+    """{"text": "...", "agent": "bob"?} -> queued ack. `agent` is the persona
+    whose thread the page was showing (omitted = whoever is active) — without
+    it a message typed into Bob's thread was answered by the active persona.
+    The reply is spoken at the next gap in conversation — seconds later, so it
+    can't ride back on this response; the Conversation page shows the
+    exchange."""
     text = payload.get("text") if isinstance(payload, dict) else None
     text = text.strip() if isinstance(text, str) else ""
     if not text:
         raise ValueError("message text may not be empty")
     if len(text) > MAX_MESSAGE_CHARS:
         raise ValueError(f"message is over {MAX_MESSAGE_CHARS} characters")
-    agent.queue_typed_message(text)
+    target = payload.get("agent")
+    if target is not None and target not in agents_registry.AGENTS:
+        raise ValueError(f"unknown agent {target!r}")
+    agent.queue_typed_message(text, target)
     return {"ok": True, "queued": True}
 
 

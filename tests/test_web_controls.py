@@ -23,7 +23,8 @@ def make_control_agent():
 
     agent.set_mute = set_mute
     agent.sent = []
-    agent.queue_typed_message = agent.sent.append
+    agent.queue_typed_message = (
+        lambda text, target=None: agent.sent.append((text, target)))
     return agent
 
 
@@ -48,11 +49,24 @@ class DispatchTests(unittest.TestCase):
         status, body = dashboard.api_control_post(
             agent, "send_message", {"text": "  hello  "})
         self.assertEqual((status, body["queued"]), (200, True))
-        self.assertEqual(agent.sent, ["hello"])
+        self.assertEqual(agent.sent, [("hello", None)])
         for payload in ({}, {"text": "  "}, {"text": 3}, {"text": "x" * 5000}):
             status, _ = dashboard.api_control_post(agent, "send_message", payload)
             self.assertEqual(status, 400, payload)
-        self.assertEqual(agent.sent, ["hello"])
+        self.assertEqual(agent.sent, [("hello", None)])
+
+    def test_send_message_carries_the_viewed_persona(self):
+        # The regression this guards: a message typed into Bob's thread was
+        # answered by the active persona because the target never left the page.
+        agent = make_control_agent()
+        status, _ = dashboard.api_control_post(
+            agent, "send_message", {"text": "hi", "agent": "bob"})
+        self.assertEqual(status, 200)
+        self.assertEqual(agent.sent, [("hi", "bob")])
+        status, _ = dashboard.api_control_post(
+            agent, "send_message", {"text": "hi", "agent": "nobody"})
+        self.assertEqual(status, 400)
+        self.assertEqual(agent.sent, [("hi", "bob")])
 
     def test_unknown_action_is_404(self):
         status, _ = dashboard.api_control_post(make_control_agent(), "reboot", {})
@@ -84,7 +98,8 @@ class TypedMessageTests(unittest.TestCase):
     def test_queueing_wakes_the_idle_listener(self):
         agent = make_agent()
         agent.queue_typed_message("what's my last note?")
-        self.assertEqual(agent.typed.get_nowait(), "what's my last note?")
+        self.assertEqual(agent.typed.get_nowait(),
+                         ("what's my last note?", None))
         self.assertTrue(agent.interject.is_set())
 
     def test_a_typed_message_is_answered_and_spoken(self):
@@ -111,6 +126,17 @@ class TypedMessageTests(unittest.TestCase):
             agent._handle_typed_message("Tom, do the thing")
         self.assertEqual(switched, ["tom"])
         self.assertEqual(agent.llm.calls, ["do the thing"])
+
+    def test_a_targeted_message_switches_persona_first(self):
+        agent = make_agent()  # FakeLLM.active == "alice"
+        agent._after_reply = lambda interrupted: None
+        switched = []
+        agent._switch_agent = switched.append
+        agent._handle_typed_message("what time is it", "bob")
+        self.assertEqual(switched, ["bob"])
+        self.assertEqual(agent.llm.calls, ["what time is it"])
+        agent._handle_typed_message("hi again", "alice")  # already active
+        self.assertEqual(switched, ["bob"])
 
     def test_an_empty_reply_is_reported_not_silent(self):
         agent = make_agent()
@@ -149,7 +175,7 @@ class HttpRoundTripTests(unittest.TestCase):
         self.assertTrue(self.agent.audio.muted.is_set())
         status, body = self.post("/api/control/send_message", {"text": "hi"})
         self.assertEqual((status, body["queued"]), (200, True))
-        self.assertEqual(self.agent.sent, ["hi"])
+        self.assertEqual(self.agent.sent, [("hi", None)])
         self.assertEqual(self.post("/api/control/reboot", {})[0], 404)
         self.assertEqual(self.post("/api/control/mute", {"muted": "x"})[0], 400)
 

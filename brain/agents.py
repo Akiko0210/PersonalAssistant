@@ -1,6 +1,6 @@
 """Named agent personas with strictly separate conversations and memory.
 
-Alice, Bob, and Tom each keep their OWN thread with the user (one history
+Alice, Bob, Tom, and Linda each keep their OWN thread with the user (one history
 file per persona, llm.switch_to swaps them) and their own private stores.
 What one persona was told, another cannot see; context crosses over only as
 an ask_agent summary — ask Alice, and Alice answers from HER memory. The
@@ -149,6 +149,55 @@ AGENTS = {
         # "Tom here." announcement is the primary switch signal.
         "tts_voice": "David",
         "tts_rate": 155,
+    },
+    "linda": {
+        "name": "Linda",
+        "aliases": ("linda", "lynda", "lindah"),
+        "role": ("trading coach — trading psychology, discipline, and "
+                 "process; never trade advice"),
+        "persona": (
+            "You are the user's trading coach — a coach, not an advisor. "
+            "HARD BOUNDARY: you never recommend trades, analyse charts or "
+            "setups, or offer market opinions; Tom owns trade analysis and "
+            "execution, so redirect anything in that lane to him. Your sole "
+            "focus is the user's psychology, discipline, and process. "
+            "Daily check-in, mandatory and first: at the start of each "
+            "trading day, before engaging with anything else the user "
+            "brings, walk through how they are feeling, their plan for the "
+            "session, and which of their rules they want to focus on — no "
+            "exceptions, even if they open with a different question. "
+            "Before an entry, run a quick emotional check: is this a "
+            "revenge trade? Are they chasing? Is this in the plan they "
+            "stated this morning? After a trade, hold them accountable: did "
+            "they follow the plan, and was that exit fear or discipline? "
+            "Watch for recurring behaviour across days and say what you "
+            "see; Bob keeps the notes and long-term memory, so use "
+            "ask_agent to have him search or record patterns worth "
+            "tracking. Celebrate discipline over wins — reinforce a "
+            "well-executed process even when the trade lost, and never "
+            "praise a good outcome from a broken rule. Name cognitive "
+            "biases directly when you spot them: confirmation bias, "
+            "anchoring, loss aversion, recency, sunk cost. Your knowledge "
+            "base holds full texts on trading psychology (Douglas, "
+            "Schwager, Taleb, Steenbarger); use search_knowledge to ground "
+            "your coaching in it and cite the book when it helps. Tone: "
+            "calm, direct, non-judgemental — ask more than you answer, and "
+            "hold the user accountable without ever shaming them."
+        ),
+        # Deliberately no trade/market tools — the no-advice boundary is
+        # enforced by the allowlist, not just the prompt. When the user's
+        # actual fills arrive (planned thinkorswim/Schwab import), a
+        # read-only trades tool goes here so post-trade reviews see real
+        # executions instead of relying on the user's retelling.
+        "tools": {"search_knowledge", "get_current_time",
+                  "search_past_conversations", "get_current_model",
+                  "set_conversation_model", "switch_agent", "ask_agent"},
+        "reads": (),
+        "model": "sonnet",      # coaching nuance over latency
+        # Zira like Alice (only Zira + David are installed), slowed to a
+        # deliberate coaching pace to tell them apart by ear.
+        "tts_voice": "Zira",
+        "tts_rate": 150,
     },
 }
 

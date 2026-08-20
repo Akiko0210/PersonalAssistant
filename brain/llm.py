@@ -69,7 +69,13 @@ def cached(history):
     The stripping matters as much as the breakpoint. Persisted messages carry a
     local-only `ts` (see history.save), and the Messages API rejects any field
     it doesn't define — so this, the one place a stored history is handed to the
-    API, is where local bookkeeping gets dropped.
+    API, is where local bookkeeping gets dropped. For spoken user turns the
+    stamp is rendered into the text instead of discarded — "(1:47pm 8/20/2026)
+    What do I need to do" — so the model can see time pass between messages
+    (it once answered "nothing to do tonight" at 9am, resuming a Tuesday-evening
+    thread on Thursday). Rendering is a pure function of the stored stamp, so
+    old messages produce identical bytes call after call and the cache prefix
+    still matches; the stored history itself is never rewritten.
 
     Prompt caching is a prefix match, so one breakpoint at the end of the history
     caches everything rendered before it — tool schemas, system prompt, and the
@@ -86,7 +92,11 @@ def cached(history):
     Returns a copy — self.history is written to disk every turn, and persisting
     cache_control markers would leave stale breakpoints scattered through the
     restored history."""
-    wire = [{"role": m["role"], "content": m["content"]} for m in history]
+    wire = [{"role": m["role"],
+             "content": (hist.time_prefix(m.get("ts")) + m["content"]
+                         if m["role"] == "user" and isinstance(m["content"], str)
+                         else m["content"])}
+            for m in history]
     if not wire:
         return wire
     content = wire[-1]["content"]
@@ -491,7 +501,8 @@ class Claude:
         short before the model was called — the words must not vanish just
         because the user clicked mute mid-settle. The next turn's sanitize
         folds consecutive user turns together, so the model still sees them."""
-        self.history.append({"role": "user", "content": user_text})
+        self.history.append({"role": "user", "content": user_text,
+                             "ts": hist.now_iso()})
         self._save_history()
 
     def consolidate_memory(self):
@@ -567,7 +578,10 @@ class Claude:
         # Trim in memory too, so a long-running session doesn't grow unbounded;
         # whatever falls off is staged into long-term memory, not lost.
         self.history = self._trim_and_archive(self.history)
-        self.history.append({"role": "user", "content": user_text})
+        # Stamped here, not at save time: cached() renders the stamp into the
+        # outgoing text, and this turn's message must carry one before the call.
+        self.history.append({"role": "user", "content": user_text,
+                             "ts": hist.now_iso()})
         # If the previous turn was abandoned right after its user message (leaving
         # history ending on a user turn), this new message would be a second
         # consecutive user turn — which the API also rejects. Fold them together.

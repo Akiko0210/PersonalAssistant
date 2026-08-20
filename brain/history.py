@@ -19,6 +19,29 @@ from lib.atomic_io import read_json, write_json_atomic
 log = logging.getLogger("history")
 
 
+def now_iso():
+    """One clock for every `ts` stamp: local time with offset, second precision.
+    Shared by save() and the live append sites so a stamp compares cleanly
+    against any other regardless of who wrote it."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def time_prefix(ts):
+    """Render a stored `ts` as the spoken-time prefix the model sees on user
+    messages, e.g. "(1:47pm 8/20/2026) ". Built by hand because strftime has no
+    portable no-leading-zero directive. Empty or unparseable stamps render as
+    "" — "time unknown" stays silent rather than inventing a moment."""
+    if not ts:
+        return ""
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return ""
+    hour = dt.hour % 12 or 12
+    ampm = "am" if dt.hour < 12 else "pm"
+    return f"({hour}:{dt.minute:02d}{ampm} {dt.month}/{dt.day}/{dt.year}) "
+
+
 def sanitize(history):
     """Make a history safe to send. Drops any tool_use whose tool_result never
     arrived (and any tool_result with no matching tool_use), then merges
@@ -104,7 +127,7 @@ def save(path, history):
     turn, not the instant the words were said: a turn that runs a long tool loop
     labels its own question with the time the answer landed, seconds later. The
     `ts` key never reaches the API — `llm.cached` strips it."""
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    now = now_iso()
     try:
         write_json_atomic(path, [m if "ts" in m else {**m, "ts": now}
                                  for m in sanitize(history)])

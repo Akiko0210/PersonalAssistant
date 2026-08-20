@@ -597,6 +597,7 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .agent-alice { background: #b57edc; }
 .agent-bob   { background: var(--accent); }
 .agent-tom   { background: var(--warning); }
+.agent-linda { background: #2e9e8f; }
 .agent-chip {
   display: inline-flex; align-items: center; gap: 7px;
   font-size: 20px; font-weight: 700;
@@ -608,6 +609,7 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .agent-chip.agent-alice::before { background: #b57edc; }
 .agent-chip.agent-bob::before   { background: var(--accent); }
 .agent-chip.agent-tom::before   { background: var(--warning); }
+.agent-chip.agent-linda::before { background: #2e9e8f; }
 .t-muted { color: var(--muted); font-size: 16px; font-weight: 600; }
 .badge.live {
   background: rgba(12, 163, 12, 0.16); color: var(--good);

@@ -92,6 +92,25 @@ class TestTrim(unittest.TestCase):
         self.assertEqual(history.trim(h, 40), h)
 
 
+class TestTimePrefix(unittest.TestCase):
+    def test_renders_without_leading_zeros(self):
+        self.assertEqual(history.time_prefix("2026-08-20T13:47:12-04:00"),
+                         "(1:47pm 8/20/2026) ")
+
+    def test_noon_and_midnight_are_twelve(self):
+        self.assertEqual(history.time_prefix("2026-08-20T12:05:00-04:00"),
+                         "(12:05pm 8/20/2026) ")
+        self.assertEqual(history.time_prefix("2026-08-20T00:05:00-04:00"),
+                         "(12:05am 8/20/2026) ")
+
+    def test_unknown_time_renders_silent(self):
+        # "" is the pre-feature "time unknown" convention; junk must not crash
+        # a whole converse() call over one bad stamp.
+        self.assertEqual(history.time_prefix(""), "")
+        self.assertEqual(history.time_prefix(None), "")
+        self.assertEqual(history.time_prefix("not-a-date"), "")
+
+
 class TestSaveLoad(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()

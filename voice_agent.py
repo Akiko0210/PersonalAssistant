@@ -169,9 +169,10 @@ class Agent:
         self.interjections: "queue.Queue[dict]" = queue.Queue()
         self.interject = threading.Event()
         self._delegation_threads = []
-        # Messages typed into the dashboard (queue_typed_message). Drained one
-        # per turn at utterance boundaries, same as interjections.
-        self.typed: "queue.Queue[str]" = queue.Queue()
+        # Messages typed into the dashboard (queue_typed_message), as
+        # (text, target-persona-or-None). Drained one per turn at utterance
+        # boundaries, same as interjections.
+        self.typed: "queue.Queue[tuple]" = queue.Queue()
 
     # --- command plumbing ----------------------------------------------------
     def _push(self, cmd):
@@ -239,22 +240,31 @@ class Agent:
         interruptible by the very person who just asked not to be heard."""
         self.set_mute(not self.audio.muted.is_set())
 
-    def queue_typed_message(self, text: str):
+    def queue_typed_message(self, text: str, target=None):
         """A message typed into the dashboard, arriving on a web handler
         thread. Queued, not answered here: the turn loop picks it up at the
         next utterance boundary, so it never cuts off speech in progress. The
         wake event is honoured while muted — typing is exactly what a muted
         user does — and honoured only between utterances, so it cannot
-        truncate one."""
-        self.typed.put(text)
+        truncate one.
+
+        target: the persona whose thread the dashboard was showing (None =
+        whoever is active). Carried with the text so the answer lands in the
+        thread the user was looking at, not whoever happens to hold the
+        floor."""
+        self.typed.put((text, target))
         self.interject.set()
 
-    def _handle_typed_message(self, text: str):
+    def _handle_typed_message(self, text: str, target=None):
         """Answer one typed message as a spoken turn. Same tail as a spoken
         utterance (_respond) minus the mic-specific parts: no continuation
         settle (followups=False — that window listens to the microphone and
         would merge room noise into typed text), and no backchannel/resume
-        handling (fillers are things the mic hears)."""
+        handling (fillers are things the mic hears). An explicit target
+        switches persona first — typing into Bob's thread addresses Bob,
+        exactly like saying "Bob, ..."."""
+        if target and target != self.llm.active:
+            self._switch_agent(target)
         self.log.info("you (typed): %s", text)
         self._respond(text, followups=False)
 
@@ -408,10 +418,10 @@ class Agent:
             # burst of messages interleaves with the mic instead of locking
             # the floor.
             try:
-                typed = self.typed.get_nowait()
+                text, target = self.typed.get_nowait()
             except queue.Empty:
                 return
-            self._handle_typed_message(typed)
+            self._handle_typed_message(text, target)
             return
         text = self.stt.transcribe(utt)
         if not text:
