@@ -730,12 +730,23 @@ views.config = async function () {
 
 /* ================= Conversation ================= */
 let convoAgent = null;  // persona whose thread is shown; null = follow active
+let convoSig = null;    // signature of the thread as last rendered
+let convoShown = null;  // which persona that render showed (scroll decisions)
 
 /* The transcript is its own scroller (see .main.chat-page), so "go to the
    newest message" is a scroll of that box, not of the window. */
 const chatToEnd = () => { const c = $(".chat"); if (c) c.scrollTop = c.scrollHeight; };
 
 views.conversation = async function () {
+  /* A live re-render must not eat what the user was doing: keep a typed
+     draft and the scroll position — captured FIRST, before the header wipe
+     below empties the old DOM (reading them after the await found nothing,
+     which silently dropped the draft). */
+  const draft = $("#chat-text") ? $("#chat-text").value : "";
+  const prev = $(".chat");
+  const prevTop = prev ? prev.scrollTop : 0;
+  const wasAtEnd = !prev ||
+    prev.scrollHeight - prev.scrollTop - prev.clientHeight < 80;
   main.className = "main chat-page";
   main.innerHTML = header("Conversation", "The live history window — what the agent remembers verbatim right now.");
   let data;
@@ -743,6 +754,13 @@ views.conversation = async function () {
     data = await api("/api/history" + (convoAgent ? `?agent=${convoAgent}` : ""));
   }
   catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
+
+  /* Jump to the newest message only if the user was already at the bottom or
+     just switched threads — never yank them off old messages they scrolled
+     up to read. */
+  const stick = data.agent !== convoShown || wasAtEnd;
+  convoSig = historySig(data);
+  convoShown = data.agent;
 
   /* `key=value  key=value` on one line, for the chip. Strings go in bare so
      the common case (folder=Trading) reads as prose; anything else as JSON. */
@@ -830,7 +848,10 @@ views.conversation = async function () {
     const input = $("#chat-text"), text = input.value.trim();
     if (!text || $("#chat-send").disabled) return;
     try {
-      await apiPost("/api/control/send_message", { text });
+      // Send the viewed persona along, or a message typed into Bob's thread
+      // is answered by whoever happens to be active.
+      await apiPost("/api/control/send_message",
+                    convoAgent ? { text, agent: convoAgent } : { text });
       input.value = "";
       note.className = "send-note ok";
       note.textContent = "Sent — the agent answers aloud.";
@@ -841,7 +862,7 @@ views.conversation = async function () {
         `<div class="msg user pending"><div class="m-role">You · sending</div>
          <div>${esc(text)}</div></div>`);
       chatToEnd();
-      awaitReply(historySig(data), note);
+      awaitReply(convoSig);
     } catch (e) {
       note.className = "send-note err";
       note.textContent = e.message;
@@ -849,7 +870,10 @@ views.conversation = async function () {
   });
 
   renderComposer();  // don't wait up to 2 s for the poll to enable it
-  chatToEnd();
+  $("#chat-text").value = draft;
+  if (stick) chatToEnd();
+  else $(".chat").scrollTop = prevTop;  // stay where the reader was
+  watchConvo();
 };
 
 /* Compare CONTENT, not the count: history is trimmed to HISTORY_MAX_MESSAGES,
@@ -858,20 +882,37 @@ views.conversation = async function () {
    appeared until a manual reload. */
 const historySig = (h) => JSON.stringify(h.messages);
 
-/* History is written only once the agent has finished answering, so a typed
-   message and its reply land together, seconds later. Watch for it rather than
-   making the user reload; after ~40 s say so plainly instead of leaving the
-   pending bubble unexplained (a note dialogue can hold the floor far longer). */
-async function awaitReply(before, note) {
-  for (let i = 0; i < 20; i++) {
-    await new Promise(r => setTimeout(r, 2000));
-    if (currentView() !== "conversation") return;  // user navigated away
+/* The one live watcher for the Conversation page: while it is open, fetch the
+   viewed thread every 3 s and re-render on any change. This is what makes
+   SPOKEN exchanges appear as they happen — the old watcher ran only for 40 s
+   after a typed send, so voice turns sat invisible until a manual reload.
+   Self-terminating on navigation, and guarded so re-renders (which call
+   watchConvo again) never stack a second interval. */
+let convoTimer = null;
+function watchConvo() {
+  if (convoTimer) return;
+  convoTimer = setInterval(async () => {
+    if (currentView() !== "conversation") {
+      clearInterval(convoTimer); convoTimer = null; return;
+    }
     const h = await api("/api/history" + (convoAgent ? `?agent=${convoAgent}` : ""))
       .catch(() => null);
-    if (h && historySig(h) !== before) return views.conversation();
-  }
-  note.className = "send-note";
-  note.textContent = "Still no reply — the agent may be mid-note. Reload to check.";
+    if (h && historySig(h) !== convoSig) views.conversation();
+  }, 3000);
+}
+
+/* History is written only once the agent has finished answering, so a typed
+   message and its reply land together, seconds later — watchConvo shows them.
+   This only covers the honest-failure path: after ~40 s with no change, say
+   so plainly instead of leaving the pending bubble unexplained (a note
+   dialogue can hold the floor far longer). */
+function awaitReply(before) {
+  setTimeout(() => {
+    const note = $("#chat-note");  // fresh lookup — re-renders replace it
+    if (currentView() !== "conversation" || convoSig !== before || !note) return;
+    note.className = "send-note";
+    note.textContent = "Still no reply — the agent may be mid-note. Reload to check.";
+  }, 40000);
 }
 
 /* ================= Memory ================= */
