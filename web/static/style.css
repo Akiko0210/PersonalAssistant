@@ -352,7 +352,28 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .save-msg.ok { color: var(--good); font-weight: 650; }
 .save-msg.err { color: var(--critical); font-weight: 650; }
 
-/* ---------- Conversation ---------- */
+/* ---------- Conversation ----------
+   Messenger-shaped: the page itself does not scroll. The transcript is the only
+   scroller, so the composer stays put at the bottom of the screen instead of
+   sliding away the moment you scroll back through the history. */
+.main.chat-page {
+  height: 100vh; height: 100dvh;
+  display: flex; flex-direction: column;
+  padding-bottom: 16px; overflow: hidden;
+}
+.main.chat-page > :not(.chat) { flex: none; }
+.main.chat-page .chat { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 6px; }
+.main.chat-page .composer { margin-top: 0; }
+/* Everything above the transcript is now permanent furniture, so it has to be
+   cheap: three stacked persona buttons cost 154px of the one screen the
+   messages have. Side by side they cost 46px and each is still a third of the
+   column wide — a bigger target than the stacked row it replaces. */
+.main.chat-page .page-sub { margin-bottom: 12px; }
+.main.chat-page .agent-tabs { flex-direction: row; flex-wrap: wrap; margin-bottom: 12px; }
+/* 100px basis, not more: three personas still fit one row at phone width /
+   heavy zoom instead of wrapping back into 154px of furniture. */
+.main.chat-page .agent-tab { flex: 1 1 100px; text-align: center; padding: 10px 8px; }
+
 .chat { display: flex; flex-direction: column; gap: 12px; }
 .msg { max-width: 76%; border-radius: 12px; padding: 11px 15px; font-size: 14.5px; }
 .msg.user {
@@ -366,17 +387,40 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
   border-bottom-left-radius: 4px;
 }
 .msg .m-role { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 3px; }
+.msg .m-time { font-weight: 600; letter-spacing: 0; margin-left: 4px; }
+/* Day divider, centred across the transcript: without it a long scroll back
+   gives times with no idea which day they belong to. */
+.chat-day {
+  align-self: center; margin: 8px 0 2px;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: 999px; padding: 3px 14px;
+  font-size: 12.5px; font-weight: 700; color: var(--ink-2);
+}
 /* A just-typed message, shown before the agent has answered: it is NOT in
    history yet, so it reads as provisional until the real exchange replaces it. */
 .msg.user.pending { border-style: dashed; opacity: .72; }
 .msg.user .m-role { color: var(--accent); }
+/* A tool call reads as one full-width row: name, then its arguments in view.
+   A bare name never answered the question the page is asked — "what did it
+   actually do?" — so the summary is on screen and the click only adds the
+   untruncated JSON. */
 .tool-chip {
-  display: inline-flex; align-items: center; gap: 6px;
+  display: flex; align-items: baseline; gap: 7px; width: 100%; text-align: left;
   background: var(--surface-2); border: 1px solid var(--hairline);
-  border-radius: 6px; padding: 4px 10px; font-size: 12.5px;
+  border-radius: 6px; padding: 5px 10px; font-size: 13px;
   color: var(--warning); font-family: ui-monospace, Consolas, monospace;
-  margin: 3px 4px 3px 0; cursor: pointer;
+  margin: 4px 0 0; cursor: pointer;
 }
+.tool-chip:hover { border-color: var(--muted); }
+.tool-chip::before { content: "▸"; color: var(--muted); flex: none; }
+.tool-chip.open::before { content: "▾"; }
+.tool-chip .tc-name { flex: none; font-weight: 700; }
+.tool-chip .tc-args {
+  color: var(--ink-2); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Tool rows need the width; a 76% bubble squeezes them into ellipsis. */
+.msg.assistant:has(.tool-chip), .msg.user:has(.tool-chip) { max-width: 94%; }
 .tool-detail {
   background: var(--page); border: 1px solid var(--grid); border-radius: 7px;
   padding: 8px 11px; font-size: 12.5px; margin-top: 5px;

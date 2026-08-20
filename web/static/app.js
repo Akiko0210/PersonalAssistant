@@ -201,6 +201,7 @@ function route() {
   const name = currentView();
   document.querySelectorAll(".nav-links a").forEach(a =>
     a.classList.toggle("active", a.dataset.view === name));
+  main.className = "main";   // a view that dressed <main> up owns only its turn
   (views[name] || views.overview)();
 }
 window.addEventListener("hashchange", route);
@@ -730,7 +731,12 @@ views.config = async function () {
 /* ================= Conversation ================= */
 let convoAgent = null;  // persona whose thread is shown; null = follow active
 
+/* The transcript is its own scroller (see .main.chat-page), so "go to the
+   newest message" is a scroll of that box, not of the window. */
+const chatToEnd = () => { const c = $(".chat"); if (c) c.scrollTop = c.scrollHeight; };
+
 views.conversation = async function () {
+  main.className = "main chat-page";
   main.innerHTML = header("Conversation", "The live history window — what the agent remembers verbatim right now.");
   let data;
   try {
@@ -738,28 +744,55 @@ views.conversation = async function () {
   }
   catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
 
+  /* `key=value  key=value` on one line, for the chip. Strings go in bare so
+     the common case (folder=Trading) reads as prose; anything else as JSON. */
+  const argLine = (input) => Object.entries(input || {})
+    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+    .join("  ");
+  const oneLine = (s, n = 160) => {
+    const t = String(s ?? "").replace(/\s+/g, " ").trim();
+    return t.length > n ? t.slice(0, n - 1) + "…" : t;
+  };
+
+  function chip(i, name, summary, detail) {
+    return `<button class="tool-chip" data-tool="${i}"
+              ><span class="tc-name">${esc(name)}</span
+              ><span class="tc-args">${esc(oneLine(summary))}</span></button>
+            <div class="tool-detail" data-detail="${i}" hidden>${esc(detail)}</div>`;
+  }
+
   function blockHtml(b, i) {
     if (typeof b === "string") return `<div>${esc(b)}</div>`;
     if (b.type === "text") return `<div>${esc(b.text)}</div>`;
     if (b.type === "tool_use")
-      return `<button class="tool-chip" data-tool="${i}">⚙ ${esc(b.name)}</button>
-              <div class="tool-detail" data-detail="${i}" hidden>${esc(JSON.stringify(b.input, null, 2))}</div>`;
+      return chip(i, `⚙ ${b.name}`, argLine(b.input), JSON.stringify(b.input, null, 2));
     if (b.type === "tool_result") {
       const content = typeof b.content === "string" ? b.content
         : (b.content || []).map(c => c.text || "").join("\n");
-      return `<button class="tool-chip" data-tool="${i}">↩ result</button>
-              <div class="tool-detail" data-detail="${i}" hidden>${esc(content)}</div>`;
+      return chip(i, "↩ result", content, content);
     }
     return "";
   }
 
-  let idx = 0;
+  /* Time beside the role, and a divider whenever the day changes — the same
+     two cues a chat app gives. `ts` is the end of the turn that wrote the
+     message and is empty on anything saved before stamping existed, which
+     shows as no time rather than a made-up one. */
+  let idx = 0, lastDay = "";
   const msgs = data.messages.map(m => {
+    const t = m.ts ? new Date(m.ts) : null;
+    const stamp = t && !isNaN(t)
+      ? t.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) : "";
+    const day = t && !isNaN(t)
+      ? t.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }) : "";
+    const divider = day && day !== lastDay ? `<div class="chat-day">${esc(day)}</div>` : "";
+    if (day) lastDay = day;
     const content = typeof m.content === "string"
       ? `<div>${esc(m.content)}</div>`
       : m.content.map(b => blockHtml(b, idx++)).join("");
-    return `<div class="msg ${m.role === "user" ? "user" : "assistant"}">
-      <div class="m-role">${m.role === "user" ? "You" : "Agent"}</div>${content}</div>`;
+    return `${divider}<div class="msg ${m.role === "user" ? "user" : "assistant"}">
+      <div class="m-role">${m.role === "user" ? "You" : "Agent"}${
+        stamp ? ` <span class="m-time">${esc(stamp)}</span>` : ""}</div>${content}</div>`;
   }).join("");
 
   /* Threads are per-persona: one stacked row of big buttons picks whose
@@ -781,7 +814,9 @@ views.conversation = async function () {
 
   main.querySelectorAll(".tool-chip").forEach(b => b.onclick = () => {
     const d = main.querySelector(`[data-detail="${b.dataset.tool}"]`);
-    if (d) d.hidden = !d.hidden;
+    if (!d) return;
+    d.hidden = !d.hidden;
+    b.classList.toggle("open", !d.hidden);
   });
 
   main.querySelectorAll(".agent-tab").forEach(b => b.onclick = () => {
@@ -805,7 +840,7 @@ views.conversation = async function () {
       $(".chat").insertAdjacentHTML("beforeend",
         `<div class="msg user pending"><div class="m-role">You · sending</div>
          <div>${esc(text)}</div></div>`);
-      window.scrollTo(0, document.body.scrollHeight);
+      chatToEnd();
       awaitReply(historySig(data), note);
     } catch (e) {
       note.className = "send-note err";
@@ -814,7 +849,7 @@ views.conversation = async function () {
   });
 
   renderComposer();  // don't wait up to 2 s for the poll to enable it
-  window.scrollTo(0, document.body.scrollHeight);
+  chatToEnd();
 };
 
 /* Compare CONTENT, not the count: history is trimmed to HISTORY_MAX_MESSAGES,

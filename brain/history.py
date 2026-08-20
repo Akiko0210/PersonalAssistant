@@ -12,6 +12,7 @@ model classes so it can be tested without hardware or an API key.
 
 import json
 import logging
+from datetime import datetime
 
 from lib.atomic_io import read_json, write_json_atomic
 
@@ -78,18 +79,34 @@ def trim(history, max_messages):
 
 def load(path):
     """Read a saved history list from `path`. Returns [] when the file is
-    missing or unreadable — a lost history must never block startup."""
-    return read_json(path, [], expect=list,
-                     warn=lambda e: log.warning(
-                         "could not load conversation history: %s", e))
+    missing or unreadable — a lost history must never block startup.
+
+    Messages written before timestamps existed are marked with an empty `ts`
+    rather than left bare: bare ones get stamped on the next save, which would
+    backdate a whole restored backlog to the moment of the upgrade. An empty
+    stamp means "time unknown" and the dashboard shows no time at all, which is
+    the honest answer."""
+    return [m if "ts" in m else {**m, "ts": ""}
+            for m in read_json(path, [], expect=list,
+                               warn=lambda e: log.warning(
+                                   "could not load conversation history: %s", e))]
 
 
 def save(path, history):
     """Persist `history` to `path`, sanitized so a turn abandoned mid-tool-loop
     can never write an orphaned tool_use that would 400 the next launch. Written
     atomically (temp + rename) so a power loss mid-save can't corrupt or empty
-    the file — the previous good version survives intact."""
+    the file — the previous good version survives intact.
+
+    New messages are stamped with the local time here, at the one place every
+    persisted message passes through, rather than at the five append sites (one
+    of which would eventually be missed). The stamp is therefore the end of the
+    turn, not the instant the words were said: a turn that runs a long tool loop
+    labels its own question with the time the answer landed, seconds later. The
+    `ts` key never reaches the API — `llm.cached` strips it."""
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
     try:
-        write_json_atomic(path, sanitize(history))
+        write_json_atomic(path, [m if "ts" in m else {**m, "ts": now}
+                                 for m in sanitize(history)])
     except (OSError, TypeError) as e:
         log.warning("could not save conversation history: %s", e)

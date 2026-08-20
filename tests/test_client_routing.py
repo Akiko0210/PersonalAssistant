@@ -1,4 +1,5 @@
-"""Unit tests for Claude.client_for — provider routing to API clients.
+"""Unit tests for what leaves for the API: client_for's provider routing, and
+cached()'s wire copy of a stored history.
 
 Uses a bare shell object instead of a full Claude (whose __init__ loads note
 stores and embedding models): client_for only touches .client and ._deepseek,
@@ -10,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import config as cfg
-from brain.llm import Claude
+from brain.llm import Claude, cached
 
 
 class _Shell:
@@ -44,6 +45,33 @@ class TestClientFor(unittest.TestCase):
         self.assertIsNot(first, shell.client)  # and it isn't the Anthropic one
         self.assertEqual(str(first.base_url).rstrip("/"),
                          cfg.DEEPSEEK_BASE_URL)
+
+
+class TestCached(unittest.TestCase):
+    """A persisted message carries a local `ts` the Messages API would reject
+    as an unknown field, so the wire copy must keep role and content only."""
+
+    HISTORY = [
+        {"role": "user", "content": "hi", "ts": "2026-08-11T09:00:00+09:00"},
+        {"role": "assistant", "content": [{"type": "text", "text": "hello"}],
+         "ts": "2026-08-11T09:00:04+09:00"},
+    ]
+
+    def test_only_role_and_content_go_out(self):
+        for m in cached(self.HISTORY):
+            self.assertEqual(set(m), {"role", "content"})
+
+    def test_last_block_still_carries_the_cache_breakpoint(self):
+        wire = cached(self.HISTORY)
+        self.assertIn("cache_control", wire[-1]["content"][-1])
+
+    def test_stored_history_is_left_alone(self):
+        snapshot = [dict(m) for m in self.HISTORY]
+        cached(self.HISTORY)
+        self.assertEqual(self.HISTORY, snapshot)
+
+    def test_empty(self):
+        self.assertEqual(cached([]), [])
 
 
 if __name__ == "__main__":

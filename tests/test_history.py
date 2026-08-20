@@ -112,7 +112,33 @@ class TestSaveLoad(unittest.TestCase):
         path = Path(self.dir) / "history.json"
         h = [user("hi"), assistant_text("hello"), user("bye")]
         history.save(path, h)
-        self.assertEqual(history.load(path), h)
+        loaded = history.load(path)
+        self.assertEqual([{k: v for k, v in m.items() if k != "ts"} for m in loaded], h)
+        # Every new message is stamped, and the stamp survives the roundtrip.
+        self.assertTrue(all(m["ts"] for m in loaded))
+
+    def test_existing_stamps_are_not_rewritten(self):
+        """A backlog restored from disk keeps the times it was saved with — a
+        later save must not relabel the whole conversation as "now"."""
+        from pathlib import Path
+        path = Path(self.dir) / "history.json"
+        history.save(path, [user("hi"), assistant_text("hello")])
+        first = history.load(path)
+        history.save(path, first + [user("bye")])
+        again = history.load(path)
+        self.assertEqual([m["ts"] for m in again[:2]], [m["ts"] for m in first])
+
+    def test_pre_timestamp_history_is_not_backdated(self):
+        """Messages saved before this feature read as time-unknown, not as the
+        moment of the upgrade."""
+        from pathlib import Path
+        import json as _json
+        path = Path(self.dir) / "history.json"
+        path.write_text(_json.dumps([user("old"), assistant_text("older")]), encoding="utf-8")
+        loaded = history.load(path)
+        self.assertEqual([m["ts"] for m in loaded], ["", ""])
+        history.save(path, loaded)
+        self.assertEqual([m["ts"] for m in history.load(path)], ["", ""])
 
     def test_load_missing_returns_empty(self):
         from pathlib import Path

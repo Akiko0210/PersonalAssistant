@@ -63,7 +63,13 @@ _CACHE_CONTROL = {"type": "ephemeral"}
 
 
 def cached(history):
-    """Copy of `history` carrying a prompt-cache breakpoint on its last block.
+    """Wire-ready copy of `history`: only the keys the API defines, carrying a
+    prompt-cache breakpoint on its last block.
+
+    The stripping matters as much as the breakpoint. Persisted messages carry a
+    local-only `ts` (see history.save), and the Messages API rejects any field
+    it doesn't define — so this, the one place a stored history is handed to the
+    API, is where local bookkeeping gets dropped.
 
     Prompt caching is a prefix match, so one breakpoint at the end of the history
     caches everything rendered before it — tool schemas, system prompt, and the
@@ -80,19 +86,21 @@ def cached(history):
     Returns a copy — self.history is written to disk every turn, and persisting
     cache_control markers would leave stale breakpoints scattered through the
     restored history."""
-    if not history:
-        return history
-    content = history[-1].get("content")
+    wire = [{"role": m["role"], "content": m["content"]} for m in history]
+    if not wire:
+        return wire
+    content = wire[-1]["content"]
     if isinstance(content, str):
         content = [{"type": "text", "text": content}]
     elif isinstance(content, list):
         content = [dict(b) if isinstance(b, dict) else b for b in content]
     else:
-        return history
+        return wire
     if not content or not isinstance(content[-1], dict):
-        return history  # SDK block objects are immutable; skip rather than crash
+        return wire  # SDK block objects are immutable; skip rather than crash
     content[-1] = {**content[-1], "cache_control": _CACHE_CONTROL}
-    return history[:-1] + [{**history[-1], "content": content}]
+    wire[-1] = {"role": wire[-1]["role"], "content": content}
+    return wire
 
 
 class _NullIdle:

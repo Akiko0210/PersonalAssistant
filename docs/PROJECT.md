@@ -107,9 +107,10 @@ unit-tested without a microphone, speakers, or an API key.
   and reads the active conversation model from it each call.
 - **`brain/history.py`** — pure functions over the message list: `sanitize` (drop any
   tool_use whose tool_result never arrived, and merge adjacent same-role turns),
-  `trim` (rolling window that starts on a clean user message), `load`/`save`.
-  This is what makes a conversation persisted mid-tool-loop safe to reload — see
-  §6.
+  `trim` (rolling window that starts on a clean user message), `load`/`save`
+  (which also stamp each message with the local `ts` the dashboard dates the
+  transcript by). This is what makes a conversation persisted mid-tool-loop safe
+  to reload — see §6.
 - **`brain/memory.py`** — `ConversationMemory`: long-term memory. Stages messages that
   fall off the live window, then at boot consolidates the staged text into one
   dense record embedded in a Chroma `conversations` collection; `search` backs
@@ -392,6 +393,18 @@ holds. It runs on load, before every send, and before every save, so a history
 can never be persisted — or replayed — in a shape the API rejects. `converse`
 also catches per-turn API errors so one bad request logs and continues instead of
 taking down the whole session.
+
+**The one local-only field.** Saved messages carry a `ts` (local ISO time)
+beside `role` and `content`, so the dashboard can date the transcript.
+`history.save()` stamps it — the single point every persisted message passes
+through, chosen over the five append sites because one of those would
+eventually be missed. The cost is that the stamp is the *end of the turn*, so a
+question answered after a long tool loop is labelled seconds late; the
+alternative bought precision nobody asked for at the price of a field that goes
+missing. Messages restored from a pre-`ts` file get `""` (time unknown, shown
+without a time) rather than today's date. The API rejects fields it doesn't
+define, so `llm.cached()` — the one place a stored history is handed to the
+API — copies each message down to `role` and `content` on the way out.
 
 ---
 
