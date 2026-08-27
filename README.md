@@ -361,6 +361,22 @@ One limitation worth knowing: only the spoken audio is captured. Whatever is dra
 on a chart or slide is lost, so an instructor saying "as you can see here" ingests
 as exactly that.
 
+## Email (Gmail)
+
+Alice and Tom can search your Gmail, read threads, save drafts, and — only
+after you've heard the recipient/subject read back and explicitly said to —
+send. Setup is one-time, per Google account:
+
+1. In the Google Cloud console (Google Auth Platform → Clients), create a
+   Desktop OAuth client with the `gmail.readonly` and `gmail.compose` scopes,
+   download its JSON, and save it as `data/gmail_client_secret.json`.
+2. Run the browser consent flow once: `python -m lib.gmail_auth`. It writes
+   `data/gmail_token.json`, which then refreshes itself silently forever
+   (and syncs to your other machines with the rest of `data/`).
+
+The agent itself never opens a browser — if the token is ever revoked, the
+tools answer with the command above instead of hanging the conversation.
+
 ## Real trading by voice (tastytrade)
 
 The agent can build and place real multi-leg option orders on the tastytrade

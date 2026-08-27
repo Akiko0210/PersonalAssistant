@@ -456,6 +456,8 @@ data/index.json      ordered record of every note (title, date, category)
 data/categories.json voice-created/renamed folders overlaid on the seed defaults
 data/history_<key>.json  each persona's live window (sanitized on every save)
 data/memory_pending.json  staged text awaiting consolidation, tagged by persona
+data/gmail_client_secret.json  Google OAuth client (from the Cloud console)
+data/gmail_token.json          Gmail token, written by `python -m lib.gmail_auth`
 knowledge/           reference PDFs/text/video you ingest + manifest.json
 logs/                dated session logs
 ```

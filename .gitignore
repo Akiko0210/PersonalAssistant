@@ -5,6 +5,7 @@ logs/
 knowledge/
 __pycache__/
 *.pyc
+.DS_Store
 
 # Large audio assets — kept out of git (they live in Dropbox). The idle/summary
 # cue is optional; the app runs silently if the file is absent.
