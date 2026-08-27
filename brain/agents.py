@@ -30,7 +30,8 @@ AGENTS = {
         "name": "Alice",
         # Whisper's plausible spellings of each name; all lowercase.
         "aliases": ("alice", "alis", "allis", "ellis"),
-        "role": "general conversation — everyday questions, chat, and how this system works",
+        "role": ("general conversation — everyday questions, chat, the user's "
+                 "email, and how this system works"),
         "persona": (
             "You handle everyday conversation: greetings, quick questions, "
             "thinking out loud, the current time, and questions about how this "
@@ -41,7 +42,12 @@ AGENTS = {
         ),
         "tools": {"get_current_time", "describe_project",
                   "search_past_conversations", "get_current_model",
-                  "set_conversation_model", "switch_agent", "ask_agent"},
+                  "set_conversation_model", "switch_agent", "ask_agent",
+                  # Gmail. send_email is confirm-by-instruction: its
+                  # description requires the user's explicit go-ahead on the
+                  # exact message; drafts stay the steered-to default.
+                  "search_email_threads", "get_email_thread",
+                  "create_email_draft", "send_email"},
         # Other agents whose PRIVATE stores this hat may also read (empty =
         # own stores only). Like tools, access control is code, not a
         # dashboard edit — a future coach persona reviewing Tom's trades
@@ -141,7 +147,10 @@ AGENTS = {
                   # Focus mode: "focus on my double diagonals" narrows every
                   # retrieval until cleared. Tom-only — the other hats have no
                   # strategy-tagged material for it to filter.
-                  "set_focus", "clear_focus", "get_focus"},
+                  "set_focus", "clear_focus", "get_focus",
+                  # Gmail (broker/market mail); send gated as on Alice.
+                  "search_email_threads", "get_email_thread",
+                  "create_email_draft", "send_email"},
         "reads": (),
         "model": "sonnet",      # analysis benefits from the stronger model
         # Only Zira + David are installed on this machine, so Tom shares

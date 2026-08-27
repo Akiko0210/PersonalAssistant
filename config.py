@@ -84,6 +84,13 @@ DISCORD_DIR = BASE_DIR.parent / "Discord Notifier"
 DISCORD_LOG_PATH = DISCORD_DIR / "discord_log.md"
 DISCORD_TRADES_PATH = DISCORD_DIR / "trades.txt"
 
+# --- Gmail (email tools) ------------------------------------------------------
+# OAuth artifacts live in data/ so one browser consent (python -m lib.gmail_auth)
+# syncs to the other machine via Dropbox. The client secret comes from the
+# Google Cloud console (Auth Platform -> Clients -> Download JSON).
+GMAIL_CLIENT_SECRET_PATH = DATA_DIR / "gmail_client_secret.json"
+GMAIL_TOKEN_PATH = DATA_DIR / "gmail_token.json"
+
 # --- Audio capture -----------------------------------------------------------
 SAMPLE_RATE = 16000           # Hz; webrtcvad supports 8/16/32/48 kHz
 FRAME_MS = 30                 # 10/20/30 ms are the only valid VAD frame sizes
