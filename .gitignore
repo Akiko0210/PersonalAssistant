@@ -1,4 +1,5 @@
 .env
+.venv/
 data/
 logs/
 knowledge/

@@ -11,7 +11,8 @@ import unittest
 from unittest.mock import patch
 
 import config as cfg
-from brain.llm import Claude, cached
+from brain.llm.main import Claude, cached
+from brain.llm import deepseek
 
 
 class _Shell:
@@ -44,7 +45,7 @@ class TestClientFor(unittest.TestCase):
         self.assertIs(first, second)          # one client serves both models
         self.assertIsNot(first, shell.client)  # and it isn't the Anthropic one
         self.assertEqual(str(first.base_url).rstrip("/"),
-                         cfg.DEEPSEEK_BASE_URL)
+                         deepseek.BASE_URL)
 
 
 class TestCached(unittest.TestCase):

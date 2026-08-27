@@ -1,6 +1,6 @@
 ﻿# How Headset Media-Button Control Works
 
-This document explains how `media_control.py` lets you drive the voice agent
+This document explains how the `media_control/` package lets you drive the voice agent
 entirely from your wireless headset — no keyboard, no touching the PC — and the
 long road of failed approaches that came before it.
 
@@ -33,6 +33,32 @@ dongle's play/pause state machine (next section), every accepted click briefly
 pauses the keepalive (`duck()`), imitating an obedient music player. The
 keepalive is on by default (`MEDIA_KEEPALIVE` in `config.py`); the cost is
 some headset battery, since the radio link stays active.
+
+## Per-platform channels
+
+Everything above and below describes **Windows**, where both channels exist.
+Elsewhere:
+
+- **macOS**: no SMTC — the pynput keyboard hook is the only channel, and it
+  carries the whole story: play/pause clicks feed the gesture decoder, and
+  firmware-decoded `Next`/`Previous` (AirPods-class) are mapped in the same
+  hook. Two macOS-specific twists: the tap must *swallow* the events
+  (`media_control/macos.py`), or every press also reaches the system handler
+  and launches Music.app; and the tap needs the Input Monitoring/Accessibility
+  permission — without it, events silently never arrive (the "media key
+  received" log line is the diagnostic). Whether Bluetooth-native headsets
+  actually surface presses on this channel is untested; if they don't, the
+  fallback plan is an MPRemoteCommandCenter listener behind the same
+  `MediaButtonListener` interface.
+- **Linux**: keyboard hook only, X11 only (pynput cannot listen globally under
+  Wayland). An MPRIS D-Bus service is the eventual answer for BT-native
+  headsets there; not built yet.
+
+The `duck()`/keepalive machinery is a Yealink-dongle workaround and does not
+run off-Windows (`_media` simply doesn't exist there). If the same dongle is
+ever used on a Mac it presents as a USB keyboard, so the hook hears it — but
+its swallowed-press behaviour (below) may reappear without a keepalive to obey
+it.
 
 ---
 
@@ -79,7 +105,7 @@ the button thread the moment the gesture resolves, *not* when the main loop
 next drains commands: the reply is still playing at that point, and a live mic
 would leave its tail interruptible by the very person who just asked not to be
 heard. For the same reason the "Muted." acknowledgement is spoken on a
-**second voice** (`Announcer` in `tts.py`) laid over the reply: one SpVoice
+**second voice** (`Announcer` in `speech/tts/`) laid over the reply: one SpVoice
 serialises everything sent to it, so the notice would otherwise either queue
 behind a reply with twenty seconds left to run or purge it. The notice is
 quieter than the reply and picks a different installed voice where the machine
@@ -157,7 +183,7 @@ session, and the buttons vanish into the void. Not reliable, not PC-free.
 
 ## How the working version works
 
-`media_control.py` flips the relationship: instead of *observing* a media session
+`media_control/windows.py` flips the relationship: instead of *observing* a media session
 owned by someone else, **we register our own media session and become the active
 one.** Windows then routes the headset's decoded button intents *to us* as
 explicit events.
@@ -286,7 +312,7 @@ winrt-Windows.Media.Core      # needed for the silent keepalive (MediaSource)
 winrt-Windows.Foundation
 ```
 
-`media_control.py` imports `winrt.*` first and falls back to `winsdk.*` (identical
+`media_control/windows.py` imports `winrt.*` first and falls back to `winsdk.*` (identical
 API) if only the legacy package is present.
 
 ---

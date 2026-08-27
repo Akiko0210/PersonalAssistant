@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from brain import agents
 import config as cfg
-from brain.llm import Claude
+from brain.llm.main import Claude
 from tools import ToolContext, dispatch, api_tools
 
 

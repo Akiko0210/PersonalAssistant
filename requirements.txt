@@ -5,14 +5,16 @@ numpy>=1.24
 webrtcvad-wheels>=2.0.10
 faster-whisper>=1.0
 pyttsx3>=2.90
-pywin32>=306
+pywin32>=306 ; sys_platform == 'win32'
 pynput>=1.7
+# macOS TTS (NSSpeechSynthesizer) — async speak + pause/resume, see speech/tts.py
+pyobjc-framework-Cocoa>=10 ; sys_platform == 'darwin'
 # Windows media-session (SMTC) headset-button control; prebuilt wheels incl. 3.13
-winrt-runtime>=3.2
-winrt-Windows.Media>=3.2
-winrt-Windows.Media.Playback>=3.2
-winrt-Windows.Media.Core>=3.2
-winrt-Windows.Foundation>=3.2
+winrt-runtime>=3.2 ; sys_platform == 'win32'
+winrt-Windows.Media>=3.2 ; sys_platform == 'win32'
+winrt-Windows.Media.Playback>=3.2 ; sys_platform == 'win32'
+winrt-Windows.Media.Core>=3.2 ; sys_platform == 'win32'
+winrt-Windows.Foundation>=3.2 ; sys_platform == 'win32'
 sentence-transformers>=2.2
 chromadb>=0.5
 pypdf>=4.0

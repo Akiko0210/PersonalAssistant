@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 from brain import agents
 import config as cfg
-from brain.llm import Claude
+from brain.llm.main import Claude
 from tools import ToolContext
 
 

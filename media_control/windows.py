@@ -1,6 +1,8 @@
-﻿"""Headset / Bluetooth media-button control via Windows SMTC.
+﻿"""The Windows channel: headset / Bluetooth media buttons via SMTC.
 
-Registers our own System Media Transport Controls (SMTC) session so Windows
+Wired into the agent by main.py, Windows only — this module is the one place
+allowed to import winrt. Registers our own System Media Transport Controls
+(SMTC) session so Windows
 routes hardware media-button presses to this process as explicit events:
 
     Play / Pause   <- single press

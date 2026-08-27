@@ -14,7 +14,7 @@ from unittest import mock
 
 import config as cfg
 from web import server as dashboard
-from lib.single_instance import AlreadyRunning
+from lib.single_instance.main import AlreadyRunning
 
 
 class UploadTests(unittest.TestCase):

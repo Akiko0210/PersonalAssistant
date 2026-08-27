@@ -13,10 +13,13 @@ dashboard button is a direct method call on the live Agent. `dashboard.bat`
 runs the same server standalone for browsing/config/ingest while the agent is
 off; its control routes answer honestly ("agent not running" / "use the
 agent's dashboard"). Code lives in topic packages: `speech/` (mic, STT, TTS,
-barge-in), `buttons/` (headset gestures, SMTC), `brain/` (llm, agents,
-history, memory), `stores/` (notes, knowledge, categories), `lib/` (leaf
-utilities), `web/` (server + static), `tools/` (the tool registry), and
-`trading/`. Entry points and `config.py` stay at root.
+barge-in), `media_control/` (headset buttons: portable gesture decoding in
+`gestures.py`, per-OS channels in `windows.py`/`macos.py`/`linux.py`, wired
+by `main.py`), `brain/` (llm/ — the engine in `main.py`, providers in
+`anthropic.py`/`deepseek.py` — plus agents, history, memory), `stores/`
+(notes, knowledge, categories), `lib/` (leaf utilities), `web/` (server +
+static), `tools/` (the tool registry), and `trading/`. Entry points and
+`config.py` stay at root.
 
 **To add a live dashboard control**: one handler in `web/server.py`'s
 `CONTROL_ACTIONS` (validate the payload; raise `ValueError` for a bad one →
@@ -57,11 +60,23 @@ yourself editing them, stop and reconsider.
 
 ## Gotchas
 
-- Two Pythons on this machine: only the Windows Store Python has the deps;
-  `.claude/launch.json` pins it — keep that pin.
+- **Variant-file convention.** The app is cross-platform (Windows / macOS /
+  Linux) and multi-provider (Anthropic / DeepSeek). Variant-dependent code
+  lives in variant-named files inside its package —
+  `windows.py`/`macos.py`/`linux.py` (or `posix.py` when macOS and Linux
+  genuinely share one implementation), `anthropic.py`/`deepseek.py` — wired by
+  that package's `main.py`; consumers import `<pkg>.main`. Common logic stays
+  in `main.py`; a variant file is the only place its OS/provider library may
+  be imported. Extend a variant file or add a new one — never scatter
+  `sys.platform`/provider checks elsewhere. Current variant packages:
+  `media_control/`, `speech/tts/`, `speech/sound/`, `lib/single_instance/`,
+  `brain/llm/`.
+- Several Pythons per machine, only one with the deps: `.claude/launch.json`
+  pins it (Windows Store Python on the PC, `.venv` on the Mac) — keep the pin
+  pointed at whichever interpreter has the deps on the machine you're on.
 - `data/` is Dropbox-synced: use `lib/atomic_io` for state files (it retries
   Windows sharing violations); avoid chatty disk writes.
-- The single-instance lock (`lib/single_instance.py`) means agent-side
+- The single-instance lock (`lib/single_instance/`) means agent-side
   scripts and a running agent are mutually exclusive; probing the lock
   deletes the lock file when free (`web/server.py` memoises the probe).
 - `web/server.py` must never import `stores/notes.py`/chromadb at module

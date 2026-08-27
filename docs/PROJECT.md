@@ -1,6 +1,6 @@
 # Voice AI Notetaking Agent — Project Description
 
-A local, voice-driven notetaking assistant for Windows. You talk to it through a
+A local, voice-driven notetaking assistant (Windows, macOS, Linux). You talk to it through a
 headset; it answers aloud, records notes, files them into folders, and remembers
 past conversations. Everything runs on-device except the Claude API calls (the
 reasoning and the note summaries).
@@ -25,7 +25,8 @@ Two modes, switched by a headset button:
   (decided through a short spoken dialogue), and reads the summary back.
 
 Local components: microphone capture + voice-activity detection (webrtcvad),
-speech-to-text (faster-whisper), text-to-speech (Windows SAPI), and semantic
+speech-to-text (faster-whisper), text-to-speech (the OS's own engine — SAPI on
+Windows, NSSpeechSynthesizer on macOS, speech-dispatcher on Linux), and semantic
 search (Chroma + sentence-transformers embeddings). Only the language model is
 remote.
 
@@ -41,9 +42,9 @@ layer on top, and pure logic pulled out into standalone, testable modules.
                    |         |            |             |            |
      +-------------+         |            |             |            +---------+
      |                       |            |             |                      |
-  speech/                 speech/      buttons/      brain/llm.py         web/server.py
-  audio.py (mic+VAD)      tts.py       gestures.py   (Claude)             (dashboard,
-  barge_in.py (interrupt) sound.py     media_control  |     |              embedded)
+  speech/                 speech/      media_control/ brain/llm/          web/server.py
+  audio.py (mic+VAD)      tts/         gestures.py   (Claude)             (dashboard,
+  barge_in.py (interrupt) sound/       media_control  |     |              embedded)
                           (speak/cue)  (SMTC button)  |     |
                                             brain/history.py, memory.py   tools/ (registry)
                                             stores/ notes, knowledge,     |
@@ -76,14 +77,20 @@ unit-tested without a microphone, speakers, or an API key.
   barge-in (retaining the audio consumed while detecting an interruption).
 - **`speech/stt.py`** — `Transcriber`: faster-whisper wrapper (`small.en` by default,
   `vad_filter=True` to reject hallucinated text from silence).
-- **`speech/tts.py`** — `Speaker`: Windows SAPI backend (async speak + purge, which is
-  what enables barge-in; plus pause/resume, which is what lets a mute click
-  leave a reply intact) with a synchronous pyttsx3 fallback. `Announcer` is a
+- **`speech/tts/`** — `Speaker` (in `main.py`): one native backend per OS, each
+  in its own variant file — `windows.py` (SAPI), `macos.py`
+  (NSSpeechSynthesizer), `linux.py` (speech-dispatcher) — each with async
+  speak + purge (which is what enables barge-in) and pause/resume (which is
+  what lets a mute click leave a reply intact), with a synchronous pyttsx3
+  fallback (`fallback.py`). The variant files also carry the second-voice
+  announce and the dashboard's voice enumeration for their OS. `Announcer` is a
   deliberately separate second voice — one SpVoice serialises its utterances,
   so a notice that must be heard *over* a playing reply ("Muted.") needs its
   own voice object, in its own thread and COM apartment.
-- **`speech/sound.py`** — `IdleSound`: loops a "thinking" WAV while the agent waits on
-  the model. Idempotent, thread-safe, never raises (missing file = silence).
+- **`speech/sound/`** — `IdleSound` (in `main.py`): loops a "thinking" WAV while
+  the agent waits on the model. Idempotent, thread-safe, never raises (missing
+  file = silence). Playback variants: `windows.py` (winsound), `posix.py`
+  (sounddevice, shared by macOS and Linux).
 
 ### Button / interruption logic (extracted, pure-ish, tested)
 - **`speech/barge_in.py`** — `BargeInDetector`: decides when the user's voice should
@@ -91,20 +98,27 @@ unit-tested without a microphone, speakers, or an API key.
   playback, then requires frames that are both voiced (VAD) and louder than that
   baseline; a *leaky* counter tolerates brief mid-word dropouts. Retains the
   consumed frames so the user's opening words aren't lost on interruption.
-- **`buttons/gestures.py`** — `ClickGestureDecoder`: turns raw button presses into
+- **`media_control/gestures.py`** — `ClickGestureDecoder`: turns raw button presses into
   single/double/triple gestures. Dedupes presses that arrive on both listener
   channels, counts clicks within a window, and fires the gesture on a timer.
   Thread-safe.
-- **`buttons/media_control.py`** — `MediaButtonListener`: a Windows System Media Transport
+- **`media_control/windows.py`** — `MediaButtonListener`: a Windows System Media Transport
   Controls (SMTC) session so Bluetooth-native headset buttons (AVRCP, which never
-  appear as key events) are received, plus the silent keepalive stream. See
+  appear as key events) are received, plus the silent keepalive stream. Windows
+  only; on macOS/Linux the keyboard hook is the sole channel, with
+  `media_control/macos.py` swallowing the macOS media keys so a press doesn't
+  also launch Music.app. `media_control/main.py` wires whichever channels the
+  running OS provides into the agent's callbacks. See
   `MEDIA_CONTROL.md` for the hardware reasoning.
 
 ### Language model
-- **`brain/llm.py`** — `Claude`: the conversation loop (`converse`, with the tool-call
-  loop), the folder-choice dialogue (`choose_folder_via_dialogue`), note
-  summarisation (`summarize`), and memory consolidation. Holds a `ToolContext`
-  and reads the active conversation model from it each call.
+- **`brain/llm/`** — `Claude` (in `main.py`): the conversation loop (`converse`,
+  with the tool-call loop), the folder-choice dialogue
+  (`choose_folder_via_dialogue`), note summarisation (`summarize`), and memory
+  consolidation. Holds a `ToolContext` and reads the active conversation model
+  from it each call. Provider machinery is isolated in the variant files:
+  `anthropic.py` and `deepseek.py` own their client construction, endpoint,
+  and quirks — the engine itself never knows more than one provider exists.
 - **`brain/history.py`** — pure functions over the message list: `sanitize` (drop any
   tool_use whose tool_result never arrived, and merge adjacent same-role turns),
   `trim` (rolling window that starts on a clean user message), `load`/`save`
@@ -352,7 +366,8 @@ central list or dispatch chain.
   conversation model between Haiku 4.5, Sonnet 5, Opus 5, and (when
   `DEEPSEEK_API_KEY` is set) DeepSeek V4 Flash / Pro by voice. DeepSeek runs
   through its Anthropic-compatible endpoint via `Claude.client_for`, so every
-  model shares one code path; `config.model_provider` is the routing rule.
+  model shares one code path; `config.model_provider` is the routing *name*,
+  and `brain/llm/deepseek.py` owns the endpoint, key, and quirks.
   A mid-session choice is remembered **per persona** (`Claude._model_overrides`)
   and follows that persona everywhere: `Claude.model_for(key)` is the one
   resolver behind `converse()`, background delegation, and the switch
@@ -449,7 +464,8 @@ Everything under `data/`, `logs/`, `knowledge/`, and `.env` is gitignored — th
 user's content and keys never enter version control.
 
 Only one agent may run against this directory at a time. At startup
-`lib/single_instance.py` takes a Windows `msvcrt` lock on `data/agent.lock`; a second
+`lib/single_instance/` takes an OS lock on `data/agent.lock` (`msvcrt` in
+`windows.py`, `fcntl.flock` in `posix.py`); a second
 launch finds it held and exits with a spoken notice, so two instances can't race
 on `history.json` / the Chroma index (which would corrupt them) or talk over each
 other. The OS drops the lock when the process exits — including on a crash — so
@@ -506,7 +522,7 @@ rather than to keep editing — see the duplication rule in `CLAUDE.md`.
 | **A note folder** | created by voice at runtime; or seed one in `stores/categories.py` | |
 | **A tunable** | the constant in `config.py` (with its rationale comment), its type in `OVERRIDABLE`, and a `TUNABLES` row in `web/server.py` | the row generates the Config-page control AND its server-side validation |
 | **A dashboard page** | a `views.<name>` function in `web/static/app.js`, a nav link in `index.html`, and its read-only API route | 12 views exist; copy the nearest one's shape |
-| **A different speech/embedding engine** | `speech/stt.py`, `speech/tts.py`, or the store's `_ensure_chroma` | orchestration never names a backend |
+| **A different speech/embedding engine** | `speech/stt.py`, `speech/tts/` (a variant file), or the store's `_ensure_chroma` | orchestration never names a backend |
 | **A shared test fake** | `tests/agent_fixtures.py`, `tests/llm_fixtures.py`, `tests/trading_fixtures.py` | extend these; a fourth copy of a fake is the bug this convention exists to stop |
 
 ### Limits, and the number that triggers each
@@ -523,7 +539,7 @@ history never does.
 | Turns | **one at a time** | the loop is blocking. A typed message waits for an utterance boundary; during note-taking it waits for the note to end. Background delegations (`ask_agent`) are the exception — they run on threads and speak their result at the next gap |
 | Tool rounds per turn | **15** conversation, **8** delegated | the loop bails with a spoken "I got stuck repeating tool calls" rather than billing forever |
 | Knowledge ingest | mutually exclusive with a running agent | both write the same Chroma store; the single-instance lock enforces it, so the dashboard's Ingest button is dead while the agent runs |
-| Agent instances | **one** | the lock (`lib/single_instance.py`). A second would double the Whisper + embedding memory and race on history and the index |
+| Agent instances | **one** | the lock (`lib/single_instance/`). A second would double the Whisper + embedding memory and race on history and the index |
 | Typed message | **4000 chars** (`MAX_MESSAGE_CHARS`) | rejected with a 400; a message is a question, not a document |
 | One utterance | **30 s** (`MAX_UTTERANCE_S`) | capture is cut and transcribed as-is |
 

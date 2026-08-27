@@ -42,7 +42,7 @@ except ImportError:
 import config as cfg  # noqa: E402
 from brain import agents  # noqa: E402
 from brain.memory import CONSOLIDATE_PROMPT  # noqa: E402
-from lib.single_instance import AlreadyRunning, SingleInstance  # noqa: E402
+from lib.single_instance.main import AlreadyRunning, SingleInstance  # noqa: E402
 
 # One log line: "2026-08-10 09:22:11,286 agent    INFO    <message>".
 _LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}:\d{2},\d+ "

@@ -73,7 +73,7 @@ strategy built by voice and a journal entry about it use the same word.
 - [ ] Decide the strategy vocabulary; add a `classify_strategy(text)` helper
       (deterministic mapping first, model call only as fallback).
 - [ ] Wire the store into `ToolContext` as `journal`, constructed where `kb`
-      and `memory` are constructed in `llm.py:Claude.__init__`.
+      and `memory` are constructed in `brain/llm/main.py:Claude.__init__`.
 - [ ] New `tools/journal_tools.py`: `log_trade_note`,
       `search_trading_journal` (focus-aware, cites date and underlying),
       `recent_trading_activity`. Tom's allowlist only.

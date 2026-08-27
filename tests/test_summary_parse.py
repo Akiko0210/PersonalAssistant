@@ -3,7 +3,7 @@
 import unittest
 
 from stores import categories
-from brain.llm import Claude
+from brain.llm.main import Claude
 
 
 class TestParseSummary(unittest.TestCase):

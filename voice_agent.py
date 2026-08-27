@@ -30,14 +30,14 @@ import config as cfg
 from web import server as dashboard
 from speech.audio import AudioEngine
 from speech.barge_in import BargeInDetector
-from buttons.gestures import ClickGestureDecoder
+from media_control.gestures import ClickGestureDecoder
 from speech.stt import Transcriber
-from speech.tts import Announcer, Speaker
+from speech.tts.main import Announcer, Speaker
 from stores.notes import NoteStore
 from stores.knowledge import KnowledgeStore
-from brain.llm import Claude
-from speech.sound import IdleSound
-from lib.single_instance import SingleInstance, AlreadyRunning
+from brain.llm.main import Claude
+from speech.sound.main import IdleSound
+from lib.single_instance.main import SingleInstance, AlreadyRunning
 
 
 def explain_error(e: Exception) -> str:
@@ -350,50 +350,20 @@ class Agent:
             self._quit()
 
     def start_hotkeys(self):
-        # The button is listened to on BOTH channels at once, because different
-        # headsets deliver presses differently (see MEDIA_CONTROL.md):
-        #   - keyboard hook: wired headsets and USB wireless dongles (media-key
-        #     events);
-        #   - SMTC media session: Bluetooth-native headsets (AVRCP — their
-        #     presses never appear as key events).
-        # A press that arrives on both channels within MEDIA_CLICK_DEDUPE_S is
-        # counted once by _media_click.
-        from pynput import keyboard
+        # Channel wiring (which OS gets which listeners, and why) lives in
+        # media_control/main.py; the agent only says what the buttons DO.
+        # on_click feeds the gesture decoder — headsets that decode multi-press
+        # in firmware (e.g. AirPods) skip it and deliver double/triple directly
+        # as on_note/on_quit.
+        from media_control.main import MediaButtons
 
-        def on_press(key):
-            if key == keyboard.Key.media_play_pause:
-                self.log.info("media key received (speaking=%s)", self.tts.is_busy())
-                self._gesture.click()
-
-        self._listener = keyboard.Listener(on_press=on_press)
-        self._listener.start()
-
-        try:
-            from buttons.media_control import MediaButtonListener
-
-            def on_play_pause():
-                self.log.info("media button (SMTC) received (speaking=%s)",
-                              self.tts.is_busy())
-                self._gesture.click()
-
-            self._media = MediaButtonListener(
-                on_play_pause=on_play_pause,
-                # Headsets that decode multi-press in firmware (e.g. AirPods)
-                # deliver double/triple as Next/Previous — map them to the same
-                # actions as counted double/triple clicks.
-                on_next=self._toggle_note,
-                on_previous=self._quit,
-                # Short debounce: real double-clicks arrive ~200 ms apart and
-                # must get through; cross-channel dedupe lives in _media_click.
-                debounce_s=0.08,
-                keepalive=cfg.MEDIA_KEEPALIVE,
-            )
-            self._media.start()
-        except Exception as e:  # noqa: BLE001 - any winrt/SMTC failure
-            self.log.warning(
-                "SMTC media session unavailable (%s); Bluetooth-native headset "
-                "buttons won't be received (keyboard hook still active)", e
-            )
+        self._media = MediaButtons(
+            on_click=self._gesture.click,
+            on_note=self._toggle_note,
+            on_quit=self._quit,
+            speaking=self.tts.is_busy,
+        )
+        self._media.start()
 
     # --- modes ---------------------------------------------------------------
     def run_conversation_turn(self):

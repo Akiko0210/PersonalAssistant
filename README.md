@@ -12,8 +12,9 @@ A local, voice-driven assistant with two modes:
   disk and reads the summary back to you.
 
 Everything runs locally except Claude (the brains + summaries): transcription
-(faster-whisper), speech (Windows SAPI), and semantic note search (Chroma +
-sentence-transformers) are all on-device. No UI — just your voice and hotkeys —
+(faster-whisper), speech (the OS's own TTS — SAPI on Windows,
+NSSpeechSynthesizer on macOS, speech-dispatcher on Linux), and semantic note
+search (Chroma + sentence-transformers) are all on-device. No UI — just your voice and hotkeys —
 but everything is logged to `logs/`.
 
 For a detailed technical walkthrough — module map, data flows, the tool
@@ -22,7 +23,13 @@ just ask the agent: "tell me about this project.")
 
 ## Setup
 
+Runs on Windows, macOS, and Linux. `requirements.txt` carries platform markers,
+so the same `pip install` works everywhere and only pulls what your OS needs
+(pywin32/winrt on Windows, pyobjc on macOS).
+
 1. Install Python dependencies:
+
+   **Windows** — install into your regular Python (the Store Python works):
 
    ```sh
    pip install -r requirements.txt
@@ -31,12 +38,19 @@ just ask the agent: "tell me about this project.")
    > On Windows this uses `webrtcvad-wheels` (a precompiled build of `webrtcvad`)
    > so you don't need Visual C++ Build Tools. It imports as `webrtcvad` either way.
 
+   **macOS / Linux** — install into a project venv named `.venv`; the launch
+   scripts pick it up automatically, so you never need to activate it:
+
+   ```sh
+   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+   ```
+
 2. Provide your Claude API key. Easiest: copy `.env.example` to `.env` and put your
    key in it — it's loaded automatically on startup and is gitignored so it never
    gets committed:
 
    ```sh
-   copy .env.example .env       # then edit .env and set ANTHROPIC_API_KEY
+   cp .env.example .env       # (Windows: copy) then edit .env, set ANTHROPIC_API_KEY
    ```
 
    Alternatively, set it as an environment variable instead of using `.env`:
@@ -50,16 +64,46 @@ just ask the agent: "tell me about this project.")
 
 ## Run
 
+One launcher per OS family, same behavior: a plain launch first ingests
+anything new in `knowledge/`, then starts the agent; passing any argument
+skips the ingest pass and hands the argument through.
+
+| | Agent | Standalone dashboard |
+| --- | --- | --- |
+| **Windows** | `run.bat` (double-click works) | `dashboard.bat` |
+| **macOS / Linux** | `./run.sh` | `./dashboard.sh` |
+
+Useful arguments (any launcher, or `python voice_agent.py` directly):
+
 ```sh
-python voice_agent.py            # start the agent (conversation mode)
-python voice_agent.py --selftest # check mic, STT, TTS, Claude, and note search
+./run.sh --selftest   # check mic, STT, TTS, Claude, and note search
+./run.sh --miccheck   # meter the microphone without starting the agent
+./run.sh --ingest     # absorb new knowledge/ files (video included), then exit
+./run.sh --kb-list    # list ingested knowledge sources, then exit
 ```
 
-Only one agent can run at a time: a second `python voice_agent.py` detects the
-first (via a lock on `data/agent.lock`) and exits immediately with a spoken
-notice, so two instances can't talk over each other or corrupt your history and
-note index. The lock is released automatically when the agent stops — even on a
-crash — so there's nothing to clean up.
+Per-environment notes:
+
+- **Windows** — everything works out of the box: SAPI speech (pause/resume for
+  the mute gesture), the SMTC media session for Bluetooth headset buttons, and
+  the winsound thinking cue.
+- **macOS** — two permission prompts to expect, both granted to the *terminal
+  you launch from*: **Microphone** (asked automatically on first run) and
+  **Input Monitoring / Accessibility** (System Settings → Privacy & Security)
+  for the headset button — without it, button presses silently never arrive.
+  Speech uses NSSpeechSynthesizer, so barge-in and the mute gesture behave
+  exactly as on Windows. The launch scripts prefer `.venv/bin/python` when it
+  exists and fall back to `python3` otherwise.
+- **Linux** — install `speech-dispatcher python3-speechd` (system packages)
+  for interruptible speech; without them the agent still talks via `espeak-ng`
+  through pyttsx3, but a reply can then only be stopped, not paused. Headset
+  buttons need X11 — global key listening doesn't work under Wayland yet.
+
+Only one agent can run at a time: a second launch detects the first (via a lock
+on `data/agent.lock`) and exits immediately with a spoken notice, so two
+instances can't talk over each other or corrupt your history and note index.
+The lock is released automatically when the agent stops — even on a crash — so
+there's nothing to clean up.
 
 ## Controls
 
@@ -90,11 +134,13 @@ aren't being listened to while it happens. Double-click (notetaking) and
 triple-click (quit) do end a reply immediately, and to cut one short without
 changing anything, just start talking (barge-in, below).
 
-Button presses are listened for on two channels at once (see
+On Windows, button presses are listened for on two channels at once (see
 `docs/MEDIA_CONTROL.md`): a keyboard hook (how wired headsets and USB wireless
 dongles deliver presses) and a Windows media session (SMTC — how
 Bluetooth-native headsets like AirPods deliver them; those never appear as key
-events). A press arriving on both channels is counted once. Multi-click
+events). A press arriving on both channels is counted once. On macOS and Linux
+the keyboard hook is the only channel (on macOS it also swallows the keys so a
+press doesn't launch Music.app). Multi-click
 detection uses a 450 ms window — clicks within that window count together.
 Headsets that decode multi-press in firmware (e.g. AirPods) send Next/Previous
 instead; those map to the same double/triple actions. A silent keepalive
@@ -398,7 +444,7 @@ from it, so its self-knowledge stays in sync with the documentation.
 voice_agent.py   entry point + Agent orchestration (main loop, modes, say/barge-in)
 config.py        shared constants (paths, audio params, models, system prompt)
 speech/          audio (mic/VAD), stt, tts, sound (thinking cue), barge_in
-buttons/         gestures (click decode), media_control (SMTC / headset button)
+media_control/   headset button: gestures (click decode) + per-OS channels (main.py wires them)
 brain/           llm (Claude loop), agents (personas), history, memory
 stores/          notes, knowledge, categories, discord_data, chroma_store
 lib/             atomic_io, single_instance, frontmatter — leaf utilities

@@ -3,7 +3,7 @@
 import time
 import unittest
 
-from buttons.gestures import ClickGestureDecoder
+from media_control.gestures import ClickGestureDecoder
 
 
 class TestGestures(unittest.TestCase):
@@ -63,6 +63,32 @@ class TestGestures(unittest.TestCase):
         self.assertEqual(self.gestures, [1])  # gen 1 resolved once, not twice
         self.settle()
         self.assertEqual(self.gestures, [1, 1])  # gen 2 still resolves on time
+
+
+class TestDarwinMediaKeySuppression(unittest.TestCase):
+    """The pure decide-to-swallow half of the macOS event tap (the Quartz
+    half is untestable off-device). data1 packs the keycode in the high 16
+    bits; 0x0A00/0x0B00 in the low word are the down/up halves."""
+
+    def test_play_pause_is_suppressed_down_and_up(self):
+        from media_control.macos import is_agent_media_key, NX_KEYTYPE_PLAY
+        self.assertTrue(is_agent_media_key(8, (NX_KEYTYPE_PLAY << 16) | 0x0A00))
+        self.assertTrue(is_agent_media_key(8, (NX_KEYTYPE_PLAY << 16) | 0x0B00))
+
+    def test_next_and_previous_are_suppressed(self):
+        from media_control.macos import (is_agent_media_key,
+                                         NX_KEYTYPE_NEXT, NX_KEYTYPE_PREVIOUS)
+        self.assertTrue(is_agent_media_key(8, (NX_KEYTYPE_NEXT << 16) | 0x0A00))
+        self.assertTrue(is_agent_media_key(8, (NX_KEYTYPE_PREVIOUS << 16) | 0x0A00))
+
+    def test_unhandled_media_keys_pass_through(self):
+        from media_control.macos import is_agent_media_key
+        # volume up (keycode 0) — swallowing it would mute the user's Mac
+        self.assertFalse(is_agent_media_key(8, (0 << 16) | 0x0A00))
+
+    def test_other_subtypes_pass_through(self):
+        from media_control.macos import is_agent_media_key, NX_KEYTYPE_PLAY
+        self.assertFalse(is_agent_media_key(7, (NX_KEYTYPE_PLAY << 16) | 0x0A00))
 
 
 if __name__ == "__main__":

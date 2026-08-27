@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from brain import agents
-from brain.llm import Claude
+from brain.llm.main import Claude
 import config as cfg
 from tests.llm_fixtures import make_claude
 

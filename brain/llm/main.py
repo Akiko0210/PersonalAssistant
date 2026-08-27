@@ -1,16 +1,22 @@
 """Claude integration: conversation (with note-access tools) and summarisation.
 
-DeepSeek models ride the same code path: their Anthropic-compatible endpoint
+Every model rides this one code path: DeepSeek's Anthropic-compatible endpoint
 speaks the Messages API, so `client_for` just picks which anthropic-SDK client
 a model id goes to. Nothing downstream — tool loop, history invariants, error
-handling — knows more than one provider exists."""
+handling — knows more than one provider exists. What IS provider-specific
+(client construction, endpoints, keys, quirks) lives in the variant files
+beside this one — `anthropic.py`, `deepseek.py`; `config.model_provider` is
+the id→provider routing name."""
 
 import logging
-import os
 from datetime import datetime
 
 import anthropic
 
+# The SDK above vs our provider variant below share a name — alias the variant
+# so anthropic.NotFoundError (SDK) keeps resolving in this file.
+from brain.llm import anthropic as anthropic_api
+from brain.llm import deepseek
 from brain import agents
 from stores import categories
 import config as cfg
@@ -125,7 +131,7 @@ class _NullIdle:
 
 class Claude:
     def __init__(self, store, idle=None, kb=None):
-        self.client = anthropic.Anthropic()
+        self.client = anthropic_api.make_client()
         self._deepseek = None  # lazily built by client_for; needs DEEPSEEK_API_KEY
         self.store = store
         self.discord = DiscordData()
@@ -183,13 +189,7 @@ class Claude:
         if cfg.model_provider(model_id) != "deepseek":
             return self.client
         if self._deepseek is None:
-            key = os.environ.get("DEEPSEEK_API_KEY")
-            if not key:
-                raise RuntimeError(
-                    "DEEPSEEK_API_KEY is not set — add it to .env to use "
-                    f"{model_id}, or switch back to a Claude model.")
-            self._deepseek = anthropic.Anthropic(
-                base_url=cfg.DEEPSEEK_BASE_URL, api_key=key)
+            self._deepseek = deepseek.make_client()
         return self._deepseek
 
     # Set by the save_conversation_note tool; the agent picks it up after the

@@ -21,7 +21,6 @@ it outweighs old turns, and leaves a tool_use line in the log so the answer is
 auditable instead of merely plausible.
 """
 
-import os
 
 from brain import agents
 import config as cfg
@@ -89,13 +88,15 @@ def set_conversation_model(ctx, args):
     if not model_id:
         options = ", ".join(cfg.CONVO_MODELS)
         return f"Unknown model '{choice}'. Choose one of: {options}."
-    if (cfg.model_provider(model_id) == "deepseek"
-            and not os.environ.get("DEEPSEEK_API_KEY")):
-        # Refuse here, while we can still answer with the current model — once
-        # ctx.convo_model is set, the very next API call would fail instead.
-        return ("I can't switch to DeepSeek: no DEEPSEEK_API_KEY is "
-                "configured. Add it to the .env file and restart, or pick a "
-                "Claude model.")
+    if cfg.model_provider(model_id) == "deepseek":
+        from brain.llm import deepseek
+        if not deepseek.available():
+            # Refuse here, while we can still answer with the current model —
+            # once ctx.convo_model is set, the very next API call would fail
+            # instead.
+            return ("I can't switch to DeepSeek: no DEEPSEEK_API_KEY is "
+                    "configured. Add it to the .env file and restart, or pick "
+                    "a Claude model.")
     if ctx.convo_model == model_id:
         return f"Already using {cfg.convo_model_label(model_id)}."
     ctx.convo_model = model_id

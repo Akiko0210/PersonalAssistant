@@ -13,8 +13,8 @@ DATA_DIR = BASE_DIR / "data"
 CHROMA_DIR = DATA_DIR / "chroma"
 LOG_DIR = BASE_DIR / "logs"
 INDEX_PATH = DATA_DIR / "index.json"
-# Single-instance lock: a second launch takes a lock on this file (Windows
-# msvcrt; see single_instance.py) and exits if it's already held, so two agents
+# Single-instance lock: a second launch takes a lock on this file (see
+# lib/single_instance/) and exits if it's already held, so two agents
 # can't talk over each other or race on history.json and the Chroma index
 # (which would corrupt them).
 LOCK_PATH = DATA_DIR / "agent.lock"
@@ -252,7 +252,7 @@ CONVO_MODELS = {
     "sonnet": "claude-sonnet-5",   # stronger reasoning, a bit slower
     "opus": "claude-opus-5",       # most capable, slowest and priciest
     # DeepSeek, served through their Anthropic-compatible endpoint (see
-    # DEEPSEEK_BASE_URL below) — same Messages API, same tool_use/tool_result
+    # brain/llm/deepseek.py) — same Messages API, same tool_use/tool_result
     # blocks, so the whole tool loop and history machinery work unchanged.
     # Cheapest by far; needs DEEPSEEK_API_KEY in .env or the switch is refused.
     "deepseek": "deepseek-v4-flash",      # cheap + fast external option
@@ -268,18 +268,12 @@ CONVO_MODEL_LABELS = {
 CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)
 SUMMARY_MODEL = "claude-sonnet-5"     # higher quality for note summaries
 
-# DeepSeek's Anthropic-compatible endpoint: speaks the Messages API (client-side
-# tool use fully supported) so it works through the same anthropic SDK client,
-# just with this base_url and its own key. Known differences, all harmless here:
-# cache_control is ignored (DeepSeek caches automatically server-side, with its
-# own cache-hit pricing), thinking budget_tokens is ignored, and images are
-# unsupported (this app never sends any).
-DEEPSEEK_BASE_URL = "https://api.deepseek.com/anthropic"
-
-
 def model_provider(model_id: str) -> str:
     """Which API serves a model id: 'anthropic' or 'deepseek'. The single
-    routing rule for client selection — keep any new provider logic here."""
+    id→provider routing rule. Names and id→data mappings stay here (config
+    imports nothing, so everything may use them); provider MACHINERY — client
+    construction, endpoints, keys, SDK quirks — lives in
+    brain/llm/<provider>.py. A new provider adds a name here and a file there."""
     return "deepseek" if (model_id or "").startswith("deepseek") else "anthropic"
 
 

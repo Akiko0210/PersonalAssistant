@@ -42,6 +42,7 @@ import argparse
 import json
 import logging
 import re
+import sys
 import threading
 import time
 import webbrowser
@@ -55,7 +56,7 @@ from stores import categories
 import config as cfg
 from lib.atomic_io import read_json, write_json_atomic
 from lib.frontmatter import parse_frontmatter
-from lib.single_instance import AlreadyRunning, SingleInstance
+from lib.single_instance.main import AlreadyRunning, SingleInstance
 
 log = logging.getLogger("dashboard")
 
@@ -533,25 +534,11 @@ def api_control_post(agent, name, payload):
 
 
 def api_voices():
-    """Installed SAPI voices, for the per-agent voice dropdown. Read from the
-    registry (stdlib winreg) rather than COM: the same tokens SAPI's
-    GetVoices() returns, but with no pywin32 dependency and no per-thread
-    CoInitialize headaches under ThreadingHTTPServer. [] on any failure, and
-    the UI falls back to a free-text input."""
-    voices = []
-    try:
-        import winreg
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                            r"SOFTWARE\Microsoft\Speech\Voices\Tokens") as k:
-            for i in range(winreg.QueryInfoKey(k)[0]):
-                name = winreg.EnumKey(k, i)
-                try:
-                    voices.append(winreg.QueryValue(k, name))
-                except OSError:
-                    pass
-    except OSError:
-        pass
-    return {"voices": voices}
+    """Installed system voices, for the per-agent voice dropdown. The per-OS
+    enumeration lives with the TTS variants (speech/tts/); imported lazily so
+    the standalone dashboard's instant start is untouched."""
+    from speech.tts.main import list_voices
+    return {"voices": list_voices()}
 
 
 def api_agents():

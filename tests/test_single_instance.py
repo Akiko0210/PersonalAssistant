@@ -8,10 +8,9 @@ import os
 import tempfile
 import unittest
 
-from lib.single_instance import SingleInstance, AlreadyRunning
+from lib.single_instance.main import SingleInstance, AlreadyRunning
 
 
-@unittest.skipUnless(os.name == "nt", "single-instance lock is Windows-only for now")
 class TestSingleInstance(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
