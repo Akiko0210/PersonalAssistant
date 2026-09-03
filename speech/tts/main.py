@@ -1,12 +1,12 @@
 """Local text-to-speech — the integrator over the per-OS variant files.
 
-One primary backend per OS, each supporting asynchronous speaking + purge,
-which is what enables barge-in (interrupting the agent mid-sentence), and
-pause + resume, which is what lets a mute click leave a reply intact instead
-of cutting it off:
+One native backend per OS (Linux: two, tried in order), each supporting
+asynchronous speaking + purge, which is what enables barge-in (interrupting
+the agent mid-sentence), and pause + resume, which is what lets a mute click
+leave a reply intact instead of cutting it off:
   - `windows.py`: SAPI directly via pywin32;
   - `macos.py`: NSSpeechSynthesizer via pyobjc;
-  - `linux.py`: speech-dispatcher's SSIP client.
+  - `linux.py`: Piper (neural, via sounddevice), then speech-dispatcher.
 `fallback.py` (pyttsx3) is the universal fallback, but it speaks synchronously
 only (no barge-in, no pause there — a mute click then cuts the reply off).
 All variant modules keep their OS imports lazy, so importing them here is free
@@ -27,27 +27,34 @@ log = logging.getLogger("tts")
 
 
 def _select_backend(platform=None):
-    """The async backend class for this OS. Pure mapping (no construction),
-    so the platform routing is testable anywhere."""
+    """The async backend classes for this OS, best first. Pure mapping (no
+    construction), so the platform routing is testable anywhere."""
     platform = platform or sys.platform
     if platform == "win32":
-        return windows.SapiSpeaker
+        return (windows.SapiSpeaker,)
     if platform == "darwin":
-        return macos.NSSpeaker
+        return (macos.NSSpeaker,)
     if platform.startswith("linux"):
-        return linux.SpeechdSpeaker
+        return (linux.PiperSpeaker, linux.SpeechdSpeaker)
     raise RuntimeError(f"no native TTS backend for {platform}")
 
 
 class Speaker:
     def __init__(self):
+        self._backend = None
         try:
-            cls = _select_backend()
-            self._backend = cls()
-            log.info("TTS backend: %s", cls.__name__)
-        except Exception as e:  # noqa: BLE001 - fall back on any backend issue
-            log.warning("native TTS unavailable (%s); falling back to pyttsx3", e)
+            for cls in _select_backend():
+                try:
+                    self._backend = cls()
+                    break
+                except Exception as e:  # noqa: BLE001 - try the next variant
+                    log.warning("%s unavailable (%s)", cls.__name__, e)
+        except RuntimeError as e:
+            log.warning("%s", e)
+        if self._backend is None:
+            log.warning("native TTS unavailable; falling back to pyttsx3")
             self._backend = fallback.Pyttsx3Speaker()
+        log.info("TTS backend: %s", type(self._backend).__name__)
 
     @property
     def supports_async(self) -> bool:
@@ -135,12 +142,8 @@ class Announcer:
         elif sys.platform == "darwin":
             self._impl = macos
         else:
-            # Linux: speechd serialises through one connection like SAPI does
-            # through one voice, so there is no cheap second channel yet.
-            self._impl = None
-            log.info("no second voice on this OS: "
-                     "spoken notices will wait for the main voice")
-        self.available = bool(self._impl) and self._impl.announcer_available()
+            self._impl = linux
+        self.available = self._impl.announcer_available()
 
     def announce(self, text: str, avoid_voice: str = "") -> bool:
         """Say `text` over whatever is already playing. Returns False when a
@@ -162,10 +165,10 @@ class Announcer:
 
 def list_voices():
     """Installed voice names for the dashboard's voice dropdown, from whichever
-    variant can enumerate cheaply (winreg / `say -v ?`). [] elsewhere and on
-    any failure — the UI then falls back to a free-text input."""
+    variant can enumerate cheaply (winreg / `say -v ?` / a directory scan).
+    [] on any failure — the UI then falls back to a free-text input."""
     if sys.platform == "win32":
         return windows.list_voices()
     if sys.platform == "darwin":
         return macos.list_voices()
-    return []
+    return linux.list_voices()

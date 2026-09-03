@@ -146,9 +146,17 @@ MEMORY_MIN_MESSAGES = 6              # consolidate only once this many lines sta
 MEMORY_MAX_TOKENS = 700              # budget for one consolidation summary
 MEMORY_SEARCH_RESULTS = 3            # summaries returned per search
 
-# --- Text-to-speech (local, Windows SAPI via pyttsx3) ------------------------
+# --- Text-to-speech (local: SAPI / NSSpeechSynthesizer / Piper) ---------------
 TTS_RATE = 175                # words per minute
-TTS_VOICE = None              # None = system default; or a SAPI voice id substring
+TTS_VOICE = None              # None = system default; or a voice-name substring
+# Linux speaks through Piper (local neural TTS; the OS's own espeak-ng is the
+# robotic voice it replaces). Voices are files: this one is fetched once from
+# Hugging Face the first time the agent talks (~60 MB), the way faster-whisper
+# fetches its model. Others: `python -m piper.download_voices en_US-ryan-medium
+# --data-dir <PIPER_VOICE_DIR>`; TTS_VOICE / a persona's tts_voice then pick one
+# by substring ("ryan"). Kept out of data/: models are not for Dropbox.
+PIPER_VOICE = "en_US-lessac-medium"
+PIPER_VOICE_DIR = Path.home() / ".cache" / "piper"
 
 # Spoken notices ("Muted.", "Listening.") are said on a SECOND voice so they can
 # be heard *over* a reply that is still playing — one SAPI voice queues its
@@ -467,6 +475,7 @@ OVERRIDABLE = {
     "SUMMARY_MAX_TOKENS": int, "CONVO_MAX_TOOL_ROUNDS": int,
     # speech engines
     "WHISPER_MODEL": str, "TTS_RATE": int, "TTS_VOICE": _cast_optional_str,
+    "PIPER_VOICE": str,
     "KB_MEDIA_MODEL": str,
     # memory / search
     "HISTORY_MAX_MESSAGES": int, "SEARCH_RESULTS": int, "KB_SEARCH_RESULTS": int,
