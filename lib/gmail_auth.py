@@ -9,10 +9,11 @@ Split from tools/gmail_tools.py so the google-auth imports stay out of the
 tool module (which the registry imports at startup on machines that may not
 have the deps installed) — gmail_tools imports this lazily, per call.
 
-Inside the agent this NEVER opens a browser: a missing/revoked token raises
+Mid-conversation this NEVER opens a browser: a missing/revoked token raises
 with instructions instead, because a blocking consent flow in the middle of
-the voice loop would look like a hang. The one-time browser consent is run
-standalone:
+the voice loop would look like a hang. The blocking consent runs where a wait
+is expected: agent startup gates on it (voice_agent.ensure_gmail_auth — the
+agent refuses to start unauthorized), and it can also be run standalone:
 
     python -m lib.gmail_auth
 """
@@ -56,13 +57,21 @@ def _login():
         str(cfg.GMAIL_CLIENT_SECRET_PATH), SCOPES)
     # access_type="offline" earns the refresh token (silent renewal forever);
     # prompt="consent" forces re-consent so repeat logins still return one.
-    return flow.run_local_server(
-        port=8765,
-        access_type="offline",
-        prompt="consent",
-        authorization_prompt_message="Opening your browser to approve Gmail access...",
-        success_message="Done. You can close this tab and return to the terminal.",
-    )
+    try:
+        return flow.run_local_server(
+            port=8765,
+            access_type="offline",
+            prompt="consent",
+            timeout_seconds=cfg.GMAIL_CONSENT_TIMEOUT_S,
+            authorization_prompt_message="Opening your browser to approve Gmail access...",
+            success_message="Done. You can close this tab and return to the terminal.",
+        )
+    except AttributeError:
+        # A timed-out consent (tab ignored or closed) surfaces as an opaque
+        # AttributeError (last_request_uri is None) — name the real cause.
+        raise RuntimeError(
+            f"no browser response within {cfg.GMAIL_CONSENT_TIMEOUT_S}s — "
+            "Gmail access was not approved")
 
 
 def get_credentials(interactive=False):

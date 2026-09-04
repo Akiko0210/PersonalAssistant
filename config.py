@@ -90,6 +90,12 @@ DISCORD_TRADES_PATH = DISCORD_DIR / "trades.txt"
 # Google Cloud console (Auth Platform -> Clients -> Download JSON).
 GMAIL_CLIENT_SECRET_PATH = DATA_DIR / "gmail_client_secret.json"
 GMAIL_TOKEN_PATH = DATA_DIR / "gmail_token.json"
+# How long the browser consent flow waits before giving up. Startup gates on
+# this flow, so an ignored/closed consent tab must become a clean shutdown,
+# not an agent that hangs forever waiting on a redirect. Generous on purpose:
+# a first-time consent (account picking + the "unverified app" warning) blew
+# through a 180s window, leaving Google redirecting to a dead port.
+GMAIL_CONSENT_TIMEOUT_S = 600
 
 # --- Audio capture -----------------------------------------------------------
 SAMPLE_RATE = 16000           # Hz; webrtcvad supports 8/16/32/48 kHz

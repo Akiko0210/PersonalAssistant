@@ -3,6 +3,7 @@
 
 import base64
 import json
+import logging
 import unittest
 from unittest.mock import patch
 
@@ -79,6 +80,25 @@ class TestAuthDegradation(unittest.TestCase):
                                {"query": "x", "thread_id": "t",
                                 "to": "a@b.c", "subject": "s", "body": "b"})
                 self.assertIn("Gmail authorization failed", out, name)
+
+
+class TestStartupGate(unittest.TestCase):
+    """The agent refuses to start unauthorized: startup runs the interactive
+    auth (browser consent if needed) and exits when it fails."""
+
+    def test_startup_runs_interactive_auth_and_proceeds(self):
+        import voice_agent
+        with patch("lib.gmail_auth.get_credentials") as get_creds:
+            voice_agent.ensure_gmail_auth(logging.getLogger("test"))
+        get_creds.assert_called_once_with(interactive=True)
+
+    def test_startup_exits_when_auth_fails(self):
+        import voice_agent
+        with patch("lib.gmail_auth.get_credentials",
+                   side_effect=RuntimeError("no client secret")), \
+             self.assertRaises(SystemExit) as ctx:
+            voice_agent.ensure_gmail_auth(logging.getLogger("test"))
+        self.assertEqual(ctx.exception.code, 1)
 
 
 class TestSearchThreads(unittest.TestCase):

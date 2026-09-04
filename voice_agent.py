@@ -1127,6 +1127,25 @@ def miccheck(seconds=20):
         audio.stop()
 
 
+def ensure_gmail_auth(log):
+    """Gate startup on Gmail auth: reuse or refresh the saved token, else run
+    the one-time browser consent now — before the voice loop, where a blocking
+    flow can't be mistaken for a hang. No token, no agent: starting anyway
+    would just turn every Gmail tool call into a spoken error."""
+    if not cfg.GMAIL_TOKEN_PATH.exists():
+        log.info("No Gmail token — opening the browser consent flow")
+    try:
+        from lib.gmail_auth import get_credentials
+        get_credentials(interactive=True)
+    except ImportError:
+        log.error("Gmail needs the google-auth packages "
+                  "(pip install -r requirements.txt). Not starting.")
+        sys.exit(1)
+    except Exception as e:  # noqa: BLE001 - missing client secret, declined consent
+        log.error("Gmail authorization failed: %s Not starting.", e)
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Local voice notetaking agent")
     parser.add_argument("--selftest", action="store_true",
@@ -1179,6 +1198,7 @@ def main():
         elif args.resync:
             print(NoteStore().resync())
         else:
+            ensure_gmail_auth(log)
             Agent().run()
     finally:
         lock.release()
