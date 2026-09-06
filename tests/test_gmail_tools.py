@@ -4,6 +4,7 @@
 import base64
 import json
 import logging
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -104,7 +105,26 @@ class TestStartupAuth(unittest.TestCase):
              self.assertLogs(log, level="WARNING") as captured:
             ok = voice_agent.ensure_gmail_auth(log)  # no SystemExit
         self.assertFalse(ok)
-        self.assertIn("Starting without Gmail", captured.output[0])
+        self.assertIn("no client secret", captured.output[0])
+
+    def test_startup_stops_waiting_but_the_consent_stays_live(self):
+        # The failure that made startup look hung: a human reading a consent
+        # screen outlasts any sane wait. The agent must go on without Gmail
+        # and still let a late approval land.
+        import voice_agent
+        log = logging.getLogger("test")
+        approved = threading.Event()
+
+        def slow_consent(interactive=False):
+            approved.wait(10)  # stands in for the person at the browser
+
+        with patch.object(cfg, "GMAIL_AUTH_STARTUP_WAIT_S", 0.05), \
+             patch("lib.gmail_auth.get_credentials", side_effect=slow_consent), \
+             self.assertLogs(log, level="WARNING") as captured:
+            ok = voice_agent.ensure_gmail_auth(log)
+        self.assertFalse(ok)  # the agent starts anyway
+        self.assertIn("starting without it", captured.output[0])
+        approved.set()  # the consent thread was never cancelled, so it lands
 
     def test_tools_name_the_restart_route_when_unauthenticated(self):
         # The mid-conversation path never opens a browser: with no token the
