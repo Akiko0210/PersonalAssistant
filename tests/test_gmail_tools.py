@@ -132,6 +132,13 @@ class TestStartupAuth(unittest.TestCase):
         self.assertIn("restarting the app", out)
 
 
+class TestOAuthPort(unittest.TestCase):
+    def test_consent_listener_avoids_the_dashboard_port(self):
+        # Both were 8765. The dashboard binds it for the whole session, so a
+        # consent flow sharing it could never bind beside a running agent.
+        self.assertNotEqual(cfg.GMAIL_OAUTH_PORT, cfg.DASHBOARD_PORT)
+
+
 class TestSearchThreads(unittest.TestCase):
     def test_search_parses_thread_metadata_and_skips_failed_details(self):
         fake = FakeRequests({

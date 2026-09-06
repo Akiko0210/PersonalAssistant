@@ -67,7 +67,7 @@ def _login():
     # prompt="consent" forces re-consent so repeat logins still return one.
     try:
         return flow.run_local_server(
-            port=8765,
+            port=cfg.GMAIL_OAUTH_PORT,
             access_type="offline",
             prompt="consent",
             timeout_seconds=cfg.GMAIL_CONSENT_TIMEOUT_S,

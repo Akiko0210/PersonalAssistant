@@ -90,11 +90,18 @@ DISCORD_TRADES_PATH = DISCORD_DIR / "trades.txt"
 # Google Cloud console (Auth Platform -> Clients -> Download JSON).
 GMAIL_CLIENT_SECRET_PATH = DATA_DIR / "gmail_client_secret.json"
 GMAIL_TOKEN_PATH = DATA_DIR / "gmail_token.json"
+# The consent flow's loopback port. Deliberately NOT DASHBOARD_PORT: both
+# used to be 8765, so the OAuth listener and the dashboard fought over one
+# socket -- `python -m lib.gmail_auth` beside a running agent failed to bind,
+# and once auth moved to a background thread it raced the dashboard at every
+# tokenless start. Any port is fine to Google: this is a Desktop OAuth client,
+# and loopback redirects need no console registration (RFC 8252).
+GMAIL_OAUTH_PORT = 8766
 # How long the consent flow keeps its loopback listener open. Startup does not
 # wait on it at all, so it stays generous: a first-time consent (account
 # picking + the "unverified app" warning) blew through a 180s window, leaving
 # Google redirecting to a dead port. It only bounds how long an abandoned
-# consent holds port 8765.
+# consent holds that port.
 GMAIL_CONSENT_TIMEOUT_S = 600
 
 # --- Audio capture -----------------------------------------------------------
