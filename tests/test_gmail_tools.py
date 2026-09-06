@@ -5,8 +5,10 @@ import base64
 import json
 import logging
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+import config as cfg
 from brain import agents
 from tools import ToolContext, api_tools, dispatch
 from tools import gmail_tools
@@ -82,23 +84,36 @@ class TestAuthDegradation(unittest.TestCase):
                 self.assertIn("Gmail authorization failed", out, name)
 
 
-class TestStartupGate(unittest.TestCase):
-    """The agent refuses to start unauthorized: startup runs the interactive
-    auth (browser consent if needed) and exits when it fails."""
+class TestStartupAuth(unittest.TestCase):
+    """Startup runs the interactive auth (browser consent if needed) but a
+    failure only costs Gmail: the agent still starts, and the tools name the
+    restart-and-authenticate route until a token exists."""
 
     def test_startup_runs_interactive_auth_and_proceeds(self):
         import voice_agent
         with patch("lib.gmail_auth.get_credentials") as get_creds:
-            voice_agent.ensure_gmail_auth(logging.getLogger("test"))
+            ok = voice_agent.ensure_gmail_auth(logging.getLogger("test"))
+        self.assertTrue(ok)
         get_creds.assert_called_once_with(interactive=True)
 
-    def test_startup_exits_when_auth_fails(self):
+    def test_startup_continues_without_gmail_when_auth_fails(self):
         import voice_agent
+        log = logging.getLogger("test")
         with patch("lib.gmail_auth.get_credentials",
                    side_effect=RuntimeError("no client secret")), \
-             self.assertRaises(SystemExit) as ctx:
-            voice_agent.ensure_gmail_auth(logging.getLogger("test"))
-        self.assertEqual(ctx.exception.code, 1)
+             self.assertLogs(log, level="WARNING") as captured:
+            ok = voice_agent.ensure_gmail_auth(log)  # no SystemExit
+        self.assertFalse(ok)
+        self.assertIn("Starting without Gmail", captured.output[0])
+
+    def test_tools_name_the_restart_route_when_unauthenticated(self):
+        # The mid-conversation path never opens a browser: with no token the
+        # tool's spoken answer must send the user to restart the app.
+        from lib import gmail_auth
+        with patch.object(cfg, "GMAIL_TOKEN_PATH", Path("nonexistent-token.json")):
+            out = dispatch(ToolContext(), "search_email_threads", {"query": "x"})
+        self.assertIn(gmail_auth.NOT_AUTHENTICATED, out)
+        self.assertIn("restarting the app", out)
 
 
 class TestSearchThreads(unittest.TestCase):

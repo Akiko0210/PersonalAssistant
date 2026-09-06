@@ -370,12 +370,15 @@ send. Setup is one-time, per Google account:
 1. In the Google Cloud console (Google Auth Platform → Clients), create a
    Desktop OAuth client with the `gmail.readonly` and `gmail.compose` scopes,
    download its JSON, and save it as `data/gmail_client_secret.json`.
-2. Run the browser consent flow once: `python -m lib.gmail_auth`. It writes
-   `data/gmail_token.json`, which then refreshes itself silently forever
-   (and syncs to your other machines with the rest of `data/`).
+2. Start the agent: with no token it opens the browser consent flow before
+   the voice loop (or run it standalone: `python -m lib.gmail_auth`). It
+   writes `data/gmail_token.json`, which then refreshes itself silently
+   forever (and syncs to your other machines with the rest of `data/`).
 
-The agent itself never opens a browser — if the token is ever revoked, the
-tools answer with the command above instead of hanging the conversation.
+If you close the consent tab or the sign-in fails, the agent still starts —
+just without Gmail. The email tools then answer "Google account not
+authenticated, try restarting the app" instead of hanging the conversation;
+restart and approve when you're ready.
 
 ## Real trading by voice (tastytrade)
 

@@ -1128,22 +1128,26 @@ def miccheck(seconds=20):
 
 
 def ensure_gmail_auth(log):
-    """Gate startup on Gmail auth: reuse or refresh the saved token, else run
+    """Try Gmail auth at startup: reuse or refresh the saved token, else run
     the one-time browser consent now — before the voice loop, where a blocking
-    flow can't be mistaken for a hang. No token, no agent: starting anyway
-    would just turn every Gmail tool call into a spoken error."""
+    flow can't be mistaken for a hang. Failure is not fatal: the agent still
+    starts, and the Gmail tools answer with "not authenticated, restart the
+    app" (lib.gmail_auth's non-interactive path) until the user re-approves.
+    Returns True when Gmail is usable."""
     if not cfg.GMAIL_TOKEN_PATH.exists():
         log.info("No Gmail token — opening the browser consent flow")
     try:
         from lib.gmail_auth import get_credentials
         get_credentials(interactive=True)
+        return True
     except ImportError:
-        log.error("Gmail needs the google-auth packages "
-                  "(pip install -r requirements.txt). Not starting.")
-        sys.exit(1)
+        log.warning("Gmail unavailable: the google-auth packages are not "
+                    "installed (pip install -r requirements.txt). "
+                    "Starting without Gmail.")
     except Exception as e:  # noqa: BLE001 - missing client secret, declined consent
-        log.error("Gmail authorization failed: %s Not starting.", e)
-        sys.exit(1)
+        log.warning("Gmail authorization failed: %s Starting without Gmail — "
+                    "restart the app to try again.", e)
+    return False
 
 
 def main():

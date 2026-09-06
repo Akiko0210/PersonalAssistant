@@ -12,8 +12,9 @@ have the deps installed) — gmail_tools imports this lazily, per call.
 Mid-conversation this NEVER opens a browser: a missing/revoked token raises
 with instructions instead, because a blocking consent flow in the middle of
 the voice loop would look like a hang. The blocking consent runs where a wait
-is expected: agent startup gates on it (voice_agent.ensure_gmail_auth — the
-agent refuses to start unauthorized), and it can also be run standalone:
+is expected: agent startup tries it (voice_agent.ensure_gmail_auth — a failed
+or declined consent just leaves the Gmail tools answering "not
+authenticated, restart the app"), and it can also be run standalone:
 
     python -m lib.gmail_auth
 """
@@ -31,6 +32,12 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
 ]
+
+# What a Gmail tool says mid-conversation when there is no usable token. The
+# consent flow only runs at startup, so a restart IS the fix — name it, rather
+# than a command the tunnel-vision user would have to leave the app to type.
+NOT_AUTHENTICATED = ("Google account not authenticated — try restarting the "
+                     "app and authenticating again")
 
 
 def _save(creds):
@@ -99,14 +106,10 @@ def get_credentials(interactive=False):
             return creds
         except Exception:
             if not interactive:
-                raise RuntimeError(
-                    "the saved Gmail token could not be refreshed — run "
-                    "`python -m lib.gmail_auth` to re-authorize")
+                raise RuntimeError(NOT_AUTHENTICATED)
 
     if not interactive:
-        raise RuntimeError(
-            "no usable Gmail token — run `python -m lib.gmail_auth` once to "
-            "authorize")
+        raise RuntimeError(NOT_AUTHENTICATED)
     creds = _login()
     _save(creds)
     return creds
