@@ -328,8 +328,11 @@ class VoiceListTests(unittest.TestCase):
 
     def test_windows_without_winreg_answers_empty(self):
         # a missing winreg raises ModuleNotFoundError, which once escaped the
-        # old OSError-only catch and turned the dashboard route into a 500
-        with mock.patch.object(main.sys, "platform", "win32"):
+        # old OSError-only catch and turned the dashboard route into a 500.
+        # None in sys.modules makes the import fail on every OS -- on a real
+        # Windows box winreg imports fine and this would list actual voices.
+        with mock.patch.object(main.sys, "platform", "win32"), \
+                mock.patch.dict(sys.modules, {"winreg": None}):
             self.assertEqual(main.list_voices(), [])
 
 
