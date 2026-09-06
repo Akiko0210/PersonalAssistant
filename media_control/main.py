@@ -2,15 +2,17 @@
 
 Per-OS channel code lives beside this file — `windows.py` (SMTC session +
 silent keepalive), `macos.py` (event-tap key decoding/suppression),
-`linux.py` (status notes) — and this module wires whatever the running OS
-provides into the agent's callbacks:
+`linux.py` (MPRIS player on D-Bus) — and this module wires whatever the
+running OS provides into the agent's callbacks:
 
 - Every OS: a pynput keyboard hook for media-KEY presses (how wired headsets
   and USB dongles deliver clicks). On macOS it is the only channel, so it
   also carries firmware-decoded Next/Previous there.
-- Windows only: the SMTC session from `windows.py`, because Bluetooth-native
-  AVRCP presses never appear as key events. A press arriving on both channels
-  within MEDIA_CLICK_DEDUPE_S is counted once by the gesture decoder.
+- Windows: the SMTC session from `windows.py`; Linux: the MPRIS player from
+  `linux.py` — because Bluetooth-native AVRCP presses never appear as key
+  events on either (and under Wayland nothing does). A press arriving on
+  both channels within MEDIA_CLICK_DEDUPE_S is counted once by the gesture
+  decoder; the media session alone carries firmware-decoded Next/Previous.
 
 The agent talks to a single MediaButtons object: start()/stop() bracket the
 lifetime, duck() forwards the Yealink keepalive workaround (a no-op on any OS
@@ -31,7 +33,7 @@ class MediaButtons:
     def __init__(self, on_click, on_note, on_quit, speaking=lambda: False):
         """`on_click` takes each raw single press (feeds the gesture decoder);
         `on_note`/`on_quit` take firmware-decoded double/triple presses
-        (SMTC Next/Previous on Windows, media keys on macOS). `speaking` is
+        (SMTC/MPRIS Next/Previous, media keys on macOS). `speaking` is
         polled only for the diagnostic log line — it is the way to tell, from
         the log, whether a press landed mid-reply."""
         self._on_click = on_click
@@ -40,14 +42,25 @@ class MediaButtons:
         self._speaking = speaking
         self._listener = None
         self._smtc = None
+        self._mpris = None
 
     def start(self):
-        self._start_keyboard_hook()
         if sys.platform == "win32":
-            self._start_smtc()
+            self._start_keyboard_hook()
+            self._smtc = self._start_session(self._make_smtc, "SMTC")
+        elif sys.platform.startswith("linux"):
+            # The MPRIS player first: it is the channel that works everywhere
+            # (Wayland included), and the hook can't even be constructed
+            # without an X display — that must not take the buttons down.
+            self._mpris = self._start_session(self._make_mpris, "MPRIS")
+            try:
+                self._start_keyboard_hook()
+            except Exception as e:  # noqa: BLE001 - no X display (Wayland)
+                log.warning("keyboard hook unavailable (%s); MPRIS is the "
+                            "only button channel", e)
         else:
-            log.info("SMTC media session is Windows-only; "
-                     "using the keyboard hook")
+            log.info("no media session on this OS; using the keyboard hook")
+            self._start_keyboard_hook()
 
     def duck(self, seconds: float = 1.0):
         """Briefly pause the Windows keepalive so a state-tracking dongle sees
@@ -56,10 +69,9 @@ class MediaButtons:
             self._smtc.duck(seconds)
 
     def stop(self):
-        if self._smtc is not None:
-            self._smtc.stop()
-        if self._listener is not None:
-            self._listener.stop()
+        for channel in (self._smtc, self._mpris, self._listener):
+            if channel is not None:
+                channel.stop()
 
     # --- channels ------------------------------------------------------------
     def _start_keyboard_hook(self):
@@ -91,28 +103,43 @@ class MediaButtons:
                                            darwin_intercept=intercept)
         self._listener.start()
 
-    def _start_smtc(self):
+    def _start_session(self, make, label):
+        """The OS media session (SMTC / MPRIS) — the channel Bluetooth-native
+        headset presses arrive on. Fails soft: the keyboard hook stays."""
+        def on_play_pause():
+            log.info("media button (%s) received (speaking=%s)",
+                     label, self._speaking())
+            self._on_click()
+
         try:
-            from media_control.windows import MediaButtonListener
-
-            def on_play_pause():
-                log.info("media button (SMTC) received (speaking=%s)",
-                         self._speaking())
-                self._on_click()
-
-            self._smtc = MediaButtonListener(
-                on_play_pause=on_play_pause,
-                on_next=self._on_note,
-                on_previous=self._on_quit,
-                # Short debounce: real double-clicks arrive ~200 ms apart and
-                # must get through; cross-channel dedupe lives in the gesture
-                # decoder.
-                debounce_s=0.08,
-                keepalive=cfg.MEDIA_KEEPALIVE,
-            )
-            self._smtc.start()
-        except Exception as e:  # noqa: BLE001 - any winrt/SMTC failure
+            session = make(on_play_pause)
+            session.start()
+            return session
+        except Exception as e:  # noqa: BLE001 - winrt/dbus_fast missing, bus down
             log.warning(
-                "SMTC media session unavailable (%s); Bluetooth-native headset "
-                "buttons won't be received (keyboard hook still active)", e
+                "%s media session unavailable (%s); Bluetooth-native headset "
+                "buttons won't be received (keyboard hook still active)",
+                label, e
             )
+            return None
+
+    def _make_smtc(self, on_play_pause):
+        from media_control.windows import MediaButtonListener
+        return MediaButtonListener(
+            on_play_pause=on_play_pause,
+            on_next=self._on_note,
+            on_previous=self._on_quit,
+            # Short debounce: real double-clicks arrive ~200 ms apart and
+            # must get through; cross-channel dedupe lives in the gesture
+            # decoder.
+            debounce_s=0.08,
+            keepalive=cfg.MEDIA_KEEPALIVE,
+        )
+
+    def _make_mpris(self, on_play_pause):
+        from media_control.linux import MediaButtonListener
+        return MediaButtonListener(
+            on_play_pause=on_play_pause,
+            on_next=self._on_note,
+            on_previous=self._on_quit,
+        )

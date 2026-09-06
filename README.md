@@ -12,8 +12,8 @@ A local, voice-driven assistant with two modes:
   disk and reads the summary back to you.
 
 Everything runs locally except Claude (the brains + summaries): transcription
-(faster-whisper), speech (the OS's own TTS — SAPI on Windows,
-NSSpeechSynthesizer on macOS, speech-dispatcher on Linux), and semantic note
+(faster-whisper), speech (SAPI on Windows, NSSpeechSynthesizer on macOS,
+Piper on Linux), and semantic note
 search (Chroma + sentence-transformers) are all on-device. No UI — just your voice and hotkeys —
 but everything is logged to `logs/`.
 
@@ -25,7 +25,7 @@ just ask the agent: "tell me about this project.")
 
 Runs on Windows, macOS, and Linux. `requirements.txt` carries platform markers,
 so the same `pip install` works everywhere and only pulls what your OS needs
-(pywin32/winrt on Windows, pyobjc on macOS).
+(pywin32/winrt on Windows, pyobjc on macOS, piper-tts/dbus-fast on Linux).
 
 1. Install Python dependencies:
 
@@ -94,10 +94,32 @@ Per-environment notes:
   Speech uses NSSpeechSynthesizer, so barge-in and the mute gesture behave
   exactly as on Windows. The launch scripts prefer `.venv/bin/python` when it
   exists and fall back to `python3` otherwise.
-- **Linux** — install `speech-dispatcher python3-speechd` (system packages)
-  for interruptible speech; without them the agent still talks via `espeak-ng`
-  through pyttsx3, but a reply can then only be stopped, not paused. Headset
-  buttons need X11 — global key listening doesn't work under Wayland yet.
+- **Linux** — speech is [Piper](https://github.com/OHF-Voice/piper1-gpl)
+  (`piper-tts`, pulled in by `requirements.txt`), a local neural voice in
+  place of the OS's robotic `espeak-ng`. Its voice model (`PIPER_VOICE` in
+  `config.py`, ~60 MB) is downloaded once into `~/.cache/piper` the first
+  time the agent talks — expect a pause then. Want a different voice? Fetch it
+  and name it:
+
+  ```sh
+  .venv/bin/python -m piper.download_voices en_US-ryan-medium --data-dir ~/.cache/piper
+  ```
+
+  then set `TTS_VOICE = "ryan"` (or a persona's `tts_voice`) — voices match by
+  name substring, and the dashboard's voice dropdown lists the downloaded
+  ones. Without `piper-tts` the agent falls back to speech-dispatcher
+  (`speech-dispatcher python3-speechd` system packages), then to `espeak-ng`
+  through pyttsx3, where a reply can only be stopped, not paused. Headset
+  buttons arrive through an MPRIS media player the agent registers on D-Bus
+  (`dbus-fast`, also in `requirements.txt`), which is how Bluetooth headsets
+  reach any Linux app and the only route that works under Wayland; it needs a
+  desktop that forwards media keys to MPRIS players (GNOME and KDE do; on a
+  bare window manager run `playerctld`). Under X11 wired headsets are also
+  heard through the keyboard hook. If a Bluetooth headset's *microphone* is in
+  use, PipeWire/PulseAudio switches it to the low-bandwidth headset profile
+  (HFP), which makes everything it plays sound like a phone call — that is the
+  Bluetooth profile, not the voice; use another microphone or enable the
+  mSBC/LC3 codecs in your Bluetooth stack.
 
 Only one agent can run at a time: a second launch detects the first (via a lock
 on `data/agent.lock`) and exits immediately with a spoken notice, so two
@@ -134,13 +156,13 @@ aren't being listened to while it happens. Double-click (notetaking) and
 triple-click (quit) do end a reply immediately, and to cut one short without
 changing anything, just start talking (barge-in, below).
 
-On Windows, button presses are listened for on two channels at once (see
-`docs/MEDIA_CONTROL.md`): a keyboard hook (how wired headsets and USB wireless
-dongles deliver presses) and a Windows media session (SMTC — how
-Bluetooth-native headsets like AirPods deliver them; those never appear as key
-events). A press arriving on both channels is counted once. On macOS and Linux
-the keyboard hook is the only channel (on macOS it also swallows the keys so a
-press doesn't launch Music.app). Multi-click
+On Windows and Linux, button presses are listened for on two channels at once
+(see `docs/MEDIA_CONTROL.md`): a keyboard hook (how wired headsets and USB
+wireless dongles deliver presses) and an OS media session (Windows SMTC, or an
+MPRIS player on Linux — how Bluetooth-native headsets like AirPods deliver
+them; those never appear as key events). A press arriving on both channels is
+counted once. On macOS the keyboard hook is the only channel (it also swallows
+the keys so a press doesn't launch Music.app). Multi-click
 detection uses a 450 ms window — clicks within that window count together.
 Headsets that decode multi-press in firmware (e.g. AirPods) send Next/Previous
 instead; those map to the same double/triple actions. A silent keepalive
