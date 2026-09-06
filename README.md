@@ -379,8 +379,8 @@ The agent never waits for this. It starts straight away and does the sign-in
 in the background, so a missing or expired token costs nothing at startup.
 Approve the page whenever you like and Gmail connects itself to the running
 agent, mid-conversation, with no restart. Until it does, the email tools
-answer "Google account not authenticated, try restarting the app" rather than
-hanging the conversation.
+answer "Google account not authenticated, finish the authentication process,
+or restart the app and log in" rather than hanging the conversation.
 
 ## Real trading by voice (tastytrade)
 

@@ -122,14 +122,16 @@ class TestStartupAuth(unittest.TestCase):
             voice_agent.start_gmail_auth(log).join(5)  # no SystemExit
         self.assertIn("no client secret", captured.output[0])
 
-    def test_tools_name_the_restart_route_when_unauthenticated(self):
-        # The mid-conversation path never opens a browser: with no token the
-        # tool's spoken answer must send the user to restart the app.
+    def test_tools_name_both_recovery_routes_when_unauthenticated(self):
+        # The mid-conversation path never opens a browser, so the spoken answer
+        # carries the only two ways out: finish the consent already waiting in
+        # the browser, or restart and log in.
         from lib import gmail_auth
         with patch.object(cfg, "GMAIL_TOKEN_PATH", Path("nonexistent-token.json")):
             out = dispatch(ToolContext(), "search_email_threads", {"query": "x"})
         self.assertIn(gmail_auth.NOT_AUTHENTICATED, out)
-        self.assertIn("restarting the app", out)
+        self.assertIn("finish the authentication", out)
+        self.assertIn("restart the app", out)
 
 
 class TestOAuthPort(unittest.TestCase):

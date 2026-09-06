@@ -13,9 +13,9 @@ Mid-conversation this NEVER opens a browser: a missing/revoked token raises
 with instructions instead, because a blocking consent flow in the middle of
 the voice loop would look like a hang. The blocking consent runs where a wait
 is expected: agent startup fires it off on a worker thread
-(voice_agent.start_gmail_auth — nothing waits on it, and a failed or declined
-consent just leaves the Gmail tools answering "not authenticated, restart the
-app"), and it can also be run standalone:
+(voice_agent.start_gmail_auth — nothing waits on it, and an unfinished consent
+just leaves the Gmail tools telling the user to finish it or restart), and it
+can also be run standalone:
 
     python -m lib.gmail_auth
 """
@@ -34,11 +34,13 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.compose",
 ]
 
-# What a Gmail tool says mid-conversation when there is no usable token. The
-# consent flow only runs at startup, so a restart IS the fix — name it, rather
-# than a command the tunnel-vision user would have to leave the app to type.
-NOT_AUTHENTICATED = ("Google account not authenticated — try restarting the "
-                     "app and authenticating again")
+# What a Gmail tool says mid-conversation when there is no usable token. Two
+# routes, cheapest first: the consent the agent opened at startup may still be
+# sitting in the browser, and finishing it connects Gmail to this running
+# agent. Only when that tab is gone does a restart help. Neither route asks
+# the tunnel-vision user to leave the app and type a command.
+NOT_AUTHENTICATED = ("Google account not authenticated — finish the "
+                     "authentication process, or restart the app and log in")
 
 
 def _save(creds):
