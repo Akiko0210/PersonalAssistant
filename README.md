@@ -375,11 +375,11 @@ send. Setup is one-time, per Google account:
    writes `data/gmail_token.json`, which then refreshes itself silently
    forever (and syncs to your other machines with the rest of `data/`).
 
-The agent never waits long for this. If you haven't approved within 30
-seconds it starts without Gmail rather than sitting there, but the consent
-page stays live: approve it whenever and Gmail connects itself to the running
-agent, no restart. If you close the tab or the sign-in fails, the email tools
-answer "Google account not authenticated, try restarting the app" instead of
+The agent never waits for this. It starts straight away and does the sign-in
+in the background, so a missing or expired token costs nothing at startup.
+Approve the page whenever you like and Gmail connects itself to the running
+agent, mid-conversation, with no restart. Until it does, the email tools
+answer "Google account not authenticated, try restarting the app" rather than
 hanging the conversation.
 
 ## Real trading by voice (tastytrade)

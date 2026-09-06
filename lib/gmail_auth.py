@@ -12,9 +12,10 @@ have the deps installed) — gmail_tools imports this lazily, per call.
 Mid-conversation this NEVER opens a browser: a missing/revoked token raises
 with instructions instead, because a blocking consent flow in the middle of
 the voice loop would look like a hang. The blocking consent runs where a wait
-is expected: agent startup tries it (voice_agent.ensure_gmail_auth — a failed
-or declined consent just leaves the Gmail tools answering "not
-authenticated, restart the app"), and it can also be run standalone:
+is expected: agent startup fires it off on a worker thread
+(voice_agent.start_gmail_auth — nothing waits on it, and a failed or declined
+consent just leaves the Gmail tools answering "not authenticated, restart the
+app"), and it can also be run standalone:
 
     python -m lib.gmail_auth
 """

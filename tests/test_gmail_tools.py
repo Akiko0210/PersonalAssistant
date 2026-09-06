@@ -86,45 +86,41 @@ class TestAuthDegradation(unittest.TestCase):
 
 
 class TestStartupAuth(unittest.TestCase):
-    """Startup runs the interactive auth (browser consent if needed) but a
-    failure only costs Gmail: the agent still starts, and the tools name the
-    restart-and-authenticate route until a token exists."""
+    """Gmail auth runs off the critical path: startup fires it and moves on,
+    a failure costs only Gmail, and the tools name the restart-and-
+    authenticate route until a token exists."""
 
-    def test_startup_runs_interactive_auth_and_proceeds(self):
+    def test_startup_runs_interactive_auth(self):
         import voice_agent
         with patch("lib.gmail_auth.get_credentials") as get_creds:
-            ok = voice_agent.ensure_gmail_auth(logging.getLogger("test"))
-        self.assertTrue(ok)
+            voice_agent.start_gmail_auth(logging.getLogger("test")).join(5)
         get_creds.assert_called_once_with(interactive=True)
 
-    def test_startup_continues_without_gmail_when_auth_fails(self):
+    def test_startup_does_not_wait_for_the_consent(self):
+        # The failure that made startup look hung: a person reading a consent
+        # screen outlasts any wait worth having. Startup must return with the
+        # consent still pending, and must not cancel it.
         import voice_agent
-        log = logging.getLogger("test")
-        with patch("lib.gmail_auth.get_credentials",
-                   side_effect=RuntimeError("no client secret")), \
-             self.assertLogs(log, level="WARNING") as captured:
-            ok = voice_agent.ensure_gmail_auth(log)  # no SystemExit
-        self.assertFalse(ok)
-        self.assertIn("no client secret", captured.output[0])
-
-    def test_startup_stops_waiting_but_the_consent_stays_live(self):
-        # The failure that made startup look hung: a human reading a consent
-        # screen outlasts any sane wait. The agent must go on without Gmail
-        # and still let a late approval land.
-        import voice_agent
-        log = logging.getLogger("test")
         approved = threading.Event()
 
         def slow_consent(interactive=False):
             approved.wait(10)  # stands in for the person at the browser
 
-        with patch.object(cfg, "GMAIL_AUTH_STARTUP_WAIT_S", 0.05), \
-             patch("lib.gmail_auth.get_credentials", side_effect=slow_consent), \
+        with patch("lib.gmail_auth.get_credentials", side_effect=slow_consent):
+            t = voice_agent.start_gmail_auth(logging.getLogger("test"))
+            self.assertTrue(t.is_alive())  # returned mid-consent, not after
+            approved.set()                 # a late approval still lands
+            t.join(5)
+        self.assertFalse(t.is_alive())
+
+    def test_failed_auth_only_warns(self):
+        import voice_agent
+        log = logging.getLogger("test")
+        with patch("lib.gmail_auth.get_credentials",
+                   side_effect=RuntimeError("no client secret")), \
              self.assertLogs(log, level="WARNING") as captured:
-            ok = voice_agent.ensure_gmail_auth(log)
-        self.assertFalse(ok)  # the agent starts anyway
-        self.assertIn("starting without it", captured.output[0])
-        approved.set()  # the consent thread was never cancelled, so it lands
+            voice_agent.start_gmail_auth(log).join(5)  # no SystemExit
+        self.assertIn("no client secret", captured.output[0])
 
     def test_tools_name_the_restart_route_when_unauthenticated(self):
         # The mid-conversation path never opens a browser: with no token the

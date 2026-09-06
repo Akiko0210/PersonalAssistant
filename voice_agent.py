@@ -1127,25 +1127,24 @@ def miccheck(seconds=20):
         audio.stop()
 
 
-def ensure_gmail_auth(log):
-    """Try Gmail auth at startup without letting it hold up the agent. The
-    usual path is instant — a saved token refreshes silently, no browser — so
-    the wait below normally costs nothing. A missing token opens the browser
-    consent, which nobody completes in seconds, so the wait is capped: past it
-    the agent starts and the consent keeps listening on its worker thread.
-    Approving late still works, because get_credentials re-reads the token
-    file on every tool call — Gmail joins a conversation already in progress,
-    no restart. Until it does, the tools say it isn't authenticated.
-    Returns True only when Gmail is confirmed usable before the agent starts."""
+def start_gmail_auth(log):
+    """Start Gmail auth on a worker thread and return immediately, so the
+    agent boots at the same speed with or without a token — nothing about
+    Google is on the critical path. A saved token refreshes in milliseconds; a
+    first-time browser consent takes as long as the person does, and neither
+    is waited on. Whenever it lands, the next Gmail tool call picks it up,
+    because get_credentials re-reads the token file per call — so Gmail joins
+    a conversation already in progress, with no restart. Until then the tools
+    answer that the account isn't authenticated.
+
+    Returns the worker so tests can join it; startup drops it on the floor."""
     if not cfg.GMAIL_TOKEN_PATH.exists():
         log.info("No Gmail token — opening the browser consent flow")
-    authorized = threading.Event()
 
     def work():
         try:
             from lib.gmail_auth import get_credentials
             get_credentials(interactive=True)
-            authorized.set()
             log.info("Gmail authorized")
         except ImportError:
             log.warning("Gmail unavailable: the google-auth packages are not "
@@ -1155,12 +1154,7 @@ def ensure_gmail_auth(log):
 
     t = threading.Thread(target=work, daemon=True, name="gmail-auth")
     t.start()
-    t.join(cfg.GMAIL_AUTH_STARTUP_WAIT_S)
-    if t.is_alive():
-        log.warning("Gmail consent unanswered after %ss — starting without it. "
-                    "Approve in the browser and it connects itself.",
-                    cfg.GMAIL_AUTH_STARTUP_WAIT_S)
-    return authorized.is_set()
+    return t
 
 
 def main():
@@ -1215,7 +1209,7 @@ def main():
         elif args.resync:
             print(NoteStore().resync())
         else:
-            ensure_gmail_auth(log)
+            start_gmail_auth(log)  # never joined: Gmail must not gate the agent
             Agent().run()
     finally:
         lock.release()

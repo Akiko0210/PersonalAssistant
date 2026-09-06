@@ -90,18 +90,11 @@ DISCORD_TRADES_PATH = DISCORD_DIR / "trades.txt"
 # Google Cloud console (Auth Platform -> Clients -> Download JSON).
 GMAIL_CLIENT_SECRET_PATH = DATA_DIR / "gmail_client_secret.json"
 GMAIL_TOKEN_PATH = DATA_DIR / "gmail_token.json"
-# How long startup waits for Gmail auth before going on without it. A saved
-# token refreshes well inside this; a first-time browser consent never does,
-# and blocking the voice loop on a human reading a consent screen is exactly
-# what made startup look hung. Past this the consent keeps running on its own
-# thread, so approving late still connects Gmail to the already-running agent.
-GMAIL_AUTH_STARTUP_WAIT_S = 30
-# How long the consent flow keeps its loopback listener open. Nothing blocks
-# on this any more, so it stays generous: a first-time consent (account
+# How long the consent flow keeps its loopback listener open. Startup does not
+# wait on it at all, so it stays generous: a first-time consent (account
 # picking + the "unverified app" warning) blew through a 180s window, leaving
-# Google redirecting to a dead port. It now only bounds how long an abandoned
-# consent sits on port 8765 -- shortening it to the startup wait would make a
-# real first-time login impossible to finish.
+# Google redirecting to a dead port. It only bounds how long an abandoned
+# consent holds port 8765.
 GMAIL_CONSENT_TIMEOUT_S = 600
 
 # --- Audio capture -----------------------------------------------------------
