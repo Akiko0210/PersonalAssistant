@@ -50,9 +50,19 @@ Elsewhere:
   actually surface presses on this channel is untested; if they don't, the
   fallback plan is an MPRemoteCommandCenter listener behind the same
   `MediaButtonListener` interface.
-- **Linux**: keyboard hook only, X11 only (pynput cannot listen globally under
-  Wayland). An MPRIS D-Bus service is the eventual answer for BT-native
-  headsets there; not built yet.
+- **Linux**: the same two-channel shape as Windows, with an **MPRIS player**
+  (`media_control/linux.py`) in the SMTC session's place. A Bluetooth
+  headset's AVRCP press becomes a media-key event in BlueZ, the desktop's
+  media-key daemon (gnome-settings-daemon, KDE, playerctld) grabs it, and
+  forwards it over D-Bus to an MPRIS player — so the agent registers
+  `org.mpris.MediaPlayer2.voice_agent`, claims `PlaybackStatus = Playing`
+  (the daemons route to the player that most recently said so: the
+  keepalive's job, minus the audio), and receives `Play`/`Pause`/`PlayPause`
+  as a click and `Next`/`Previous` as the firmware-decoded double/triple. The
+  pynput hook still runs under X11 for wired headsets (a press heard on both
+  channels is deduped like on Windows); under Wayland it can't listen
+  globally, so MPRIS is the only channel — and the hook failing to start is
+  logged, not fatal. No `duck()`: no keepalive to pause.
 
 The `duck()`/keepalive machinery is a Yealink-dongle workaround and does not
 run off-Windows (`_media` simply doesn't exist there). If the same dongle is

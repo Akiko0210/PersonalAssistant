@@ -1132,6 +1132,36 @@ def miccheck(seconds=20):
         audio.stop()
 
 
+def start_gmail_auth(log):
+    """Start Gmail auth on a worker thread and return immediately, so the
+    agent boots at the same speed with or without a token — nothing about
+    Google is on the critical path. A saved token refreshes in milliseconds; a
+    first-time browser consent takes as long as the person does, and neither
+    is waited on. Whenever it lands, the next Gmail tool call picks it up,
+    because get_credentials re-reads the token file per call — so Gmail joins
+    a conversation already in progress, with no restart. Until then the tools
+    answer that the account isn't authenticated.
+
+    Returns the worker so tests can join it; startup drops it on the floor."""
+    if not cfg.GMAIL_TOKEN_PATH.exists():
+        log.info("No Gmail token — opening the browser consent flow")
+
+    def work():
+        try:
+            from lib.gmail_auth import get_credentials
+            get_credentials(interactive=True)
+            log.info("Gmail authorized")
+        except ImportError:
+            log.warning("Gmail unavailable: the google-auth packages are not "
+                        "installed (pip install -r requirements.txt).")
+        except Exception as e:  # noqa: BLE001 - missing secret, declined/abandoned consent
+            log.warning("Gmail authorization failed: %s", e)
+
+    t = threading.Thread(target=work, daemon=True, name="gmail-auth")
+    t.start()
+    return t
+
+
 def main():
     parser = argparse.ArgumentParser(description="Local voice notetaking agent")
     parser.add_argument("--selftest", action="store_true",
@@ -1184,6 +1214,7 @@ def main():
         elif args.resync:
             print(NoteStore().resync())
         else:
+            start_gmail_auth(log)  # never joined: Gmail must not gate the agent
             Agent().run()
     finally:
         lock.release()

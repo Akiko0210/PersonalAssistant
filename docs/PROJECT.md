@@ -26,7 +26,7 @@ Two modes, switched by a headset button:
 
 Local components: microphone capture + voice-activity detection (webrtcvad),
 speech-to-text (faster-whisper), text-to-speech (the OS's own engine — SAPI on
-Windows, NSSpeechSynthesizer on macOS, speech-dispatcher on Linux), and semantic
+Windows, NSSpeechSynthesizer on macOS, Piper on Linux), and semantic
 search (Chroma + sentence-transformers embeddings). Only the language model is
 remote.
 
@@ -79,10 +79,13 @@ unit-tested without a microphone, speakers, or an API key.
   `vad_filter=True` to reject hallucinated text from silence).
 - **`speech/tts/`** — `Speaker` (in `main.py`): one native backend per OS, each
   in its own variant file — `windows.py` (SAPI), `macos.py`
-  (NSSpeechSynthesizer), `linux.py` (speech-dispatcher) — each with async
-  speak + purge (which is what enables barge-in) and pause/resume (which is
-  what lets a mute click leave a reply intact), with a synchronous pyttsx3
-  fallback (`fallback.py`). The variant files also carry the second-voice
+  (NSSpeechSynthesizer), `linux.py` (Piper, a local neural voice played
+  through sounddevice on a callback stream, then speech-dispatcher if piper
+  isn't installed) — each with async speak + purge (which is what enables
+  barge-in) and pause/resume (which is what lets a mute click leave a reply
+  intact), with a synchronous pyttsx3 fallback (`fallback.py`). Piper's
+  voices are files: the configured default is fetched once on first use, the
+  way faster-whisper fetches its model. The variant files also carry the second-voice
   announce and the dashboard's voice enumeration for their OS. `Announcer` is a
   deliberately separate second voice — one SpVoice serialises its utterances,
   so a notice that must be heard *over* a playing reply ("Muted.") needs its
@@ -104,8 +107,11 @@ unit-tested without a microphone, speakers, or an API key.
   Thread-safe.
 - **`media_control/windows.py`** — `MediaButtonListener`: a Windows System Media Transport
   Controls (SMTC) session so Bluetooth-native headset buttons (AVRCP, which never
-  appear as key events) are received, plus the silent keepalive stream. Windows
-  only; on macOS/Linux the keyboard hook is the sole channel, with
+  appear as key events) are received, plus the silent keepalive stream.
+  **`media_control/linux.py`** is its Linux twin: an MPRIS player on the
+  session D-Bus (`dbus-fast`, served from its own thread), which is where the
+  desktop's media-key daemon forwards headset presses — and the only channel
+  that works under Wayland. On macOS the keyboard hook is the sole channel, with
   `media_control/macos.py` swallowing the macOS media keys so a press doesn't
   also launch Music.app. `media_control/main.py` wires whichever channels the
   running OS provides into the agent's callbacks. See

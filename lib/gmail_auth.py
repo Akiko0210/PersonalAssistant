@@ -9,10 +9,13 @@ Split from tools/gmail_tools.py so the google-auth imports stay out of the
 tool module (which the registry imports at startup on machines that may not
 have the deps installed) — gmail_tools imports this lazily, per call.
 
-Inside the agent this NEVER opens a browser: a missing/revoked token raises
+Mid-conversation this NEVER opens a browser: a missing/revoked token raises
 with instructions instead, because a blocking consent flow in the middle of
-the voice loop would look like a hang. The one-time browser consent is run
-standalone:
+the voice loop would look like a hang. The blocking consent runs where a wait
+is expected: agent startup fires it off on a worker thread
+(voice_agent.start_gmail_auth — nothing waits on it, and an unfinished consent
+just leaves the Gmail tools telling the user to finish it or restart), and it
+can also be run standalone:
 
     python -m lib.gmail_auth
 """
@@ -30,6 +33,14 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.compose",
 ]
+
+# What a Gmail tool says mid-conversation when there is no usable token. Two
+# routes, cheapest first: the consent the agent opened at startup may still be
+# sitting in the browser, and finishing it connects Gmail to this running
+# agent. Only when that tab is gone does a restart help. Neither route asks
+# the tunnel-vision user to leave the app and type a command.
+NOT_AUTHENTICATED = ("Google account not authenticated — finish the "
+                     "authentication process, or restart the app and log in")
 
 
 def _save(creds):
@@ -56,13 +67,21 @@ def _login():
         str(cfg.GMAIL_CLIENT_SECRET_PATH), SCOPES)
     # access_type="offline" earns the refresh token (silent renewal forever);
     # prompt="consent" forces re-consent so repeat logins still return one.
-    return flow.run_local_server(
-        port=8765,
-        access_type="offline",
-        prompt="consent",
-        authorization_prompt_message="Opening your browser to approve Gmail access...",
-        success_message="Done. You can close this tab and return to the terminal.",
-    )
+    try:
+        return flow.run_local_server(
+            port=cfg.GMAIL_OAUTH_PORT,
+            access_type="offline",
+            prompt="consent",
+            timeout_seconds=cfg.GMAIL_CONSENT_TIMEOUT_S,
+            authorization_prompt_message="Opening your browser to approve Gmail access...",
+            success_message="Done. You can close this tab and return to the terminal.",
+        )
+    except AttributeError:
+        # A timed-out consent (tab ignored or closed) surfaces as an opaque
+        # AttributeError (last_request_uri is None) — name the real cause.
+        raise RuntimeError(
+            f"no browser response within {cfg.GMAIL_CONSENT_TIMEOUT_S}s — "
+            "Gmail access was not approved")
 
 
 def get_credentials(interactive=False):
@@ -90,14 +109,10 @@ def get_credentials(interactive=False):
             return creds
         except Exception:
             if not interactive:
-                raise RuntimeError(
-                    "the saved Gmail token could not be refreshed — run "
-                    "`python -m lib.gmail_auth` to re-authorize")
+                raise RuntimeError(NOT_AUTHENTICATED)
 
     if not interactive:
-        raise RuntimeError(
-            "no usable Gmail token — run `python -m lib.gmail_auth` once to "
-            "authorize")
+        raise RuntimeError(NOT_AUTHENTICATED)
     creds = _login()
     _save(creds)
     return creds

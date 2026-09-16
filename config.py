@@ -93,6 +93,19 @@ DISCORD_TRADES_PATH = DISCORD_DIR / "trades.txt"
 # Google Cloud console (Auth Platform -> Clients -> Download JSON).
 GMAIL_CLIENT_SECRET_PATH = DATA_DIR / "gmail_client_secret.json"
 GMAIL_TOKEN_PATH = DATA_DIR / "gmail_token.json"
+# The consent flow's loopback port. Deliberately NOT DASHBOARD_PORT: both
+# used to be 8765, so the OAuth listener and the dashboard fought over one
+# socket -- `python -m lib.gmail_auth` beside a running agent failed to bind,
+# and once auth moved to a background thread it raced the dashboard at every
+# tokenless start. Any port is fine to Google: this is a Desktop OAuth client,
+# and loopback redirects need no console registration (RFC 8252).
+GMAIL_OAUTH_PORT = 8766
+# How long the consent flow keeps its loopback listener open. Startup does not
+# wait on it at all, so it stays generous: a first-time consent (account
+# picking + the "unverified app" warning) blew through a 180s window, leaving
+# Google redirecting to a dead port. It only bounds how long an abandoned
+# consent holds that port.
+GMAIL_CONSENT_TIMEOUT_S = 600
 
 # --- Audio capture -----------------------------------------------------------
 SAMPLE_RATE = 16000           # Hz; webrtcvad supports 8/16/32/48 kHz
@@ -171,9 +184,17 @@ CONTEXT_RECENCY_WEIGHT = 0.3      # Park-style additive recency term: reorders r
 CONTEXT_RECENCY_HALF_LIFE_H = 168 # a week-old exchange keeps half its recency credit (Park et al. use ~5.8 days)
 CONTEXT_DEBUG_LOG = True          # candidate table + full block at DEBUG on the "context" logger; turn off once tuned
 
-# --- Text-to-speech (local, Windows SAPI via pyttsx3) ------------------------
+# --- Text-to-speech (local: SAPI / NSSpeechSynthesizer / Piper) ---------------
 TTS_RATE = 175                # words per minute
-TTS_VOICE = None              # None = system default; or a SAPI voice id substring
+TTS_VOICE = None              # None = system default; or a voice-name substring
+# Linux speaks through Piper (local neural TTS; the OS's own espeak-ng is the
+# robotic voice it replaces). Voices are files: this one is fetched once from
+# Hugging Face the first time the agent talks (~60 MB), the way faster-whisper
+# fetches its model. Others: `python -m piper.download_voices en_US-ryan-medium
+# --data-dir <PIPER_VOICE_DIR>`; TTS_VOICE / a persona's tts_voice then pick one
+# by substring ("ryan"). Kept out of data/: models are not for Dropbox.
+PIPER_VOICE = "en_US-lessac-medium"
+PIPER_VOICE_DIR = Path.home() / ".cache" / "piper"
 
 # Spoken notices ("Muted.", "Listening.") are said on a SECOND voice so they can
 # be heard *over* a reply that is still playing — one SAPI voice queues its
@@ -496,6 +517,7 @@ OVERRIDABLE = {
     "SUMMARY_MAX_TOKENS": int, "CONVO_MAX_TOOL_ROUNDS": int,
     # speech engines
     "WHISPER_MODEL": str, "TTS_RATE": int, "TTS_VOICE": _cast_optional_str,
+    "PIPER_VOICE": str,
     "KB_MEDIA_MODEL": str,
     # memory / search
     "HISTORY_MAX_MESSAGES": int, "SEARCH_RESULTS": int, "KB_SEARCH_RESULTS": int,
