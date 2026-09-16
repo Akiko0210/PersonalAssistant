@@ -16,7 +16,7 @@ agent's dashboard"). Code lives in topic packages: `speech/` (mic, STT, TTS,
 barge-in), `media_control/` (headset buttons: portable gesture decoding in
 `gestures.py`, per-OS channels in `windows.py`/`macos.py`/`linux.py`, wired
 by `main.py`), `brain/` (llm/ — the engine in `main.py`, providers in
-`anthropic.py`/`deepseek.py` — plus agents, history, memory), `stores/`
+`anthropic.py`/`deepseek.py` — plus agents, history, memory, context), `stores/`
 (notes, knowledge, categories), `lib/` (leaf utilities), `web/` (server +
 static), `tools/` (the tool registry), and `trading/`. Entry points and
 `config.py` stay at root.

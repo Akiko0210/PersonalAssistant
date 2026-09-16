@@ -2,7 +2,7 @@
 
 A visual companion to the running (or resting) agent: browse notes and
 folders, read transcripts, inspect the live conversation history, long-term
-memory staging, the knowledge base, Discord captures, and session logs — and
+the knowledge base, Discord captures, and session logs — and
 adjust the tunable config values (endpointing, settle window, barge-in,
 models, ...) from a form instead of editing config.py.
 
@@ -179,9 +179,21 @@ TUNABLES = [
          type="text", nullable=True,
          help="SAPI voice id substring; leave empty for the system default."),
     # -- Memory & search ------------------------------------------------------
-    dict(key="HISTORY_MAX_MESSAGES", group="Memory & search", label="History window",
+    dict(key="HISTORY_MAX_MESSAGES", group="Memory & search", label="Transcript kept",
          type="int", min=4, max=200, step=2, unit="msgs",
-         help="Messages kept when persisting/restoring conversation history."),
+         help="Messages kept on disk per persona (what this dashboard shows). The model sees the recent exchanges below plus retrieved Background, not this window."),
+    dict(key="CONTEXT_RECENT_EXCHANGES", group="Memory & search", label="Recent exchanges verbatim",
+         type="int", min=0, max=10, step=1, unit="",
+         help="Previous user/assistant exchanges sent to the model word for word each turn. Everything older reaches it by retrieval."),
+    dict(key="CONTEXT_CONVO_CHARS", group="Memory & search", label="Past-conversation budget",
+         type="int", min=0, max=12000, step=500, unit="chars",
+         help="Characters of retrieved past exchanges per turn (~4 chars per token)."),
+    dict(key="CONTEXT_KB_CHARS", group="Memory & search", label="Knowledge budget",
+         type="int", min=0, max=12000, step=500, unit="chars",
+         help="Characters of retrieved reference chunks per turn; also takes what the conversation budget leaves unused."),
+    dict(key="CONTEXT_MIN_SIMILARITY", group="Memory & search", label="Relevance floor",
+         type="float", min=0.0, max=0.9, step=0.05, unit="",
+         help="Cosine similarity a retrieved item needs to enter the Background. Lower pulls more, riskier context; check the context log lines."),
     dict(key="SEARCH_RESULTS", group="Memory & search", label="Note search results",
          type="int", min=1, max=20, step=1, unit="",
          help="Results per search_notes call."),
@@ -328,7 +340,6 @@ def api_overview():
     # live windows.
     n_history = sum(len(read_json(cfg.history_path(k), []))
                     for k in agents_registry.AGENTS)
-    pending = read_json(cfg.MEMORY_PENDING_PATH, [])
     manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     logs = sorted(cfg.LOG_DIR.glob("session_*.log")) if cfg.LOG_DIR.exists() else []
 
@@ -353,7 +364,6 @@ def api_overview():
             if slug not in folders
         ],
         "history_messages": n_history,
-        "memory_pending": len(pending),
         "knowledge_docs": len(manifest),
         "log_files": len(logs),
         "convo_model": cfg.convo_model_label(cfg.CONVO_MODEL),
@@ -710,11 +720,6 @@ def api_history(limit=200, agent=None):
                        for k, a in agents_registry.AGENTS.items()]}
 
 
-def api_memory():
-    return {"pending": read_json(cfg.MEMORY_PENDING_PATH, []),
-            "min_messages": cfg.MEMORY_MIN_MESSAGES}
-
-
 def api_knowledge():
     manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     docs = [{"hash": h[:12], **info} for h, info in manifest.items()]
@@ -992,8 +997,6 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/history":
                 return self._send(200, api_history(int(arg("limit", "200")),
                                                    arg("agent", None)))
-            if route == "/api/memory":
-                return self._send(200, api_memory())
             if route == "/api/knowledge":
                 return self._send(200, api_knowledge())
             if route == "/api/knowledge/job":

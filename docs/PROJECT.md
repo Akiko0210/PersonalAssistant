@@ -114,8 +114,8 @@ unit-tested without a microphone, speakers, or an API key.
 ### Language model
 - **`brain/llm/`** — `Claude` (in `main.py`): the conversation loop (`converse`,
   with the tool-call loop), the folder-choice dialogue
-  (`choose_folder_via_dialogue`), note summarisation (`summarize`), and memory
-  consolidation. Holds a `ToolContext` and reads the active conversation model
+  (`choose_folder_via_dialogue`), note summarisation (`summarize`), and the
+  boot-time exchange-index backfill (`index_saved_threads`). Holds a `ToolContext` and reads the active conversation model
   from it each call. Provider machinery is isolated in the variant files:
   `anthropic.py` and `deepseek.py` own their client construction, endpoint,
   and quirks — the engine itself never knows more than one provider exists.
@@ -125,10 +125,15 @@ unit-tested without a microphone, speakers, or an API key.
   (which also stamp each message with the local `ts` the dashboard dates the
   transcript by). This is what makes a conversation persisted mid-tool-loop safe
   to reload — see §6.
-- **`brain/memory.py`** — `ConversationMemory`: long-term memory. Stages messages that
-  fall off the live window, then at boot consolidates the staged text into one
-  dense record embedded in a Chroma `conversations` collection; `search` backs
-  the `search_past_conversations` tool.
+- **`brain/memory.py`** — `ConversationMemory`: the exchange index. One record
+  per user↔assistant exchange, embedded into the persona's `conversations_<key>`
+  collection the moment its turn ends (`index_exchanges`, the single write
+  path), read back dense + BM25 (`query_rows`); `search` backs the
+  `search_past_conversations` tool with the same ranking the Background uses.
+- **`brain/context.py`** — the per-turn Background: fuses the exchange index's
+  dense and lexical hits (relative-score fusion plus a recency term), gates on
+  relevance, fills a character budget conversation-first then knowledge, and
+  renders the block that goes after the frozen system prompt. Logs every pull.
 
 ### Stores
 - **`stores/notes.py`** — `NoteStore`: note storage, retrieval, semantic search, folder
@@ -163,8 +168,8 @@ unit-tested without a microphone, speakers, or an API key.
   the agent process** (`serve_embedded`, started by `Agent.run()`, fails soft
   on a taken port), or **standalone** (`python -m web.server` /
   `dashboard.bat`) for browsing/config/ingest while the agent is off. Browse
-  notes/folders/transcripts, inspect the live conversation history, memory
-  staging, the knowledge base, Discord captures, and session logs — and edit
+  notes/folders/transcripts, inspect the live conversation history, the
+  knowledge base, Discord captures, and session logs — and edit
   the tunable config values from a form. Stdlib-only and read-mostly: it writes
   `data/config_overrides.json` (atomically) and accepts knowledge uploads. Its
   search is a plain substring scan — semantic search stays a voice feature.
@@ -246,10 +251,13 @@ unit-tested without a microphone, speakers, or an API key.
    pauses) to a single billed model call. (An earlier design fired a speculative
    `converse` at each pause and discarded the reply when the user kept talking;
    that billed a full call per pause — §11.)
-4. `converse` sanitizes + trims history, appends the user message, then loops:
-   call the model → if it returned `tool_use`, dispatch each tool via the
-   registry and feed results back → repeat until the model returns plain text.
-   The "thinking" cue loops the whole time.
+4. `converse` sanitizes + trims the transcript, appends the user message,
+   **pulls the Background** (`brain/context.py`: the most relevant past
+   exchanges and knowledge chunks for this utterance), then loops: call the
+   model with the frozen system prompt + Background + the last
+   `CONTEXT_RECENT_EXCHANGES` exchanges verbatim → if it returned `tool_use`,
+   dispatch each tool via the registry and feed results back → repeat until
+   the model returns plain text. The "thinking" cue loops the whole time.
 5. `say()` speaks the reply. While speaking, every mic frame is fed to a
    `BargeInDetector`; if it fires, TTS stops, the captured speech is pushed back
    for the next turn, and (optionally) the unsaid tail is remembered for a
@@ -261,7 +269,9 @@ unit-tested without a microphone, speakers, or an API key.
    question in the new voice). A note prepared *inside* a forwarded turn is
    drained right there — deferred work must never outlive the turn that
    created it (that leak once ate a "switch me back" command).
-7. History is saved to `data/history.json` after the turn.
+7. The transcript is saved to `data/history_<key>.json` after the turn, and
+   the exchange that just ended is embedded into the persona's index so the
+   next turn can retrieve it.
 
 ### Personas and background delegation
 
@@ -339,8 +349,8 @@ central list or dispatch chain.
   `search_discord_messages`, `get_recent_trades`.
 - **time** (`time_tools.py`): `get_current_time`.
 - **memory** (`memory_tools.py`): `search_past_conversations` — the caller's
-  OWN staging, archive, and saved live window (plus the pre-isolation shared
-  archive, labelled); never another persona's.
+  OWN exchange index (plus the pre-isolation shared archive, labelled), ranked
+  the same way the per-turn Background is; never another persona's.
 - **knowledge** (`knowledge_tools.py`): `search_knowledge` — common plus the
   caller's private collection(s), merged by distance.
 - **focus** (`focus_tools.py`, Tom only): `set_focus`, `clear_focus`,
@@ -423,25 +433,51 @@ API — copies each message down to `role` and `content` on the way out.
 
 ---
 
-## 7. Memory: three layers, each per persona
+## 7. Memory: verbatim tail, retrieved exchanges, notes/knowledge
 
-1. **Live window** — each persona's recent turns in `data/history_<key>.json`
-   (`HISTORY_MAX_MESSAGES` each).
-2. **Long-term memory** — text that ages out of a window is staged to
-   `data/memory_pending.json` tagged with its persona, then consolidated at
-   boot (one summary call per persona with enough material) into that
-   persona's Chroma collection `conversations_<key>`.
-   `search_past_conversations` reads the caller's own staging, archive, and
-   saved live window — plus the pre-isolation `conversations` collection,
-   whose mixed history is readable by all and labelled as legacy.
-   `scripts/seed_agent_memory.py` backfills the per-persona archives from the
-   session logs (every turn is attributable: boots start on the default
-   agent, switches are logged).
-3. **Notes** — deliberate, saved artifacts (recorded sessions or
-   conversation-derived), filed in category folders and semantically
-   searchable. Notes and the common `knowledge` collection are the SHARED
-   write paths: information meant for every persona belongs there, not in a
-   private thread.
+What the model sees about the past is chosen by relevance and recency, never
+by a fixed window. The design follows the field's baseline for conversational
+agent memory rather than inventing one — round-level records (LongMemEval
+found one-exchange records read better than session summaries, and
+facts-as-values lose information), hybrid dense + BM25 retrieval (the
+"minimum viable baseline" of every production RAG guide; embeddings miss
+exact tickers, names and numbers), an exponential-decay recency term (Park
+et al.'s Generative Agents memory stream), and a frozen, cached system prefix
+with the volatile Background after it (Anthropic's prompt-caching layout).
+
+1. **Verbatim tail** — the last `CONTEXT_RECENT_EXCHANGES` exchanges go to the
+   model word for word, as a coherence anchor for "yes, do that". The
+   persisted transcript (`data/history_<key>.json`, capped at
+   `HISTORY_MAX_MESSAGES`) is the *dashboard's* record, not what the model
+   sees; `history.tail_start` picks the tail in exchanges, not messages, so an
+   exchange that used a tool is never split.
+2. **Exchange index** — every exchange is embedded into `conversations_<key>`
+   the moment its turn ends (`ConversationMemory.index_exchanges`, also called
+   at boot over the saved threads, idempotently — deterministic ids, so a
+   deferred self-note overwrites its exchange). Each turn `brain/context.py`
+   pulls candidates from it, dense and lexical, fuses them
+   (`score = cosine + 0.5·bm25_rel + 0.3·recency`, gated at
+   `CONTEXT_MIN_SIMILARITY` / `CONTEXT_MIN_LEXICAL`), fills
+   `CONTEXT_CONVO_CHARS`, then knowledge chunks into `CONTEXT_KB_CHARS` plus the
+   leftover, and renders the Background as the last system block. Short
+   utterances borrow the previous user turn as their retrieval query (they are
+   the anaphoric follow-ups). `search_past_conversations` runs the same ranking
+   without the budget, for "tell me everything about X". The pre-isolation
+   `conversations` collection stays readable by all as legacy summaries, and
+   the old staging file is folded in once at boot (`migrate_pending`) and
+   parked as `.bak`.
+3. **Notes and knowledge** — deliberate, saved artifacts, filed in category
+   folders and semantically searchable, plus the shared `knowledge`
+   collection. Notes and common knowledge are the SHARED write paths:
+   information meant for every persona belongs there, not in a private
+   thread.
+
+Every pull logs one `context pull` line (INFO) and, with `CONTEXT_DEBUG_LOG`,
+the per-candidate table and the block itself (DEBUG on the `context` logger).
+The thresholds in `config.py` are tuned from those lines. Levers deliberately
+not pulled yet, each a per-turn model call or a second model: fact-augmented
+keys (Mem0-style extraction), LLM query rewriting for follow-ups, and a
+cross-encoder rerank.
 
 ---
 
@@ -450,12 +486,12 @@ API — copies each message down to `role` and `content` on the way out.
 ```
 data/<Folder>/       notes: <id>.md (summary + frontmatter) + <id>.transcript.md
 data/pending/        transient live transcript while recording
-data/chroma/         Chroma index: notes, knowledge, conversations, plus
-                     per-agent knowledge_<key> / conversations_<key>
+data/chroma/         Chroma index: notes, knowledge, per-agent knowledge_<key>
+                     and conversations_<key> (one record per exchange), plus
+                     the legacy shared conversations archive
 data/index.json      ordered record of every note (title, date, category)
 data/categories.json voice-created/renamed folders overlaid on the seed defaults
-data/history_<key>.json  each persona's live window (sanitized on every save)
-data/memory_pending.json  staged text awaiting consolidation, tagged by persona
+data/history_<key>.json  each persona's transcript (sanitized on every save)
 data/gmail_client_secret.json  Google OAuth client (from the Cloud console)
 data/gmail_token.json          Gmail token, written by `python -m lib.gmail_auth`
 knowledge/           reference PDFs/text/video you ingest + manifest.json
@@ -473,8 +509,7 @@ on `history.json` / the Chroma index (which would corrupt them) or talk over eac
 other. The OS drops the lock when the process exits — including on a crash — so
 no stale lock is ever left behind.
 
-Every state file the app rewrites — `history.json`, `memory_pending.json`,
-`index.json`, `categories.json`, the knowledge `manifest.json`, and each note's
+Every state file the app rewrites — `history_<key>.json`, `index.json`, `categories.json`, the knowledge `manifest.json`, and each note's
 `.md` summary — is written **atomically** via `atomic_io`
 (`write_text_atomic` / the `write_json_atomic` convenience wrapper): temp file,
 fsync, then `os.replace` (an atomic same-volume rename). A power loss mid-save
@@ -536,7 +571,8 @@ history never does.
 
 | Limit | Now | What happens past it |
 | --- | --- | --- |
-| Conversation history | **40 messages** (`HISTORY_MAX_MESSAGES`, adjustable 4–200 on the Config page) | oldest turns fall off the window and are staged into long-term memory (§7) — the count stops growing, it does not grow forever |
+| Conversation transcript | **40 messages** (`HISTORY_MAX_MESSAGES`, adjustable 4–200 on the Config page) | oldest turns fall off the dashboard's transcript — they were indexed the moment they ended (§7), so the model can still retrieve them; the count stops growing |
+| Model context per turn | last **2 exchanges** verbatim + **4000 + 3000 chars** of retrieved Background (`CONTEXT_*`, Config page) | lower-ranked candidates are dropped; the `context pull` log line shows what was kept |
 | Dashboard note search | every note file opened per query (**291 notes** when this was written — check the Overview page for today's count) | linear; fine at hundreds, slow in the low thousands. Deliberately a substring scan — semantic search stays a voice feature (Chroma), so this path never loads the embedding model |
 | Turns | **one at a time** | the loop is blocking. A typed message waits for an utterance boundary; during note-taking it waits for the note to end. Background delegations (`ask_agent`) are the exception — they run on threads and speak their result at the next gap |
 | Tool rounds per turn | **15** conversation, **8** delegated | the loop bails with a spoken "I got stuck repeating tool calls" rather than billing forever |
@@ -547,8 +583,8 @@ history never does.
 
 ### Tuning
 
-Audio thresholds, models, endpointing, barge-in sensitivity, and the history
-window are constants in `config.py`, adjustable visually on the dashboard's
+Audio thresholds, models, endpointing, barge-in sensitivity, the transcript
+cap, and the retrieval budgets/floor are constants in `config.py`, adjustable visually on the dashboard's
 Config page — edits persist to `data/config_overrides.json` and apply at the
 agent's next start.
 

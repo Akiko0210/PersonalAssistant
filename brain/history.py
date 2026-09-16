@@ -26,11 +26,12 @@ def now_iso():
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def time_prefix(ts):
-    """Render a stored `ts` as the spoken-time prefix the model sees on user
-    messages, e.g. "(1:47pm 8/20/2026) ". Built by hand because strftime has no
-    portable no-leading-zero directive. Empty or unparseable stamps render as
-    "" — "time unknown" stays silent rather than inventing a moment."""
+def time_label(ts):
+    """A stored `ts` as spoken-style local time, e.g. "1:47pm 8/20/2026".
+    Built by hand because strftime has no portable no-leading-zero directive.
+    Empty or unparseable stamps give "" — "time unknown" stays silent rather
+    than inventing a moment. Shared by the user-message prefix below and the
+    Background's item labels (brain/context.py)."""
     if not ts:
         return ""
     try:
@@ -39,7 +40,14 @@ def time_prefix(ts):
         return ""
     hour = dt.hour % 12 or 12
     ampm = "am" if dt.hour < 12 else "pm"
-    return f"({hour}:{dt.minute:02d}{ampm} {dt.month}/{dt.day}/{dt.year}) "
+    return f"{hour}:{dt.minute:02d}{ampm} {dt.month}/{dt.day}/{dt.year}"
+
+
+def time_prefix(ts):
+    """time_label wrapped as the prefix the model sees on user messages,
+    "(1:47pm 8/20/2026) " — or "" when the stamp is unknown."""
+    label = time_label(ts)
+    return f"({label}) " if label else ""
 
 
 def sanitize(history):
@@ -133,3 +141,23 @@ def save(path, history):
                                  for m in sanitize(history)])
     except (OSError, TypeError) as e:
         log.warning("could not save conversation history: %s", e)
+
+
+def tail_start(history, n_prev):
+    """Index where the verbatim tail begins: the (n_prev + 1)-th plain-string
+    user message counting back from the end, or 0 when there are fewer. It
+    always lands on a plain user message, so the invariant `trim` protects
+    (never split a tool_use from its tool_result) holds by construction.
+
+    Counting messages instead of exchanges silently loses exchanges: trim(h, 4)
+    over [u1, a1(tool_use), tr, a1(text), u2] keeps the last four and then pops
+    to the first plain user message — [u2] — so any previous exchange that used
+    a tool would vanish from the tail."""
+    remaining = n_prev + 1
+    for i in range(len(history) - 1, -1, -1):
+        m = history[i]
+        if m.get("role") == "user" and isinstance(m.get("content"), str):
+            remaining -= 1
+            if remaining == 0:
+                return i
+    return 0

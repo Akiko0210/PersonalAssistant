@@ -17,6 +17,9 @@ winrt-Windows.Media.Core>=3.2 ; sys_platform == 'win32'
 winrt-Windows.Foundation>=3.2 ; sys_platform == 'win32'
 sentence-transformers>=2.2
 chromadb>=0.5
+# BM25 over each persona's exchange index: the lexical half of hybrid
+# retrieval (brain/memory.py) — embeddings miss exact tickers, names, numbers.
+rank-bm25>=0.2
 pypdf>=4.0
 # pypdf needs this to open AES-encrypted PDFs. Plenty of real trading PDFs are
 # encrypted (often just to disable printing), and without it they fail to ingest

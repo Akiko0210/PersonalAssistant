@@ -16,44 +16,12 @@ from unittest import mock
 import config as cfg
 from brain import agents
 from stores.knowledge import KnowledgeStore, _collection_name, _hms
+from tests.store_fixtures import FakeCol, fake_store
 
 
 def seg(text, start):
     """A stand-in for a faster-whisper segment (only .text/.start are read)."""
     return SimpleNamespace(text=text, start=start)
-
-
-class FakeCol:
-    """A Chroma collection double: records upserts, serves canned hits. Keeps
-    these tests loading neither Chroma nor the embedding model."""
-
-    def __init__(self, hits=()):
-        self.upserts = []                 # (ids, documents, metadatas)
-        self.hits = list(hits)            # (doc, meta, distance)
-        self.queries = 0
-
-    def upsert(self, ids, documents, metadatas):
-        self.upserts.append((list(ids), list(documents), list(metadatas)))
-
-    def count(self):
-        return len(self.hits) or sum(len(u[0]) for u in self.upserts)
-
-    def query(self, query_texts, n_results):
-        self.queries += 1
-        rows = self.hits[:n_results]
-        return {"documents": [[d for d, m, dist in rows]],
-                "metadatas": [[m for d, m, dist in rows]],
-                "distances": [[dist for d, m, dist in rows]]}
-
-
-def fake_store(cols):
-    """A KnowledgeStore whose _col_for serves from `cols` (name -> FakeCol),
-    creating on demand so tests can also assert which names were touched."""
-    store = KnowledgeStore.__new__(KnowledgeStore)
-    store._whisper = None
-    store._cols = {}
-    store._col_for = lambda name: cols.setdefault(name, FakeCol())
-    return store
 
 
 class TestHms(unittest.TestCase):

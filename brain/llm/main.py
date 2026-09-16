@@ -9,6 +9,7 @@ beside this one — `anthropic.py`, `deepseek.py`; `config.model_provider` is
 the id→provider routing name."""
 
 import logging
+import time
 from datetime import datetime
 
 import anthropic
@@ -21,10 +22,11 @@ from brain import agents
 from stores import categories
 import config as cfg
 from brain import history as hist
-from lib.atomic_io import write_json_atomic
+from lib.atomic_io import park, write_json_atomic
 from stores.discord_data import DiscordData
 from stores.knowledge import KnowledgeStore
-from brain.memory import ConversationMemory
+from brain import context
+from brain.memory import ConversationMemory, exchange_id
 from tools import ToolContext, api_tools, dispatch
 from tools.focus_tools import focus_prompt_block
 
@@ -119,6 +121,22 @@ def cached(history):
     return wire
 
 
+def system_blocks(static, background=""):
+    """The system prompt as the API's block list: the static part carries a
+    cache breakpoint (tools render before system, so the marker caches both),
+    and the per-turn Background follows it uncached. Frozen prefix first,
+    volatile tail after — the layout prompt caching is designed around, and
+    the one that lets the retrieved block change every turn without touching
+    the cached part. Haiku 4.5's 4096-token minimum means the static block
+    alone does not cache there yet (tools + system are 2-3.5k tokens); Sonnet
+    and Opus cache it from the second turn on. The per-call usage log line is
+    the ground truth for what it buys on each model."""
+    blocks = [{"type": "text", "text": static, "cache_control": _CACHE_CONTROL}]
+    if background:
+        blocks.append({"type": "text", "text": background})
+    return blocks
+
+
 class _NullIdle:
     """No-op stand-in so Claude runs without an idle-sound controller (selftest)."""
 
@@ -139,8 +157,7 @@ class Claude:
         # ingestion) so the embedding model loads at most once per process; selftest
         # passes none, so fall back to a fresh instance.
         self.kb = kb if kb is not None else KnowledgeStore()
-        # Long-term memory must exist before the history loads: anything the
-        # rolling window drops is staged into it rather than lost.
+        # The exchange index every turn retrieves from and writes to.
         self.memory = ConversationMemory()
         # Personas: per-agent system prompt, tools, model, voice — and since
         # the memory split, each keeps its OWN history thread (self.history is
@@ -152,22 +169,11 @@ class Claude:
         # "make Tom smarter" survives switching away and back but never
         # bleeds into the other personas.
         self._model_overrides = {}
-        # Tools that make their own model calls (staged-memory recall,
-        # consolidation) always run on cfg.CONVO_MODEL, so hand them the client
-        # that serves it. If that model's key is missing, fall back to the
-        # Anthropic client rather than refuse to boot — recall then degrades to
-        # its keyword scan instead of taking the whole agent down.
-        try:
-            tool_client = self.client_for(cfg.CONVO_MODEL)
-        except RuntimeError as e:
-            log.warning("memory calls fall back to the Anthropic client: %s", e)
-            tool_client = self.client
         # Everything tool handlers may touch (see tools/); also carries the
         # pending conversation note and the active conversation model (which the
         # set_conversation_model tool can switch mid-session).
         self._ctx = ToolContext(store=self.store, discord=self.discord,
                                 kb=self.kb, memory=self.memory,
-                                client=tool_client,
                                 convo_model=agents.registry_model(self.active),
                                 active_agent=self.active)
         self._active_since = datetime.now()
@@ -210,7 +216,7 @@ class Claude:
     def conversation_excerpt(self) -> str:
         """Plain-text flatten of the current history window — 'user: …' /
         'assistant: …' lines, tool traffic skipped (same flattening the
-        long-term memory staging uses). This is the SOURCE MATERIAL a
+        exchange index uses). This is the SOURCE MATERIAL a
         conversation note is drawn from: it becomes the note's transcript,
         preserving what was actually said rather than a second copy of the
         model's own summary."""
@@ -232,7 +238,7 @@ class Claude:
 
     # --- the tool loop --------------------------------------------------------
     def _tool_loop(self, messages, *, ctx, tools, system_for, default_model,
-                   max_rounds, on_tool=None, stop=None):
+                   max_rounds, on_tool=None, stop=None, wire_from=0):
         """The one create -> tool_use -> tool_result engine behind converse(),
         run_delegated_task(), and choose_folder_via_dialogue(). It existed as
         three hand-written copies that drifted: only converse() had the
@@ -240,12 +246,17 @@ class Claude:
         others silently lacked both.
 
         messages       mutated in place (converse passes self.history).
+        wire_from      index of the first message actually SENT: converse
+                       passes the start of its verbatim tail, and since the
+                       loop only appends, the whole current turn — every
+                       tool round — is always inside the slice.
         ctx            ToolContext for dispatch(); ctx.convo_model is read
                        fresh each round, so set_conversation_model mid-loop
                        applies to the next call — and is reverted to
                        default_model() if the API no longer serves it.
-        system_for     (model_id) -> system str, rebuilt per round because the
-                       identity block names the model.
+        system_for     (model_id) -> system (a str, or the block list from
+                       system_blocks), rebuilt per round because the identity
+                       block names the model.
         default_model  () -> model id when ctx.convo_model is unset, and the
                        NotFoundError fallback (re-raises if already on it).
         on_tool        optional (block) -> result str for a caller-private
@@ -266,7 +277,7 @@ class Claude:
                     max_tokens=cfg.CONVO_MAX_TOKENS,
                     system=system_for(model),
                     tools=tools,
-                    messages=cached(messages),
+                    messages=cached(messages[wire_from:]),
                     **cfg.thinking_kwargs(model),
                 )
             except anthropic.NotFoundError:
@@ -280,6 +291,15 @@ class Claude:
                     ctx.convo_model = fallback
                     continue
                 raise
+            # The usage fields are the only ground truth that caching works;
+            # every prompt-assembly change is checked against these lines.
+            usage = getattr(resp, "usage", None)
+            if usage is not None:
+                log.info("usage in=%s cache_read=%s cache_write=%s out=%s",
+                         getattr(usage, "input_tokens", None),
+                         getattr(usage, "cache_read_input_tokens", None),
+                         getattr(usage, "cache_creation_input_tokens", None),
+                         getattr(usage, "output_tokens", None))
             messages.append(
                 {"role": "assistant",
                  "content": [self._dump_block(b) for b in resp.content]})
@@ -352,14 +372,21 @@ class Claude:
         model = self.model_for(key)
         sub_ctx = ToolContext(store=self.store, discord=self.discord,
                               kb=self.kb, memory=self.memory,
-                              client=self._ctx.client,
                               convo_model=model, active_agent=key,
                               # Focus is session state, not persona state: a
                               # delegated lookup honours the same narrowing
                               # the foreground conversation is under.
                               focus=self._ctx.focus)
-        system = (DELEGATION_PROMPT.format(name=hat["name"], role=hat["role"])
-                  + "\n\n" + hat["persona"] + focus_prompt_block(self._ctx.focus))
+        # The delegate gets the same retrieved Background a foreground turn
+        # would, pulled for the task text and scoped to ITS OWN memory — "ask
+        # Alice what we discussed about X" reads Alice's exchanges without a
+        # tool call.
+        pull = context.build_context(task, owner=key, memory=self.memory,
+                                     kb=self.kb, focus=self._ctx.focus)
+        system = system_blocks(
+            DELEGATION_PROMPT.format(name=hat["name"], role=hat["role"])
+            + "\n\n" + hat["persona"] + focus_prompt_block(self._ctx.focus),
+            pull.block)
         # No switching tools in the background: the worker has no user to hand
         # over or re-route, and a nested delegation could chain unboundedly.
         # No order mutation either — review-before-submit means the USER hears
@@ -495,6 +522,7 @@ class Claude:
         self.history = hist.sanitize(self.history)
         if persist:
             self._save_history()
+            self._index_last_exchange()  # the self-note belongs in the exchange's record
 
     def record_unanswered(self, user_text: str):
         """Keep a transcribed utterance in history when a hotkey cut the turn
@@ -505,15 +533,24 @@ class Claude:
                              "ts": hist.now_iso()})
         self._save_history()
 
-    def consolidate_memory(self):
-        """Fold staged (aged-out) conversation text into long-term memory. Run at
-        boot; a no-op unless enough has accumulated. Failures keep the staging
-        file intact, so nothing is lost when offline."""
+    def index_saved_threads(self):
+        """Boot: make sure every persona's saved thread is in its exchange
+        index (idempotent — records already present are skipped), then fold
+        in the pre-retrieval staging file once. Also the embedding model's
+        warm-up: without it the first turn paid the cold load (~26 s on
+        2026-08-26). Failures are logged and retried next boot; a thread
+        that isn't indexed is still on disk."""
+        t0 = time.monotonic()
         try:
-            return self.memory.consolidate(self.client)
-        except Exception as e:
-            log.warning("memory consolidation failed (will retry next boot): %s", e)
-            return None
+            n = sum(self.memory.index_exchanges(hist.load(cfg.history_path(k)), k)
+                    for k in agents.AGENTS)
+            n += self.memory.migrate_pending()
+        except Exception as e:  # noqa: BLE001 - never block startup
+            log.warning("exchange index backfill failed (will retry next "
+                        "boot): %s", e)
+            return
+        log.info("exchange index: %d new record(s) from saved threads (%.1fs)",
+                 n, time.monotonic() - t0)
 
     # --- persistent conversation memory ---------------------------------------
     @staticmethod
@@ -522,19 +559,14 @@ class Claude:
         dicts so the history is JSON-serializable (the API accepts dicts back)."""
         return block if isinstance(block, dict) else block.model_dump(exclude_none=True)
 
-    def _trim_and_archive(self, history):
-        """Sanitize + trim to the rolling window, staging whatever falls off into
-        long-term memory instead of discarding it. The kept part is always a
-        contiguous suffix, so the dropped prefix is everything before it."""
-        history = hist.sanitize(history)  # never carry an orphaned tool call forward
-        kept = hist.trim(history, cfg.HISTORY_MAX_MESSAGES)
-        dropped = history[:len(history) - len(kept)]
-        if dropped:
-            try:
-                self.memory.record_dropped(dropped, self.active)
-            except Exception as e:  # staging must never break the conversation
-                log.warning("could not stage dropped history: %s", e)
-        return kept
+    @staticmethod
+    def _trim(history):
+        """Sanitize + cap the persisted transcript. The cap loses nothing:
+        every exchange was indexed the moment its turn ended
+        (_index_last_exchange), so whatever falls off here is already
+        retrievable. Sanitize first — never carry an orphaned tool call
+        forward."""
+        return hist.trim(hist.sanitize(history), cfg.HISTORY_MAX_MESSAGES)
 
     @staticmethod
     def _migrate_legacy_history():
@@ -543,19 +575,13 @@ class Claude:
         WITH speaker attribution, and scripts/seed_agent_memory.py mines those
         into each persona's own archive instead.
 
-        Never overwrites an existing backup. Path.replace is an atomic
-        rename that clobbers its destination silently, and this machine
-        already had a hand-made history.json.bak from a month earlier —
+        Never overwrites an existing backup (atomic_io.park): this machine
+        already had a hand-made history.json.bak from a month earlier, and
         migrating over it would have destroyed the only copy."""
         if not cfg.HISTORY_PATH.exists():
             return
-        target = cfg.HISTORY_PATH.with_suffix(".json.bak")
-        n = 2
-        while target.exists():
-            target = cfg.HISTORY_PATH.with_suffix(f".json.bak{n}")
-            n += 1
         try:
-            cfg.HISTORY_PATH.replace(target)
+            target = park(cfg.HISTORY_PATH)
             log.info("shared history.json parked as %s (threads are per-agent "
                      "now; seed_agent_memory.py mines the logs)", target.name)
         except OSError as e:
@@ -564,20 +590,20 @@ class Claude:
     def _load_history(self):
         h = hist.load(cfg.history_path(self.active))
         if h:
-            h = self._trim_and_archive(h)
+            h = self._trim(h)
             log.info("restored %d message(s) of %s's thread", len(h), self.active)
         return h
 
     def _save_history(self):
-        # Saved untrimmed: trimming happens on load / at each turn, where the
-        # dropped part is staged into long-term memory. Trimming here instead
-        # would silently discard the overflow on quit.
+        # Saved untrimmed: trimming happens on load / at each turn. This file
+        # is the dashboard's transcript; the model's memory is the exchange
+        # index, written right after this save (_index_last_exchange).
         hist.save(cfg.history_path(self.active), self.history)
 
     def converse(self, user_text: str) -> str:
-        # Trim in memory too, so a long-running session doesn't grow unbounded;
-        # whatever falls off is staged into long-term memory, not lost.
-        self.history = self._trim_and_archive(self.history)
+        # Trim the transcript in memory too, so a long session doesn't grow
+        # unbounded. Nothing is lost: every exchange was indexed when it ended.
+        self.history = self._trim(self.history)
         # Stamped here, not at save time: cached() renders the stamp into the
         # outgoing text, and this turn's message must carry one before the call.
         self.history.append({"role": "user", "content": user_text,
@@ -586,8 +612,14 @@ class Claude:
         # history ending on a user turn), this new message would be a second
         # consecutive user turn — which the API also rejects. Fold them together.
         self.history = hist.sanitize(self.history)
-        self.idle.start()  # thinking — keep it looping across the whole tool loop
+        self.idle.start()  # thinking — covers the context pull and the whole tool loop
         try:
+            # Only the last few exchanges go to the model verbatim; everything
+            # older reaches it through the Background, pulled once per turn.
+            # Computed after the sanitize so the index cannot shift, and the
+            # loop only appends, so the whole turn stays inside the slice.
+            wire_from = hist.tail_start(self.history, cfg.CONTEXT_RECENT_EXCHANGES)
+            pull = self._pull_context(user_text, wire_from)
             # The hat is stable for the whole turn (switch_agent defers to a
             # pending slot); the MODEL is not — set_conversation_model mid-loop
             # applies to the next round, which is why the system prompt is a
@@ -596,16 +628,18 @@ class Claude:
             resp = self._tool_loop(
                 self.history, ctx=self._ctx,
                 tools=api_tools(include=hat["tools"]),
-                system_for=lambda model: (
+                system_for=lambda model: system_blocks(
                     cfg.CONVO_SYSTEM_BASE + "\n\n" + hat["persona"]
                     + agents.roster_block(self.active)
                     + cfg.model_identity_block(cfg.convo_model_label(model))
                     # Focus lives in the cached prefix, so set/clear costs one
                     # prompt-cache miss — rare and user-initiated; the model
                     # KNOWING its retrieval is narrowed is worth more.
-                    + focus_prompt_block(self._ctx.focus)),
+                    + focus_prompt_block(self._ctx.focus),
+                    pull.block),
                 default_model=lambda: agents.registry_model(self.active),
                 max_rounds=cfg.CONVO_MAX_TOOL_ROUNDS,
+                wire_from=wire_from,
             )
             if resp is None:
                 # The model kept calling tools without ever answering. Bail out
@@ -628,6 +662,44 @@ class Claude:
             # moment the user says "switch to DeepSeek". One atomic write a
             # turn, next to the history save that already happens here.
             self._write_agent_state()
+            self._index_last_exchange()
+
+    def _pull_context(self, user_text, wire_from):
+        """The Background for this turn. Short utterances are the anaphoric
+        ones ("what about the other one?"), so under CONTEXT_SHORT_QUERY_WORDS
+        the previous user utterance joins the retrieval query; a long one
+        stands alone, since always appending would drag the old topic into a
+        new one. Exchanges already in the verbatim tail are excluded so the
+        model never reads the same words twice. build_context never raises."""
+        query = user_text
+        if len(user_text.split()) < cfg.CONTEXT_SHORT_QUERY_WORDS:
+            earlier = [m["content"] for m in self.history[:-1]
+                       if m.get("role") == "user" and isinstance(m.get("content"), str)]
+            if earlier:
+                query = f"{earlier[-1]} {user_text}"
+        in_tail = {exchange_id(self.active, m) for m in self.history[wire_from:-1]
+                   if m.get("role") == "user" and isinstance(m.get("content"), str)}
+        return context.build_context(query, owner=self.active, memory=self.memory,
+                                     kb=self.kb, exclude_ids=in_tail,
+                                     focus=self._ctx.focus)
+
+    def _index_last_exchange(self):
+        """Embed the exchange that just ended into the persona's index, so the
+        next turn can retrieve it. Re-derived from history rather than
+        remembered, so it is right after a persona switch too, and a deferred
+        self-note (flush_tool_events(persist=True)) overwrites the same
+        record. Never allowed to break a turn."""
+        start = hist.tail_start(self.history, 0)
+        t0 = time.monotonic()
+        try:
+            n = self.memory.index_exchanges(self.history[start:], self.active,
+                                            skip_existing=False)
+        except Exception as e:  # noqa: BLE001
+            log.warning("could not index the last exchange: %s", e)
+            return
+        if n:
+            log.info("indexed exchange for %s (%.0f ms)", self.active,
+                     (time.monotonic() - t0) * 1000)
 
     # --- summarisation -------------------------------------------------------
     @staticmethod

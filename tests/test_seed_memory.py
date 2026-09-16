@@ -41,7 +41,8 @@ class TestParseLogs(unittest.TestCase):
     def test_turns_before_any_switch_belong_to_the_default_agent(self):
         turns = self.parse()
         self.assertEqual(turns[0], ["2026-08-01", "alice",
-                                    "user: Good morning Alice."])
+                                    "user: Good morning Alice.",
+                                    "2026-08-01T09:00:10"])
 
     def test_a_switch_banner_flips_the_persona(self):
         turns = self.parse()
@@ -52,7 +53,8 @@ class TestParseLogs(unittest.TestCase):
         # Day 2 boots fresh: the process always starts on DEFAULT_AGENT, so
         # attribution must not carry Tom over from the previous session.
         turns = self.parse()
-        self.assertEqual(turns[-1], ["2026-08-02", "alice", "assistant: Here."])
+        self.assertEqual(turns[-1], ["2026-08-02", "alice", "assistant: Here.",
+                                     "2026-08-02T10:00:07"])
 
     def test_multiline_replies_are_joined(self):
         turns = self.parse()

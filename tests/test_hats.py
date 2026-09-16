@@ -11,7 +11,7 @@ from unittest import mock
 from brain import agents
 from brain.llm.main import Claude
 import config as cfg
-from tests.llm_fixtures import make_claude
+from tests.llm_fixtures import make_claude, system_text
 
 
 class TestHats(unittest.TestCase):
@@ -22,7 +22,7 @@ class TestHats(unittest.TestCase):
         self.assertEqual(call["model"], cfg.CONVO_MODELS["haiku"])
         names = {t["name"] for t in call["tools"]}
         self.assertEqual(names, set(agents.AGENTS["alice"]["tools"]))
-        self.assertIn("You are Alice", call["system"])
+        self.assertIn("You are Alice", system_text(call))
 
     def test_switch_to_tom_changes_model_tools_and_prompt(self):
         c = make_claude()
@@ -38,7 +38,7 @@ class TestHats(unittest.TestCase):
         # trading was silently unreachable.
         self.assertIn("build_strategy", names)
         self.assertIn("submit_order", names)
-        self.assertIn("You are Tom", call["system"])
+        self.assertIn("You are Tom", system_text(call))
 
     def test_threads_are_isolated_across_switching(self):
         # The strict-isolation core: Bob must not see a word of Alice's

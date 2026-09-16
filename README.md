@@ -203,21 +203,27 @@ their own thread (`data/history_<name>.json`), saved after every turn and
 restored on the next start. What you tell one, the others cannot see: ask Tom
 what you discussed with Alice and he'll say he doesn't have access — and
 offer to ask her. Accept, and Alice answers from her own memory as a spoken
-interjection. The live window keeps each thread's most recent exchanges
+interjection. Each thread's transcript is kept on disk for the dashboard
 (`HISTORY_MAX_MESSAGES` in `config.py`).
 
-Older conversation isn't lost when it ages out of a window: its text is
-staged to `data/memory_pending.json` tagged with its persona, and at boot the
-agent consolidates each persona's staged text — one quick model call
-summarises it into a dense memory record embedded in that persona's own
-`conversations_<name>` collection in Chroma. Ask "what did we talk about last
-week?" and the persona searches its own archive
-(`search_past_conversations`); conversations from before the per-persona
-split live in a shared legacy archive every persona can read, labelled as
-such. Consolidation only runs when enough has accumulated, and if it fails
-(e.g. offline) the staged text is kept and retried next boot.
+**What the model actually sees each turn is chosen by relevance, not by a
+window.** Every user/assistant exchange is embedded into that persona's own
+`conversations_<name>` collection in Chroma the moment the turn ends. Before
+each reply the agent sends only the last couple of exchanges verbatim
+(`CONTEXT_RECENT_EXCHANGES`) and retrieves a *Background* block for the rest:
+the most relevant past exchanges — found by embedding similarity **and** a
+BM25 keyword index, so tickers, names and numbers match exactly, with recent
+exchanges weighted up — plus the best-matching knowledge chunks, fitted to a
+character budget (`CONTEXT_CONVO_CHARS`, `CONTEXT_KB_CHARS`). So "how did that
+butterfly do?" finds the exchange from three weeks ago without you saying
+"remember when". The `search_past_conversations` tool is still there for
+digging deeper than the budget allows; conversations from before the
+per-persona split live in a shared legacy archive every persona can read,
+labelled as such. Every pull is logged (`context pull …` lines in the session
+log, with the full candidate table when `CONTEXT_DEBUG_LOG` is on) so the
+thresholds can be tuned from what was actually retrieved.
 `scripts/seed_agent_memory.py` (run once, agent off) backfills each persona's
-archive from the session logs.
+index from the session logs.
 
 Knowledge splits the same way: the dashboard's ingest has a target selector,
 so a document can go into the common knowledge base (all personas) or one

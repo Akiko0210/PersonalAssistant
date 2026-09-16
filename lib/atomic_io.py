@@ -13,6 +13,7 @@ import json
 import os
 import tempfile
 import time
+from pathlib import Path
 
 
 def read_json(path, fallback, *, expect=None, warn=None):
@@ -87,3 +88,19 @@ def _replace_with_retry(tmp, path, attempts=6, first_delay=0.05):
                 raise
             time.sleep(delay)
             delay *= 2
+
+
+def park(path):
+    """Rename `path` to a .bak beside it, never clobbering an existing backup.
+    Path.replace is an atomic rename that overwrites its destination silently,
+    and a hand-made history.json.bak was once the only copy of a month of
+    conversation — so a taken name gets .bak2, .bak3, ... instead. Returns the
+    new path; raises OSError like the rename it wraps."""
+    path = Path(path)
+    target = path.with_suffix(path.suffix + ".bak")
+    n = 2
+    while target.exists():
+        target = path.with_suffix(f"{path.suffix}.bak{n}")
+        n += 1
+    path.replace(target)
+    return target

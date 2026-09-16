@@ -1,4 +1,4 @@
-"""Tools over archived long-term conversation memory (ConversationMemory)."""
+"""Tools over the persona's conversation memory (ConversationMemory)."""
 
 from tools import tool
 
@@ -6,14 +6,15 @@ from tools import tool
 @tool({
     "name": "search_past_conversations",
     "description": (
-        "Search YOUR OWN past conversations with the user, outside the "
-        "current chat window: earlier in THIS session (verbatim, not yet "
-        "archived), your archived summaries of older conversations, and the "
-        "pre-isolation shared archive. Use for 'what did we talk about last "
-        "week', 'didn't we discuss X before', 'review your memory', or "
-        "whenever the user refers to something you don't see in the current "
-        "history — including from earlier today. This never sees another "
-        "assistant's conversations — for those, ask them with ask_agent."
+        "Search YOUR OWN past exchanges with the user — every conversation you "
+        "have had, back to the beginning — for more detail than the Background "
+        "section already shows. The most relevant past exchanges are retrieved "
+        "into your Background automatically each turn, so reach for this when "
+        "the user asks for more ('what exactly did I say', 'list everything we "
+        "discussed about X', 'when did we last talk about Y') or when the "
+        "Background has nothing on a topic you would expect to remember. This "
+        "never sees another assistant's conversations — for those, ask them "
+        "with ask_agent."
     ),
     "input_schema": {
         "type": "object",
@@ -24,5 +25,4 @@ from tools import tool
     },
 })
 def search_past_conversations(ctx, args):
-    return ctx.memory.search(args["query"], client=ctx.client,
-                             caller=ctx.active_agent)
+    return ctx.memory.search(args["query"], caller=ctx.active_agent)

@@ -1,79 +1,81 @@
-"""Long-term conversation memory — per persona.
+"""Conversation memory — one record per exchange, per persona.
 
-Each persona's live thread is a rolling window (cfg.HISTORY_MAX_MESSAGES);
-anything older would be lost. Instead, messages that fall off the window are
-staged here tagged with the persona that owned them, and later *consolidated*:
-one cheap model call per persona summarises its staged excerpt into a dense
-memory record, embedded into that persona's own Chroma collection
-(conversations_<key>). Retrieval is scoped the same way — a caller searches
-its own staging, its own archive, and its own saved live window (plus any
-registry `reads` grants), and structurally cannot touch another persona's.
-The pre-isolation `conversations` collection and untagged staged batches are
-legacy: genuinely shared history, readable by all, labelled as such.
+Every user↔assistant exchange is embedded into the persona's own Chroma
+collection (conversations_<key>) the moment its turn ends, and every later
+turn retrieves from it (brain/context.py). Retrieval is hybrid: dense
+similarity plus a BM25 index over the same records, because MiniLM embeddings
+are weak on exactly the tokens spoken follow-ups hinge on — tickers, names,
+numbers. Records are round-level (one exchange, not a session summary) with
+their time in metadata: LongMemEval found round-level values read best and
+that facts-as-values lose information, and recency is a ranking signal here,
+not a filter.
 
-Staging is free (a JSON append, no model call), so it happens inline whenever
-the window trims. Consolidation runs at boot, and only for personas with
-enough material (cfg.MEMORY_MIN_MESSAGES each), so most boots skip it. If the
-model call fails (offline, etc.) that persona's staged text is kept and
-retried next boot — nothing is dropped.
+Isolation is structural: a caller reads its own collection (plus registry
+`reads` grants) and the pre-isolation shared `conversations` archive, whose
+summary records predate per-agent memory and are labelled as legacy. There is
+no parameter through which a persona can name another's collection.
 """
 
-import json
+import hashlib
 import logging
+import math
 import re
+from collections import Counter, namedtuple
 from datetime import datetime
+
+from rank_bm25 import BM25Okapi
 
 from stores import chroma_store
 
 import config as cfg
-from brain import agents
-from lib.atomic_io import read_json, write_json_atomic
+from brain import agents, context
+from lib.atomic_io import park, read_json
 
 log = logging.getLogger("memory")
 
-CONSOLIDATE_PROMPT = """You are archiving part of a voice-assistant conversation \
-into long-term memory. Summarise the excerpt below into one compact memory record: \
-what was discussed, concrete facts, numbers, names, decisions, and preferences — \
-anything the user might ask about weeks later. Dense plain prose, no preamble, no \
-markdown.
+# Dense and lexical hits side by side. `count` is the number of records in the
+# readable collections — None when unknown because every query failed — and
+# `error` the last Chroma error text, so search() can tell the model
+# "unsearchable" apart from "nothing there".
+Rows = namedtuple("Rows", "dense lexical count error")
 
-Excerpt:
-"""
+_WORD = re.compile(r"[a-z0-9']+")
 
-RECALL_PROMPT = """You are the memory-recall subsystem of a voice assistant. \
-Below are verbatim conversation lines that scrolled out of the assistant's \
-recent window earlier in THIS session (oldest first, timestamped). Extract \
-ONLY material that directly bears on the query: the relevant statements, \
-decisions, and numbers, keeping exact figures and quoting or closely \
-paraphrasing the lines, with their timestamps. Plain prose, no markdown, no \
-preamble. This is strict: if the lines below contain nothing that answers the \
-query, reply with exactly NOTHING_RELEVANT — never substitute loosely related \
-or recent-but-off-topic material, and never answer from your own knowledge. \
-An honest NOTHING_RELEVANT lets the assistant check its other memory stores; \
-an off-topic answer misleads it.
 
-Query: {query}
+def tokens(text) -> list:
+    """BM25 tokens: lowercase words of three or more characters. One tokenizer
+    for the index and the query, in one place."""
+    return [w for w in _WORD.findall((text or "").lower()) if len(w) > 2]
 
-Staged conversation:
-"""
 
-# The staged read is a needle-in-a-haystack job over the entire staged buffer
-# (~90k characters in a long session), and the conversation default is picked
-# for latency, not for that. Measured against a real staged file, Haiku 4.5
-# answered NOTHING_RELEVANT for every one of three topics that were plainly in
-# the text (the keyword scan found 10-12 matching lines for each); Sonnet found
-# all three on the same prompt and still correctly rejected two control queries
-# about things never discussed. Softening the prompt did not rescue Haiku — the
-# model is the variable that matters here, so recall pins its own rather than
-# following the conversation's. It runs only when the user explicitly asks
-# about past conversations, so the cost lands on the turns that need it.
-RECALL_MODEL = cfg.CONVO_MODELS["sonnet"]
+def _bm25(corpus):
+    """BM25Okapi with Lucene's IDF, log(1 + (N - n + 0.5) / (n + 0.5)), which
+    is positive for every term. rank_bm25's own IDF is zero (or negative, then
+    patched) for a term found in half the records — and a personal index is
+    tiny at first, so "SPX" in one of two exchanges scored 0 and looked like
+    no match at all. Positive IDF keeps "score > 0" meaning "matched"."""
+    bm25 = BM25Okapi(corpus)
+    df = Counter(word for doc in bm25.doc_freqs for word in doc)
+    total = bm25.corpus_size
+    bm25.idf = {w: math.log(1 + (total - n + 0.5) / (n + 0.5))
+                for w, n in df.items()}
+    return bm25
+
+
+def exchange_id(owner, user_msg) -> str:
+    """Deterministic id for the exchange that starts at `user_msg`, so
+    re-indexing (the boot backfill, a deferred self-note landing after the
+    turn) overwrites instead of duplicating. Live turns always carry a `ts`
+    (converse stamps it at append); a pre-ts message hashes on text alone."""
+    key = f"{user_msg.get('ts', '')}|{user_msg.get('content', '')}"
+    return f"xc_{owner}_{hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]}"
 
 
 class ConversationMemory:
     def __init__(self):
         cfg.ensure_dirs()
-        self._cols = {}  # collection name -> Chroma collection, loaded lazily
+        self._cols = {}     # collection name -> Chroma collection, loaded lazily
+        self._lexical = {}  # collection name -> (BM25Okapi, ids, docs, metas)
 
     def _col_for(self, name: str):
         col = self._cols.get(name)
@@ -82,13 +84,6 @@ class ConversationMemory:
             col = self._cols[name] = chroma_store.collection(name)
         return col
 
-    @staticmethod
-    def _readable(caller):
-        """Staged-batch owners `caller` may read. None (legacy, pre-isolation
-        batches) is always readable — that history was genuinely shared."""
-        return {None, *agents.readable_owners(caller)}
-
-    # --- staging (free — no model call) ---------------------------------------
     @staticmethod
     def _message_text(msg) -> str | None:
         """Flatten one history message to 'role: text'. Tool results and tool-use
@@ -107,201 +102,104 @@ class ConversationMemory:
             text = ""
         return f"{role}: {text}" if text else None
 
-    def _load_pending(self) -> list:
-        return read_json(cfg.MEMORY_PENDING_PATH, [], expect=list,
-                         warn=lambda e: log.warning(
-                             "memory staging file unreadable; starting fresh"))
+    # --- indexing -------------------------------------------------------------
+    @staticmethod
+    def _exchanges(messages):
+        """Split a message list at plain-string user messages: one group per
+        exchange, [(user_msg, [user_msg, ...its replies and tool traffic]), ...].
+        Anything before the first plain user message has no exchange to
+        belong to and is skipped."""
+        groups = []
+        for m in messages:
+            if m.get("role") == "user" and isinstance(m.get("content"), str):
+                groups.append((m, [m]))
+            elif groups:
+                groups[-1][1].append(m)
+        return groups
 
-    def _save_pending(self, pending: list):
-        # Atomic (temp + rename) so a power loss mid-save can't corrupt the
-        # staging file and lose not-yet-consolidated memory.
-        write_json_atomic(cfg.MEMORY_PENDING_PATH, pending)
-
-    def record_dropped(self, messages, owner) -> int:
-        """Stage messages that fell off `owner`'s history window. The owner is
-        captured HERE, at drop time — by the boot-time consolidate the active
-        persona is long gone, so a batch without its owner could only ever be
-        legacy. Returns how many lines were kept (plain user/assistant text;
-        tool traffic is dropped)."""
-        lines = [t for m in messages if (t := self._message_text(m))]
-        if not lines:
+    def index_exchanges(self, messages, owner, *, skip_existing=True) -> int:
+        """Embed each exchange in `messages` into `owner`'s collection. The ONE
+        write path: the live turn (skip_existing=False, so a self-note that
+        lands after the reply overwrites its exchange), the boot backfill of
+        the saved threads, the staging-file migration, and the log seeder.
+        Tool traffic is skipped; tool NAMES go into metadata, not the text —
+        identifiers would shift a short document's embedding. Returns how
+        many records were written."""
+        ids, docs, metas = [], [], []
+        for user_msg, group in self._exchanges(messages):
+            lines = [t for m in group if (t := self._message_text(m))]
+            if len(lines) < 2:
+                continue  # no assistant text: an abandoned turn, nothing to remember
+            ts = user_msg.get("ts") or ""
+            meta = {"agent": owner, "ts": ts, "kind": "exchange"}
+            try:
+                meta["epoch"] = datetime.fromisoformat(ts).timestamp()
+            except ValueError:
+                pass  # pre-ts message: retrievable, just never boosted as recent
+            used = sorted({b.get("name") for m in group
+                           if isinstance(m.get("content"), list)
+                           for b in m["content"]
+                           if isinstance(b, dict) and b.get("type") == "tool_use"
+                           and b.get("name")})
+            if used:
+                meta["tools"] = ",".join(used)
+            ids.append(exchange_id(owner, user_msg))
+            docs.append("\n".join(lines))
+            metas.append(meta)
+        if not ids:
             return 0
-        pending = self._load_pending()
-        pending.append(
-            {"ts": datetime.now().isoformat(timespec="seconds"),
-             "agent": owner, "lines": lines}
-        )
-        self._save_pending(pending)
-        log.info("staged %d line(s) for %s's long-term memory", len(lines), owner)
-        return len(lines)
+        name = cfg.agent_memory_collection(owner)
+        col = self._col_for(name)
+        if skip_existing:
+            have = set(col.get(ids=ids, include=[]).get("ids") or [])
+            keep = [i for i, x in enumerate(ids) if x not in have]
+            ids = [ids[i] for i in keep]
+            docs = [docs[i] for i in keep]
+            metas = [metas[i] for i in keep]
+            if not ids:
+                return 0
+        col.upsert(ids=ids, documents=docs, metadatas=metas)
+        self._lexical.pop(name, None)  # rebuilt from the store on the next query
+        return len(ids)
 
-    # --- consolidation (one model call per persona, run at boot) ---------------
-    def consolidate(self, client) -> str | None:
-        """Summarise each persona's staged text into its own archive. The
-        MEMORY_MIN_MESSAGES threshold applies PER persona — two Tom lines must
-        not get consolidated just because Alice staged twenty. At most one
-        model call per persona with enough material (bounded and rare — most
-        boots stage nothing at all). Returns a combined status line, or None
-        when no group had enough."""
-        pending = self._load_pending()
-        groups = {}  # owner key (None = legacy) -> [batch, ...] in order
-        for batch in pending:
+    def migrate_pending(self) -> int:
+        """One-shot: fold the pre-retrieval staging file — batches of
+        'role: text' lines that fell off the old window, awaiting a boot-time
+        summary — into the exchange index, then park it as .bak (never
+        delete; a wrong parse must stay recoverable). Untagged batches
+        predate personas and have no collection to go to. Returns how many
+        exchanges were indexed; 0 when there is no file."""
+        path = cfg.MEMORY_PENDING_PATH
+        if not path.exists():
+            return 0
+        n = 0
+        for batch in read_json(path, [], expect=list):
             owner = batch.get("agent")
-            if owner is not None and owner not in agents.AGENTS:
-                owner = None  # a renamed/removed persona's past is legacy now
-            groups.setdefault(owner, []).append(batch)
-
-        done, statuses = set(), []  # id()s of batches already embedded
-        for owner, batches in groups.items():
-            n_lines = sum(len(b.get("lines", [])) for b in batches)
-            if n_lines < cfg.MEMORY_MIN_MESSAGES:
+            if owner not in agents.AGENTS:
                 continue
-
-            blocks = []
-            for batch in batches:
-                ts = batch.get("ts", "")
-                day = ts[:10] if ts else "unknown date"
-                blocks.append(f"[{day}]\n" + "\n".join(batch.get("lines", [])))
-            transcript = "\n\n".join(blocks)
-
-            resp = client.messages.create(
-                model=cfg.CONVO_MODEL,
-                max_tokens=cfg.MEMORY_MAX_TOKENS,
-                thinking={"type": "disabled"},
-                messages=[{"role": "user",
-                           "content": CONSOLIDATE_PROMPT + transcript}],
-            )
-            summary = "".join(b.text for b in resp.content
-                              if b.type == "text").strip()
-            if not summary:
-                log.warning("consolidation for %s returned no text; keeping "
-                            "staged", owner or "legacy")
-                continue
-
-            first = (batches[0].get("ts") or "")[:10]
-            last = (batches[-1].get("ts") or "")[:10]
-            date = first if first == last else f"{first} to {last}"
-
-            name = (cfg.agent_memory_collection(owner) if owner
-                    else cfg.MEMORY_COLLECTION)
-            doc_id = datetime.now().strftime("conv_%Y-%m-%d_%H%M%S")
-            self._col_for(name).upsert(
-                ids=[doc_id],
-                documents=[summary],
-                metadatas=[{"date": date, "messages": n_lines}],
-            )
-            # Clear THIS group from staging as soon as its embed lands: a
-            # failure in a later group must keep only that group staged, not
-            # re-archive this one as a duplicate next boot.
-            done.update(id(b) for b in batches)
-            self._save_pending([b for b in pending if id(b) not in done])
-            statuses.append(f"{n_lines} message(s) for "
-                            f"{owner or 'the shared archive'} ({date})")
-
-        if not statuses:
-            return None
-        return "archived " + "; ".join(statuses)
-
-    # --- retrieval (used as a Claude tool) -------------------------------------
-    def _staged_batches(self, caller) -> list:
-        """Staged batches `caller` may read, plus a synthetic batch per
-        readable persona's SAVED live thread. The live read is what makes
-        "ask Alice what we discussed" work at all: a delegate starts with an
-        empty message list (llm.run_delegated_task), so without it anything
-        still inside Alice's 40-message window would be invisible to her.
-        The files are on disk and saved every turn — this is a read, not IO
-        machinery."""
-        readable = self._readable(caller)
-        batches = [b for b in self._load_pending()
-                   if (b.get("agent") if b.get("agent") in agents.AGENTS
-                       else None) in readable]
-        for k in agents.readable_owners(caller):
-            msgs = read_json(cfg.history_path(k), [], expect=list)
-            lines = [t for m in msgs
-                     if isinstance(m, dict) and (t := self._message_text(m))]
-            if lines:
-                batches.append({"ts": "current session", "lines": lines})
-        return batches
-
-    def recall_staged(self, client, query: str, caller=None) -> str | None:
-        """LLM read over the staged, not-yet-consolidated lines: hand the
-        WHOLE staged text to a cheap model with the query and let it extract
-        what's relevant. No retrieval step means no retrieval misses — this is
-        what makes complex queries ('what did we decide about sizing?') work,
-        where a keyword scan can only match literal words. Runs only when the
-        memory tool is invoked, so it costs nothing per turn; a full session's
-        staging is a few thousand tokens, well under a cent on the default
-        model.
-
-        Returns the extracted answer; "" when the model read everything and
-        found nothing relevant (a real answer — don't fall back); None when
-        there is nothing staged or the call failed (caller should fall back
-        to the offline keyword scan)."""
-        batches = self._staged_batches(caller)
-        lines = []
-        for batch in batches:
-            ts = (batch.get("ts") or "")[:16].replace("T", " ")
+            ts = batch.get("ts", "")
+            msgs = []
             for line in batch.get("lines", []):
-                lines.append(f"[{ts}] {line}")
-        if not lines:
-            return None
-        # Budget the staged text, newest lines kept — 100k chars ≈ 25k tokens.
-        text, budget = [], 100_000
-        for line in reversed(lines):
-            budget -= len(line) + 1
-            if budget < 0:
-                break
-            text.append(line)
-        staged = "\n".join(reversed(text))
-        try:
-            resp = client.messages.create(
-                model=RECALL_MODEL,
-                max_tokens=cfg.MEMORY_MAX_TOKENS,
-                thinking={"type": "disabled"},
-                messages=[{"role": "user",
-                           "content": RECALL_PROMPT.format(query=query) + staged}],
-            )
-        except Exception as e:  # offline etc. — degrade to the keyword scan
-            log.warning("staged-memory recall failed (%s); using keyword scan", e)
-            return None
-        answer = "".join(b.text for b in resp.content if b.type == "text").strip()
-        if not answer:
-            return None
-        if "NOTHING_RELEVANT" in answer:
-            return ""
-        return answer
+                role, sep, text = str(line).partition(": ")
+                if sep and role in ("user", "assistant") and text:
+                    msgs.append({"role": role, "content": text, "ts": ts})
+            n += self.index_exchanges(msgs, owner)
+        parked = park(path)
+        log.info("staging file: %d exchange(s) folded into the index; parked as %s",
+                 n, parked.name)
+        return n
 
-    def search_staged(self, query: str, max_lines: int = 12,
-                      caller=None) -> list:
-        """Keyword scan over the staged, NOT-yet-consolidated lines — the
-        verbatim text of messages that fell off the window since the last
-        boot. Consolidation only runs at startup, so without this a long
-        session has a blind spot: something said two hours ago is neither in
-        the live window nor searchable in the archive (exactly how Tom lost
-        a trade structure mid-session, 2026-07-20 21:07). No model call, no
-        embeddings — the lines are already on disk; just read them."""
-        words = {w for w in re.findall(r"[a-z0-9']+", (query or "").lower())
-                 if len(w) > 2}
-        if not words:
-            return []
-        hits = []
-        for batch in self._staged_batches(caller):
-            ts = (batch.get("ts") or "")[:16].replace("T", " ")
-            for line in batch.get("lines", []):
-                if any(w in line.lower() for w in words):
-                    hits.append(f"[{ts}] {' '.join(line.split())[:300]}")
-        return hits[-max_lines:]  # most recent matches win the budget
-
+    # --- retrieval ------------------------------------------------------------
     def _query_archive(self, name: str, query: str, n: int):
-        """One collection's hits as (distance, doc, meta) rows, plus its record
+        """One collection's dense hits as chroma_store.Hit rows, plus its record
         count and error text. Never raises.
 
-        A broken archive must not cost the caller the staged results it has
-        already gathered: this used to be one bare query() whose exception
-        unwound search() entirely, so a Chroma fault came back to the model as
-        a lone "Tool error: ..." with every same-session hit discarded
-        (2026-07-27 08:12, "Error creating hnsw segment reader: Nothing found
-        on disk" against index files that were demonstrably present).
+        A broken collection must not cost the caller the others' results:
+        this used to be one bare query() whose exception unwound search()
+        entirely, so a Chroma fault came back to the model as a lone "Tool
+        error: ..." with every other hit discarded (2026-07-27 08:12, "Error
+        creating hnsw segment reader: Nothing found on disk" against index
+        files that were demonstrably present).
 
         The first failure drops the cached collection and retries once, since
         a long-lived process can be left holding a handle the store no longer
@@ -316,10 +214,7 @@ class ConversationMemory:
                 if not count:
                     return [], 0, None
                 res = col.query(query_texts=[query], n_results=min(n, count))
-                docs = res.get("documents", [[]])[0]
-                metas = res.get("metadatas", [[]])[0]
-                dists = res.get("distances", [[]])[0]
-                return list(zip(dists, docs, metas)), count, None
+                return chroma_store.hits(res), count, None
             except Exception as e:  # noqa: BLE001 - reported, never raised
                 error = str(e)
                 if attempt == 1:
@@ -331,82 +226,90 @@ class ConversationMemory:
                               "reconnect: %s", name, e)
         return [], None, error
 
-    def _archive_section(self, query: str, n: int, caller=None):
-        """(section text or None, record count or None, error text or None)
-        across every archive `caller` may read: its own conversations_<key>
-        (plus grants) and the legacy shared collection, whose hits are
-        labelled so the model knows they predate per-agent memory. One
-        embedding space, so distances merge honestly."""
+    def _lexical_index(self, name: str):
+        """BM25 over every record in collection `name`, built lazily from the
+        store and dropped whenever index_exchanges writes to it (a few
+        thousand short records rebuild in tens of milliseconds)."""
+        cached = self._lexical.get(name)
+        if cached is None:
+            got = self._col_for(name).get(include=["documents", "metadatas"])
+            ids = got.get("ids") or []
+            docs = got.get("documents") or []
+            metas = [m or {} for m in (got.get("metadatas") or [])]
+            bm25 = _bm25([tokens(d) for d in docs]) if docs else None
+            cached = self._lexical[name] = (bm25, ids, docs, metas)
+        return cached
+
+    def _lexical_rows(self, name: str, query: str, n: int) -> list:
+        bm25, ids, docs, metas = self._lexical_index(name)
+        words = tokens(query)
+        if bm25 is None or not words:
+            return []
+        scores = bm25.get_scores(words)
+        order = sorted(range(len(ids)), key=lambda i: -scores[i])[:n]
+        return [chroma_store.Hit(float(scores[i]), docs[i], metas[i], ids[i])
+                for i in order if scores[i] > 0]
+
+    def query_rows(self, query: str, n: int = None, caller=None) -> Rows:
+        """Dense and lexical hits from every archive `caller` may read: its
+        own conversations_<key> (plus grants) and the legacy shared
+        collection, whose rows are tagged legacy so the reader knows they
+        predate per-agent memory. One embedding space, so dense distances
+        merge honestly; BM25 scores do not merge across collections, which
+        is why the fusion normalises them per turn. Never raises: a broken
+        collection reports through `error` and the others still answer."""
+        n = n or cfg.MEMORY_SEARCH_RESULTS
         sources = [(cfg.agent_memory_collection(k), False)
                    for k in agents.readable_owners(caller)]
         sources.append((cfg.MEMORY_COLLECTION, True))
-        hits, total, error = [], 0, None
+        dense, lexical, total, error = [], [], 0, None
         for name, legacy in sources:
             rows, count, err = self._query_archive(name, query, n)
-            hits.extend((dist, doc, meta, legacy) for dist, doc, meta in rows)
             if count is None:
                 error = error or err
-            else:
-                total += count
-        if not hits:
-            return None, (None if error and not total else total), error
-        hits.sort(key=lambda h: h[0])
-        archived = []
-        for _, doc, meta, legacy in hits[:n]:
-            tag = " (from the shared archive, before per-agent memory)" \
-                if legacy else ""
-            archived.append(f"[{(meta or {}).get('date', 'unknown date')}{tag}] "
-                            f"{' '.join(doc.split())[:800]}")
-        return ("From archived conversations:\n"
-                + "\n\n".join(archived)), total, error
+                continue
+            total += count
+            if not count:
+                continue
+            try:
+                lex = self._lexical_rows(name, query, n)
+            except Exception as e:  # the dense hits are still worth returning
+                log.warning("lexical search of %s failed: %s", name, e)
+                lex = []
+            if legacy:
+                rows = [h._replace(meta={**h.meta, "legacy": True}) for h in rows]
+                lex = [h._replace(meta={**h.meta, "legacy": True}) for h in lex]
+            dense.extend(rows)
+            lexical.extend(lex)
+        dense.sort(key=lambda h: h.score)
+        lexical.sort(key=lambda h: -h.score)
+        return Rows(dense, lexical, None if error and not total else total, error)
 
-    def search(self, query: str, n: int = None, client=None,
-               caller=None) -> str:
+    def search(self, query: str, n: int = None, caller=None) -> str:
+        """The search_past_conversations tool. Ranks with the same fusion the
+        per-turn Background uses (context.fuse), so the tool can never
+        disagree with what the model was already shown — it only goes deeper
+        than the budget allowed."""
         n = n or cfg.MEMORY_SEARCH_RESULTS
-        sections = []
-
-        # Same-session recall first: staged lines are newer than any archive
-        # record and verbatim, so when both match, these are the better answer.
-        # Preferred path is the LLM read (handles queries the literal words
-        # can't match); the keyword scan backs it up.
-        recalled = (self.recall_staged(client, query, caller=caller)
-                    if client is not None else None)
-        if recalled:
-            sections.append("From earlier in this session (not yet archived):\n"
-                            + recalled)
-        else:
-            # No content from the read — the call failed (None) or it reported
-            # nothing relevant (""). Neither verdict ends the search any more.
-            # "Nothing relevant" used to be trusted as final, which made a
-            # false negative fatal: it suppressed this scan even though the
-            # literal words were sitting in the staged lines. The scan is free
-            # (no model call), so it runs either way and its hits are labelled
-            # by how much they can be trusted.
-            staged = self.search_staged(query, caller=caller)
-            if staged:
-                header = ("From earlier in this session (not yet archived)"
-                          if recalled is None else
-                          "Lines from earlier in this session that mention "
-                          "this (keyword matches — a closer read judged them "
-                          "irrelevant, so weigh them yourself)")
-                sections.append(header + ":\n" + "\n".join(staged))
-
-        archive, count, error = self._archive_section(query, n, caller=caller)
-        if archive:
-            sections.append(archive)
-
-        if sections:
-            if error:
-                sections.append("(The archived-conversation index could not be "
-                                "read just now, so only same-session memory was "
-                                "searched.)")
-            return "\n\n".join(sections)
-        if error:
-            return ("The archived-conversation index could not be read "
-                    f"({error}). Nothing in same-session memory matched "
-                    "either, so this isn't proof the topic never came up — "
-                    "the archive simply wasn't searchable.")
-        if count == 0:
-            return ("No archived conversations yet — long-term memory only fills "
-                    "up as older conversations age out of the recent window.")
+        rows = self.query_rows(query, n, caller)
+        ranked = [c for c in context.fuse(rows.dense, rows.lexical) if c.gate][:n]
+        if ranked:
+            out = []
+            for c in ranked:
+                tag = (" (from the shared archive, before per-agent memory)"
+                       if c.meta.get("legacy") else "")
+                out.append(f"[{context.when(c.meta)}{tag}] "
+                           f"{' '.join(c.doc.split())[:800]}")
+            text = "From past conversations:\n" + "\n\n".join(out)
+            if rows.error:
+                text += ("\n\n(Part of the conversation index could not be read "
+                         "just now, so this may be incomplete.)")
+            return text
+        if rows.error:
+            return ("The conversation index could not be read "
+                    f"({rows.error}), so this isn't proof the topic never came "
+                    "up — it simply wasn't searchable.")
+        if rows.count == 0:
+            return ("No past conversations are indexed yet — memory fills as "
+                    "we talk.")
         return "Nothing in past conversations matches that."

@@ -49,10 +49,14 @@ PENDING_DIR = DATA_DIR / "pending"
 # tool, never pasted into the conversation.
 KNOWLEDGE_DIR = BASE_DIR / "knowledge"
 KNOWLEDGE_MANIFEST = KNOWLEDGE_DIR / "manifest.json"  # {sha256: {source,title,...}}
-# Conversation memory: each persona keeps its OWN thread with the user, saved
-# after every turn and restored (trimmed) on the next boot. Isolation is
+# Conversation transcript: each persona keeps its OWN thread with the user,
+# saved after every turn and restored (trimmed) on the next boot. Isolation is
 # structural — Tom's file simply never contains Alice's turns — so "what did I
 # tell Alice?" is answered by asking Alice (ask_agent), not by filtering.
+# This cap is the DASHBOARD's transcript length, not what the model sees: the
+# model gets the last CONTEXT_RECENT_EXCHANGES verbatim plus a retrieved
+# Background ("Retrieval-first context" below), and every exchange is indexed
+# the moment it ends, so nothing falls off this window unremembered.
 HISTORY_MAX_MESSAGES = 40   # messages kept when persisting/restoring a thread
 
 
@@ -64,10 +68,9 @@ def history_path(key):
 # llm.py touches it (renames to .bak); scripts/seed_agent_memory.py mines the
 # session logs instead, which cover the same turns with attribution.
 HISTORY_PATH = DATA_DIR / "history.json"
-# Long-term memory: messages that fall off the window above are not lost — their
-# text is staged here, then consolidated (summarised by the model and embedded
-# into a persistent Chroma collection) so older conversations stay searchable
-# via the search_past_conversations tool.
+# Legacy: the pre-retrieval design staged text that fell off the window here
+# for a boot-time summary. Read once by ConversationMemory.migrate_pending,
+# which folds the batches into the exchange index and parks the file as .bak.
 MEMORY_PENDING_PATH = DATA_DIR / "memory_pending.json"
 # Legacy flat locations — only referenced by the one-time migration in notes.py.
 SUMMARY_DIR = DATA_DIR / "summaries"
@@ -140,11 +143,33 @@ KB_MEDIA_EXTS = (".mp4", ".m4a", ".mp3", ".mkv", ".mov", ".wav", ".webm")
 # live dictation: medium.en is noticeably better on jargon and worth it here.
 KB_MEDIA_MODEL = "small.en"
 
-# --- Long-term conversation memory --------------------------------------------
-MEMORY_COLLECTION = "conversations"  # Chroma collection of archived summaries
-MEMORY_MIN_MESSAGES = 6              # consolidate only once this many lines staged
-MEMORY_MAX_TOKENS = 700              # budget for one consolidation summary
-MEMORY_SEARCH_RESULTS = 3            # summaries returned per search
+# --- Conversation memory --------------------------------------------------------
+# Each persona's exchanges live in conversations_<key> (agent_memory_collection
+# above): one record per user↔assistant exchange, written the moment its turn
+# ends. The pre-isolation shared collection is read-only legacy — its summary
+# records are readable by every persona and labelled as such.
+MEMORY_COLLECTION = "conversations"  # legacy shared archive, read-only
+MEMORY_SEARCH_RESULTS = 3            # records the search_past_conversations tool returns
+
+# --- Retrieval-first context ---------------------------------------------------
+# What the model sees about the past, every turn: the last few exchanges
+# verbatim, then a Background block retrieved from the exchange index (dense +
+# BM25, recency-weighted — brain/context.py) and the knowledge base, filled to
+# a character budget (~4 chars per token). The thresholds are tuned from the
+# "context" logger's lines, not guessed; leave CONTEXT_DEBUG_LOG on until they
+# settle.
+CONTEXT_RECENT_EXCHANGES = 2      # previous exchanges sent verbatim; older ones reach the model by retrieval
+CONTEXT_SHORT_QUERY_WORDS = 8     # under this, the previous user turn joins the retrieval query: short turns are the follow-ups
+CONTEXT_CANDIDATES = 12           # rows per retriever per store before fusion — more than fits, so ranking has a choice
+CONTEXT_CONVO_CHARS = 4000        # ~1k tokens of past exchanges per turn
+CONTEXT_KB_CHARS = 3000           # ~750 tokens of reference chunks; also takes the conversation budget's leftover
+CONTEXT_HIT_CHARS = 800           # per-exchange cap so one long reply can't eat the budget
+CONTEXT_MIN_SIMILARITY = 0.25     # cosine gate for dense hits; MiniLM puts unrelated short texts at 0.0-0.2 — tune from the log
+CONTEXT_MIN_LEXICAL = 0.5         # BM25 gate, relative to the turn's best lexical hit — a small personal corpus has no stable absolute scale
+CONTEXT_LEXICAL_WEIGHT = 0.5      # BM25's share of the fused score: dense leads, exact names/tickers/numbers boost
+CONTEXT_RECENCY_WEIGHT = 0.3      # Park-style additive recency term: reorders relevant hits, never rescues irrelevant ones
+CONTEXT_RECENCY_HALF_LIFE_H = 168 # a week-old exchange keeps half its recency credit (Park et al. use ~5.8 days)
+CONTEXT_DEBUG_LOG = True          # candidate table + full block at DEBUG on the "context" logger; turn off once tuned
 
 # --- Text-to-speech (local, Windows SAPI via pyttsx3) ------------------------
 TTS_RATE = 175                # words per minute
@@ -364,8 +389,10 @@ CONVO_SYSTEM_BASE = (
     "conversational — a sentence or two unless more detail is clearly wanted. "
     "Do not use markdown, bullet points, or emoji; write plain spoken sentences. "
     "You have tools available. ALWAYS call the relevant tool to answer any factual "
-    "question — never answer from memory or conversation history when a tool can "
-    "provide the answer. "
+    "question about the CURRENT state of something — notes, email, trades, the "
+    "time, the system — never from memory or conversation history when a tool can "
+    "report it. What was said or decided in earlier conversations is different: "
+    "that may come from the Background section without a tool call. "
     "Ground rules about your own actions: every action you take happens through a "
     "tool call, and tools are synchronous — they return their result before you "
     "speak. From your perspective a tool call can never hang, run in the "
@@ -384,8 +411,10 @@ CONVO_SYSTEM_BASE = (
     "Past notes and conversation summaries record what was said at the time — "
     "treat them as claims, not established facts, especially self-diagnoses of "
     "bugs or system behaviour. "
-    "Your conversation history is saved and restored across restarts, so you may "
-    "remember earlier sessions — treat restored history as past conversations. "
+    "Only your last few exchanges with the user appear verbatim; earlier "
+    "conversations reach you through a Background section retrieved for each "
+    "turn — use it naturally, as your own memory, and call "
+    "search_past_conversations only when you need more than it shows. "
     "The system prefixes each user message with the local time it was spoken, "
     "like (1:47pm 8/20/2026). Use the stamps to notice time passing: when a "
     "message arrives hours or days after the previous one, earlier context may "
@@ -471,6 +500,10 @@ OVERRIDABLE = {
     # memory / search
     "HISTORY_MAX_MESSAGES": int, "SEARCH_RESULTS": int, "KB_SEARCH_RESULTS": int,
     "MEMORY_SEARCH_RESULTS": int,
+    # retrieval-first context
+    "CONTEXT_RECENT_EXCHANGES": int, "CONTEXT_CONVO_CHARS": int,
+    "CONTEXT_KB_CHARS": int, "CONTEXT_MIN_SIMILARITY": float,
+    "CONTEXT_DEBUG_LOG": bool,
     # headset button
     "MEDIA_KEEPALIVE": bool, "MEDIA_CLICK_DEDUPE_S": float,
 }

@@ -17,6 +17,7 @@ import unittest
 from types import SimpleNamespace
 
 from brain import agents
+from brain.memory import Rows
 import config as cfg
 from voice_agent import Agent
 from tests.llm_fixtures import (FakeBlock, make_claude as _make_claude,
@@ -106,9 +107,9 @@ class TestRunDelegatedTask(unittest.TestCase):
         ])
         callers = []
         c.memory = SimpleNamespace(
-            record_dropped=lambda dropped, owner: None,
-            search=lambda q, client=None, caller=None:
-                callers.append(caller) or "nothing found")
+            index_exchanges=lambda *a, **k: 0,
+            query_rows=lambda *a, **k: Rows([], [], 0, None),
+            search=lambda q, caller=None: callers.append(caller) or "nothing found")
         c.run_delegated_task("alice", "what did we discuss?")
         self.assertEqual(callers, ["alice"])
 

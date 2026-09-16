@@ -2,8 +2,8 @@
 trading equivalent). One definition each of the fakes that had grown a copy per
 test file — a new attribute on Claude means editing ONE builder, not five.
 
-Only genuinely shared shapes live here; a fake used by a single file (e.g.
-test_memory_staged's positional FakeBlock) stays local to that file.
+Only genuinely shared shapes live here; a fake used by a single file stays
+local to that file. Store doubles (FakeCol) live in store_fixtures.py.
 """
 
 from types import SimpleNamespace
@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from brain import agents
 import config as cfg
 from brain.llm.main import Claude
+from brain.memory import Rows
 from tools import ToolContext
 
 
@@ -66,8 +67,11 @@ def make_claude(responses=None, *, active=None, convo_model=_UNSET,
     c._model_overrides = {}
     c.store = None
     c.discord = None
-    c.kb = None
-    c.memory = SimpleNamespace(record_dropped=lambda dropped, owner: None)
+    # Retrieval seams answer empty, so converse() builds no Background and
+    # the exchange index write is a no-op — tests that care install their own.
+    c.kb = SimpleNamespace(query_rows=lambda *a, **k: [])
+    c.memory = SimpleNamespace(index_exchanges=lambda *a, **k: 0,
+                               query_rows=lambda *a, **k: Rows([], [], 0, None))
     c._ctx = ToolContext(
         active_agent=c.active,
         convo_model=(cfg.CONVO_MODELS["haiku"] if convo_model is _UNSET
@@ -88,3 +92,12 @@ def make_claude(responses=None, *, active=None, convo_model=_UNSET,
     c._load_history = _load
     c._write_agent_state = lambda: None  # no disk writes from tests
     return c
+
+
+def system_text(call):
+    """The system prompt of a captured messages.create call as one string,
+    whether it was sent as a str or as the block list system_blocks builds."""
+    system = call["system"]
+    if isinstance(system, str):
+        return system
+    return "\n".join(b.get("text", "") for b in system)

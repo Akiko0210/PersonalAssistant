@@ -100,6 +100,11 @@ def setup_logging():
         format="%(asctime)s %(name)-8s %(levelname)-7s %(message)s",
         handlers=handlers,
     )
+    # The per-turn context pull logs its candidate table and the full
+    # Background block at DEBUG; the retrieval thresholds are tuned from
+    # those lines, so the flag turns them on without flooding everything else.
+    logging.getLogger("context").setLevel(
+        logging.DEBUG if cfg.CONTEXT_DEBUG_LOG else logging.INFO)
     return logging.getLogger("agent")
 
 
@@ -128,11 +133,11 @@ class Agent:
         self.log.info(self.kb.ingest_folder(include_media=False))
         self.idle = IdleSound()  # "thinking" cue, looped during model calls
         self.llm = Claude(self.store, self.idle, self.kb)
-        # Fold any conversation text that aged out of the rolling window into
-        # long-term memory. No-op on most boots; one quick model call otherwise.
-        archived = self.llm.consolidate_memory()
-        if archived:
-            self.log.info(archived)
+        # Make sure every saved thread is in the exchange index (idempotent;
+        # a no-op after the first boot) and fold in any legacy staging file.
+        # This also loads the embedding model here, at startup, rather than
+        # on the first turn.
+        self.llm.index_saved_threads()
         self.log.info("loading speech model...")
         self.stt = Transcriber()
         self.log.info("startup took %.1fs", time.monotonic() - t0)

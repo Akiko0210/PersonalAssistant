@@ -45,6 +45,19 @@ def _hms(seconds) -> str:
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
 
+def cite(meta) -> str:
+    """A chunk's citation: "Title, p.12" for a book page, "Title, 14:32" for a
+    moment in a recording, or just the title. Shared by the search_knowledge
+    tool and the per-turn Background (brain/context.py)."""
+    title = meta.get("title", meta.get("source", "source"))
+    page, at = meta.get("page"), meta.get("t")
+    if page:
+        return f"{title}, p.{page}"
+    if at is not None:
+        return f"{title}, {_hms(at)}"  # a moment to rewatch
+    return str(title)
+
+
 def _focus_where(focus):
     """Chroma where= clause for a focus dict ({"strategy": ..., "underlying":
     ...}, values scalar or list), or None when there is nothing to filter."""
@@ -428,6 +441,36 @@ class KnowledgeStore:
         isolation is which collections get queried, not a filter)."""
         return (cfg.COMMON_COLLECTION, *agents.readable_owners(caller))
 
+    def query_rows(self, query: str, n: int = None, caller: str = None,
+                   focus: dict = None) -> list:
+        """Top-`n` chunks across every collection `caller` may read, as
+        chroma_store.Hit rows sorted by distance (same embedding space in
+        every collection, so distances are comparable). Focus is a HARD
+        filter on private collections (we tag those entries at write time)
+        and a SOFT one on common — reference chunks aren't reliably
+        strategy-tagged, so an empty filtered result falls back to unfiltered
+        rather than hiding the textbook. The structured seam behind both the
+        search_knowledge tool and the per-turn Background (brain/context.py)."""
+        n = n or cfg.KB_SEARCH_RESULTS
+        where = _focus_where(focus)
+        rows = []
+        for label in self._allowed_targets(caller):
+            col = self._col_for(_collection_name(label))
+            count = col.count()
+            if count == 0:
+                continue
+            kwargs = {"query_texts": [query], "n_results": min(n, count)}
+            if where is not None:
+                res = col.query(**kwargs, where=where)
+                if (label == cfg.COMMON_COLLECTION
+                        and not res.get("documents", [[]])[0]):
+                    res = col.query(**kwargs)
+            else:
+                res = col.query(**kwargs)
+            rows.extend(chroma_store.hits(res))
+        rows.sort(key=lambda h: h.score)
+        return rows[:n]
+
     def search(self, query: str, n: int = None, caller: str = None,
                focus: dict = None) -> str:
         n = n or cfg.KB_SEARCH_RESULTS
@@ -441,48 +484,11 @@ class KnowledgeStore:
             return ("No trading knowledge has been ingested yet. Add PDFs, text, "
                     "or video files to the knowledge folder and run "
                     "python voice_agent.py --ingest.")
-        # Same embedding space in every collection, so distances are
-        # comparable: query each readable collection, merge, keep the top n.
-        # Focus is a HARD filter on private collections (we tag those entries
-        # at write time) and a SOFT one on common — reference chunks aren't
-        # reliably strategy-tagged, so an empty filtered result falls back to
-        # unfiltered rather than hiding the textbook.
-        where = _focus_where(focus)
-        hits = []
-        for label in allowed:
-            col = self._col_for(_collection_name(label))
-            count = col.count()
-            if count == 0:
-                continue
-            kwargs = {"query_texts": [query], "n_results": min(n, count)}
-            if where is not None:
-                res = col.query(**kwargs, where=where)
-                if (label == cfg.COMMON_COLLECTION
-                        and not res.get("documents", [[]])[0]):
-                    res = col.query(**kwargs)
-            else:
-                res = col.query(**kwargs)
-            docs = res.get("documents", [[]])[0]
-            metas = res.get("metadatas", [[]])[0]
-            dists = res.get("distances", [[]])[0]
-            for doc, meta, dist in zip(docs, metas, dists):
-                hits.append((dist, doc, meta or {}))
-        if not hits:
+        rows = self.query_rows(query, n, caller, focus)
+        if not rows:
             return "I couldn't find anything about that in your trading knowledge."
-        hits.sort(key=lambda h: h[0])
-        out = []
-        for _, doc, meta in hits[:n]:
-            title = meta.get("title", meta.get("source", "source"))
-            page, at = meta.get("page"), meta.get("t")
-            if page:
-                cite = f"{title}, p.{page}"
-            elif at is not None:
-                cite = f"{title}, {_hms(at)}"  # a moment to rewatch
-            else:
-                cite = title
-            snippet = " ".join(doc.split())[:400]
-            out.append(f"[{cite}] {snippet}")
-        return "\n\n".join(out)
+        return "\n\n".join(f"[{cite(meta)}] {' '.join(doc.split())[:400]}"
+                           for _, doc, meta, _ in rows)
 
     def list_sources(self) -> str:
         manifest = self._load_manifest()
