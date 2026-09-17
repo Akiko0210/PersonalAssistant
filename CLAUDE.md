@@ -74,8 +74,9 @@ yourself editing them, stop and reconsider.
 - Several Pythons per machine, only one with the deps: `.claude/launch.json`
   pins it (Windows Store Python on the PC, `.venv` on the Mac) — keep the pin
   pointed at whichever interpreter has the deps on the machine you're on.
-- `data/` is Dropbox-synced: use `lib/atomic_io` for state files (it retries
-  Windows sharing violations); avoid chatty disk writes.
+- `data/` is the user's own state and is gitignored: use `lib/atomic_io` for
+  state files (atomic temp-and-rename, with a retry for Windows file-lock
+  violations); avoid chatty disk writes.
 - The single-instance lock (`lib/single_instance/`) means agent-side
   scripts and a running agent are mutually exclusive; probing the lock
   deletes the lock file when free (`web/server.py` memoises the probe).

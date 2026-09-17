@@ -18,8 +18,8 @@ def _load_wav(path):
 
 
 # Decoded once per path for the life of the process — the cue plays on every
-# model call, and re-reading a Dropbox-synced file each time would be the kind
-# of chatty disk access the project avoids.
+# model call, and re-reading and re-decoding the file each time would be the
+# kind of chatty disk access the project avoids.
 _cache = {}
 
 

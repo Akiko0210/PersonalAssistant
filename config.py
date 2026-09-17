@@ -88,9 +88,11 @@ DISCORD_LOG_PATH = DISCORD_DIR / "discord_log.md"
 DISCORD_TRADES_PATH = DISCORD_DIR / "trades.txt"
 
 # --- Gmail (email tools) ------------------------------------------------------
-# OAuth artifacts live in data/ so one browser consent (python -m lib.gmail_auth)
-# syncs to the other machine via Dropbox. The client secret comes from the
-# Google Cloud console (Auth Platform -> Clients -> Download JSON).
+# OAuth artifacts live in data/ with the rest of the user's own state, so they
+# are gitignored and a credential can never enter version control. The consent
+# (python -m lib.gmail_auth) is per machine; copy gmail_token.json across by
+# hand to skip repeating it. The client secret comes from the Google Cloud
+# console (Auth Platform -> Clients -> Download JSON).
 GMAIL_CLIENT_SECRET_PATH = DATA_DIR / "gmail_client_secret.json"
 GMAIL_TOKEN_PATH = DATA_DIR / "gmail_token.json"
 # The consent flow's loopback port. Deliberately NOT DASHBOARD_PORT: both
@@ -192,7 +194,8 @@ TTS_VOICE = None              # None = system default; or a voice-name substring
 # Hugging Face the first time the agent talks (~60 MB), the way faster-whisper
 # fetches its model. Others: `python -m piper.download_voices en_US-ryan-medium
 # --data-dir <PIPER_VOICE_DIR>`; TTS_VOICE / a persona's tts_voice then pick one
-# by substring ("ryan"). Kept out of data/: models are not for Dropbox.
+# by substring ("ryan"). Kept out of data/: a ~60 MB model is a cache, not
+# the user's state.
 PIPER_VOICE = "en_US-lessac-medium"
 PIPER_VOICE_DIR = Path.home() / ".cache" / "piper"
 

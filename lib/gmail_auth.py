@@ -44,8 +44,7 @@ NOT_AUTHENTICATED = ("Google account not authenticated — finish the "
 
 
 def _save(creds):
-    # Atomic write: data/ is Dropbox-synced, and a torn token file means a
-    # mysterious re-consent later.
+    # Atomic write: a torn token file means a mysterious re-consent later.
     write_text_atomic(cfg.GMAIL_TOKEN_PATH, creds.to_json())
     try:
         os.chmod(cfg.GMAIL_TOKEN_PATH, 0o600)  # best-effort; no-op on Windows

@@ -73,10 +73,11 @@ def _replace_with_retry(tmp, path, attempts=6, first_delay=0.05):
 
     Unlike the in-place write this module replaced, os.replace needs delete
     access on the destination — and fails with PermissionError while any other
-    process holds the file open without FILE_SHARE_DELETE. This project's data/
-    lives in a Dropbox-synced folder, where the sync client (and AV/indexers)
-    routinely holds JSON files open for a moment; those holds clear in
-    milliseconds, so a few quick retries turn a spurious crash into a wait.
+    process holds the file open without FILE_SHARE_DELETE. On Windows an AV
+    scanner or the Search indexer routinely holds a JSON file open for a
+    moment, as would any file-sync client pointed at data/; those holds clear
+    in milliseconds, so a few quick retries turn a spurious crash into a
+    wait.
     Total worst-case wait ~1.5s before the PermissionError propagates."""
     delay = first_delay
     for attempt in range(attempts):

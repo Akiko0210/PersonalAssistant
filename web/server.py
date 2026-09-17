@@ -285,7 +285,7 @@ def validate_payload(payload):
 
 # The lock probe below is cheap but not free: when no agent holds the lock, the
 # probe takes it and releasing DELETES the lock file. The sidebar polls it from
-# every open tab, in a folder Dropbox is watching — so the answer is memoised
+# every open tab, so the answer is memoised
 # for a moment. Staleness is bounded by the TTL and harmless: this drives
 # display and the standalone controls' error message. The ingest job does NOT
 # use this — it proves the agent is absent by taking the real lock

@@ -72,7 +72,7 @@ class NoteStore:
 
     # --- index helpers -------------------------------------------------------
     def _load_index(self):
-        # A corrupt index (Dropbox conflict copy, pre-atomic-write crash) must
+        # A corrupt index (a pre-atomic-write crash, a half-copied file) must
         # never block startup — fall back to empty; --resync rebuilds it.
         return read_json(cfg.INDEX_PATH, {},
                          warn=lambda e: log.warning(
