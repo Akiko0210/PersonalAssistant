@@ -42,6 +42,7 @@ import argparse
 import json
 import logging
 import re
+import socket
 import sys
 import threading
 import time
@@ -1101,16 +1102,38 @@ class Handler(BaseHTTPRequestHandler):
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
-    # Windows quirk: with the inherited allow_reuse_address=True a second bind
-    # on the same port silently SUCCEEDS, so a port conflict would go
-    # undetected instead of producing the honest error/soft-fail below.
-    allow_reuse_address = False
+    # The stdlib default (True), restored deliberately — see _port_is_serving
+    # for why the bind alone can't be trusted to detect a real conflict.
+    allow_reuse_address = True
+
+
+def _port_is_serving(port, timeout=0.2):
+    """True when something is already LISTENING on `port`.
+
+    The bind alone cannot answer this portably, and both ways of asking it
+    are wrong on one OS. With allow_reuse_address=False a bind fails on
+    macOS/Linux merely because the LAST dashboard's closed connections are
+    still in TIME_WAIT — and the page polls constantly, so there always are
+    some: restarting the agent within the minute came up with no web UI at
+    all (session_2026-09-16.log 00:39 and 01:12). With it True, a second bind
+    on Windows silently succeeds and a genuine conflict goes undetected.
+
+    A connection attempt separates the two cases on every OS: only a live
+    listener accepts one, while TIME_WAIT remnants refuse."""
+    if not port:
+        return False  # port 0 means "any free port"; there is nothing to probe
+    with socket.socket() as probe:
+        probe.settimeout(timeout)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
 def build_server(port, agent=None):
     """The dashboard server, not yet serving. `agent` is the live Agent when
     embedded in the agent process, None standalone; Handler reads it via
-    self.server.agent. Raises OSError if the port can't be bound."""
+    self.server.agent. Raises OSError if the port is already served or can't
+    be bound."""
+    if _port_is_serving(port):
+        raise OSError(f"port {port} is already serving")
     server = _Server(("127.0.0.1", port), Handler)
     server.agent = agent
     return server
