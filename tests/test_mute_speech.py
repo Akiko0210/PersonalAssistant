@@ -100,6 +100,7 @@ def make_agent(announcer_available=True, **tts_kwargs):
     agent.hush = threading.Event()
     agent.silence = threading.Event()
     agent.resume_speech = threading.Event()
+    agent.typed = queue.Queue()   # say() ends the reply when one is waiting
     agent.status = "conversation_mode"
     agent.tts = FakeTTS(**tts_kwargs)
     agent.announcer = FakeAnnouncer(available=announcer_available)
@@ -131,6 +132,30 @@ class TestClickWhileSpeaking(unittest.TestCase):
         self.assertFalse(interrupted)
         self.assertEqual(agent.tts.events, ["begin", "pause", "resume"])
         self.assertNotIn("stop", agent.tts.events)  # nothing was discarded
+
+    def test_a_typed_message_ends_the_reply(self):
+        # Sending from the dashboard is taking the floor: the agent stops
+        # talking and answers it. It used to finish the whole reply first.
+        agent = make_agent()
+        agent.tts.on_poll = lambda: agent.typed.put(("new question", None))
+
+        interrupted = agent.say("the whole answer")
+
+        self.assertIn("stop", agent.tts.events)
+        # False: nothing was captured for the mic to replay — the message is
+        # already queued, so _after_reply may flush and deliver as usual.
+        self.assertFalse(interrupted)
+        self.assertEqual(agent.typed.get_nowait(), ("new question", None))
+
+    def test_the_folder_question_is_not_cut_short_by_a_typed_message(self):
+        # commands=False protects that exchange: stopping mid-question would
+        # strand the prepared note with nowhere to file it.
+        agent = make_agent()
+        agent.tts.on_poll = lambda: agent.typed.put(("new question", None))
+
+        agent.say("Which folder?", commands=False)
+
+        self.assertNotIn("stop", agent.tts.events)
 
     def test_note_gesture_ends_the_reply(self):
         agent = make_agent()

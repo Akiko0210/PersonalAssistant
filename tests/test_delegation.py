@@ -184,6 +184,7 @@ class _Shell:
                                    exception=lambda *a: None)
         self.interject = threading.Event()
         self.interjections = queue.Queue()
+        self.typed = queue.Queue()  # delivery re-arms the wake for these
 
     def say(self, text, **kw):
         self.spoken.append((text, kw))
@@ -287,6 +288,15 @@ class TestInterjectionDelivery(unittest.TestCase):
         shell.interject.set()
         Agent._deliver_interjections(shell)
         self.assertFalse(shell.interject.is_set())
+
+    def test_a_waiting_typed_message_keeps_the_wake_armed(self):
+        # The event is shared with the dashboard's queue; clearing it here
+        # once swallowed a message typed mid-reply (see test_web_controls).
+        shell = _Shell()
+        shell.typed.put(("hello", None))
+        shell.interject.set()
+        Agent._deliver_interjections(shell)
+        self.assertTrue(shell.interject.is_set())
 
     def test_voice_restored_even_when_the_save_flow_raises(self):
         shell = _Shell(active="alice")
