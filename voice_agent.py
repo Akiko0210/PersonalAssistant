@@ -994,6 +994,11 @@ class Agent:
 
     # --- main loop -----------------------------------------------------------
     def run(self):
+        # Deaf until asked (cfg.START_MUTED): the mic opens on the first click,
+        # never on its own. Set before capture starts, so not one frame of a
+        # room the user isn't in reaches the model.
+        if cfg.START_MUTED:
+            self.audio.muted.set()
         self.audio.start()
         self.start_hotkeys()
         # The dashboard — live controls included — is served from inside this
@@ -1006,7 +1011,8 @@ class Agent:
         )
         hat = agents.AGENTS[self.llm.active]
         self._use_voice(hat)  # also refreshes the announcer's avoid_voice
-        self.say(f"Voice agent ready. {hat['name']} speaking.",
+        muted = " Muted — click once to talk." if self.audio.muted.is_set() else ""
+        self.say(f"Voice agent ready. {hat['name']} speaking.{muted}",
                  voice=False, commands=False)
         try:
             while self.running:

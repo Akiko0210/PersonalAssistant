@@ -117,6 +117,11 @@ SPEECH_PAD_MS = 300           # pre-roll kept before detected speech
 TRIGGER_RATIO = 0.6           # fraction of padded window that must be voiced
 MAX_UTTERANCE_S = 30          # safety cap on a single captured utterance
 
+# Start deaf. An agent left running with no headset plugged in hears the room
+# (and its own speakers), answers it, and burns tokens unattended — the failure
+# that put this here. One click, or the dashboard's mute button, opens the mic.
+START_MUTED = True
+
 # --- Speech-to-text (local, faster-whisper) ----------------------------------
 WHISPER_MODEL = "small.en"    # base.en is faster, medium.en more accurate
 WHISPER_DEVICE = "cpu"        # set to "cuda" if you have a supported GPU
@@ -495,6 +500,8 @@ OVERRIDABLE = {
     "MEMORY_SEARCH_RESULTS": int,
     # headset button
     "MEDIA_KEEPALIVE": bool, "MEDIA_CLICK_DEDUPE_S": float,
+    # microphone
+    "START_MUTED": bool,
 }
 
 # Snapshot of the coded defaults, taken before any override is applied, so the

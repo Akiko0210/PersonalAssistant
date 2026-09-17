@@ -198,6 +198,10 @@ TUNABLES = [
     dict(key="MEDIA_CLICK_DEDUPE_S", group="Headset button", label="Click dedupe",
          type="float", min=0.05, max=1.0, step=0.05, unit="s",
          help="A press arriving on both listener channels within this window counts once."),
+    # -- Microphone -----------------------------------------------------------
+    dict(key="START_MUTED", group="Microphone", label="Start muted",
+         type="bool",
+         help="The agent starts deaf and waits for a click. Off means it listens the moment it starts — which, with no headset on, is how it ends up talking to the room."),
 ]
 
 TUNABLES_BY_KEY = {t["key"]: t for t in TUNABLES}

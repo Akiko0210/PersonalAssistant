@@ -30,8 +30,15 @@ class FakeAudio:
         self._utterances = list(utterances or [])
         self._poll = list(poll_frames or [])
         self.muted = threading.Event()
+        self.started = False
         self.pushed = []
         self.flushed = 0
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.started = False
 
     def collect_utterance(self, interrupt=None, endpoint_ms=None, wake=None):
         return self._utterances.pop(0) if self._utterances else None

@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 import config as cfg
+import voice_agent
 from voice_agent import Agent
 from tests.agent_fixtures import FakeAudio
 
@@ -270,6 +271,36 @@ class TestMuteTakesEffectImmediately(unittest.TestCase):
         agent._on_media_gesture(1)
         self.assertTrue(agent.resume_speech.is_set())
         self.assertFalse(agent.silence.is_set())
+
+
+class TestStartsMuted(unittest.TestCase):
+    """Startup opens the microphone only when asked to. An agent started with
+    no headset on used to hear the room, answer it, and bill for it."""
+
+    def _run(self, start_muted):
+        agent = make_agent()
+        agent.running = False           # run() sets up, then exits the loop
+        agent.llm = mock.Mock(active="alice")
+        agent.interjections = queue.Queue()
+        agent._delegation_threads = []
+        agent._media = None
+        agent.start_hotkeys = lambda: None
+        agent._use_voice = lambda hat: None
+        agent.say = mock.Mock(return_value=False)
+        with mock.patch.object(cfg, "START_MUTED", start_muted),                 mock.patch.object(voice_agent, "dashboard") as web:
+            web.serve_embedded.return_value = mock.Mock()
+            agent.run()
+        return agent
+
+    def test_muted_before_the_microphone_even_opens(self):
+        agent = self._run(True)
+        self.assertTrue(agent.audio.muted.is_set())
+        self.assertIn("Muted", agent.say.call_args[0][0])
+
+    def test_opt_out_starts_listening(self):
+        agent = self._run(False)
+        self.assertFalse(agent.audio.muted.is_set())
+        self.assertNotIn("Muted", agent.say.call_args[0][0])
 
 
 class TestSilencingGestures(unittest.TestCase):

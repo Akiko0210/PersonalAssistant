@@ -150,6 +150,12 @@ because the wireless dongle only passes on the *next* click of a double/triple
 if the host really stops (see `docs/MEDIA_CONTROL.md`), and the reply picks up again
 as soon as the click turns out to be a single.
 
+**The agent starts muted** — it greets you with "Muted, click once to talk"
+and waits. Starting deaf is what stops a forgotten agent, running with no
+headset plugged in, from hearing the room, answering it, and spending tokens
+all afternoon. Turn it off with **Start muted** on the dashboard's settings
+page (`START_MUTED`) if you would rather it listen from the first second.
+
 Muting while the agent is still *thinking* doesn't cancel anything either —
 the question you already asked is answered and spoken as usual; you just
 aren't being listened to while it happens. Double-click (notetaking) and
