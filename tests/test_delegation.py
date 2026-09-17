@@ -188,8 +188,8 @@ class _Shell:
         self.spoken.append((text, kw))
         return False
 
-    def _save_pending_note(self, pending, saver=None):
-        self.saved.append((pending, saver))
+    def _save_pending_note(self, pending, saver=None, excerpt=None):
+        self.saved.append((pending, saver, excerpt))
 
     def _start_delegation(self, key, task):
         self.delegated.append((key, task))
@@ -260,10 +260,12 @@ class TestInterjectionDelivery(unittest.TestCase):
     def test_note_result_announces_then_runs_the_folder_flow(self):
         shell = _Shell()
         note = {"title": "T", "content": "b", "spoken": "", "category": None}
-        shell.interjections.put({"agent": "bob", "text": "ready", "note": note})
+        shell.interjections.put({"agent": "bob", "text": "ready", "note": note,
+                                 "excerpt": "user: save it"})
         Agent._deliver_interjections(shell)
         self.assertIn("ready to file", shell.spoken[0][0])
-        self.assertEqual(shell.saved, [(note, "Bob")])
+        # The hand-off snapshot travels with the note into the save.
+        self.assertEqual(shell.saved, [(note, "Bob", "user: save it")])
 
     def test_deferred_while_muted(self):
         shell = _Shell()
@@ -289,7 +291,7 @@ class TestInterjectionDelivery(unittest.TestCase):
 
     def test_voice_restored_even_when_the_save_flow_raises(self):
         shell = _Shell(active="alice")
-        def boom(pending, saver=None):
+        def boom(pending, saver=None, excerpt=None):
             raise RuntimeError("folder dialogue exploded")
         shell._save_pending_note = boom
         shell.interjections.put({"agent": "bob", "text": "r",
@@ -321,7 +323,7 @@ class TestAfterReply(unittest.TestCase):
         shell.llm.converse = lambda text: "Done."
         Agent._after_reply(shell, interrupted=False)
         self.assertEqual(shell.switched, ["bob"])
-        self.assertEqual(shell.saved, [(note, "Bob")])  # drained, not leaked
+        self.assertEqual(shell.saved, [(note, "Bob", None)])  # drained, not leaked
 
     def test_dropped_switch_is_announced_aloud(self):
         # The other half of the incident: the drop itself was log-only, so the
@@ -340,6 +342,24 @@ class TestAfterReply(unittest.TestCase):
         shell.llm.converse = lambda text: "Handled."
         Agent._after_reply(shell, interrupted=False)
         self.assertEqual(shell.switched, ["bob"])  # one hand-off per turn
+
+
+class TestDelegationSnapshot(unittest.TestCase):
+    """A delegated note's transcript is the conversation at the HAND-OFF, not
+    whatever the user went on to discuss while the worker ran."""
+
+    def test_excerpt_is_taken_at_hand_off_not_at_filing(self):
+        shell = _Shell()
+        shell._delegation_threads = []
+        live = ["user: save this as a note"]
+        shell.llm.conversation_excerpt = lambda: live[0]
+        shell.llm.run_delegated_task = (
+            lambda key, task: ("ready", {"title": "T", "content": "b"}))
+        Agent._start_delegation(shell, "bob", "save it")
+        live[0] = "user: unrelated talk while Bob worked"
+        shell._delegation_threads[0].join(timeout=5)
+        item = shell.interjections.get_nowait()
+        self.assertEqual(item["excerpt"], "user: save this as a note")
 
 
 if __name__ == "__main__":

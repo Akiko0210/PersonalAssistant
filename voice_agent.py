@@ -529,12 +529,19 @@ class Agent:
         pokes self.interject so an idle wait ends promptly."""
         hat = agents.AGENTS[key]
         self.log.info("delegating to %s: %.120s", hat["name"], task)
+        # Snapshot the conversation NOW, at the hand-off: that is the exchange
+        # a note the worker prepares was drawn from. Snapshotting when the
+        # note came back for filing attached whatever the user discussed
+        # meanwhile to a note it had nothing to do with, and made two
+        # back-to-back saves indistinguishable (session_2026-09-06.log,
+        # 09-09 15:02 and 20:04).
+        excerpt = self.llm.conversation_excerpt()
 
         def work():
             try:
                 text, note = self.llm.run_delegated_task(key, task)
                 self.interjections.put({"agent": key, "text": text,
-                                        "note": note})
+                                        "note": note, "excerpt": excerpt})
             except Exception as e:  # noqa: BLE001 - a lost task must be reported, not raised
                 self.log.exception("delegated task for %s failed", hat["name"])
                 self.interjections.put({
@@ -596,7 +603,8 @@ class Agent:
             try:
                 self.say(f"{hat['name']} here — your note is ready to file.",
                          voice=False, commands=False)
-                self._save_pending_note(note, saver=hat["name"])
+                self._save_pending_note(note, saver=hat["name"],
+                                        excerpt=item.get("excerpt"))
             finally:
                 self._use_voice(active)
             return False
@@ -901,12 +909,15 @@ class Agent:
         if not interrupted:
             self.audio.flush()
 
-    def _save_pending_note(self, pending: dict, saver: str = None):
+    def _save_pending_note(self, pending: dict, saver: str = None,
+                           excerpt: str = None):
         """Save a note the model prepared from the conversation (via the
         save_conversation_note tool): confirm the folder through the usual spoken
         dialogue, then file it exactly like a recorded note. `saver` names the
         persona that prepared it when that wasn't the active one (a delegated
-        background save), so the shared history records who actually did it."""
+        background save), so the shared history records who actually did it;
+        `excerpt` is that save's conversation snapshot, taken at the hand-off
+        (see _start_delegation) — a direct save snapshots here, now."""
         title = pending["title"]
         content = pending["content"]
         spoken = pending.get("spoken") or f"I've saved a note called {title}."
@@ -918,7 +929,8 @@ class Agent:
         # regenerated, and the summary file already holds the note. (Early
         # versions wrote `content` here too, so transcript == summary and the
         # actual spoken exchange was silently lost.)
-        excerpt = self.llm.conversation_excerpt()
+        if excerpt is None:
+            excerpt = self.llm.conversation_excerpt()
         self.store.append_transcript(
             note_id,
             "(Saved from conversation — the recent exchange this note was "

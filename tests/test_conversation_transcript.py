@@ -95,6 +95,16 @@ class TestSavePendingNoteTranscript(unittest.TestCase):
         # ...while the summary file still gets the note body.
         self.assertIn("The polished note", agent.store.summaries["note_test"][1])
 
+    def test_given_excerpt_wins_over_the_live_history(self):
+        # A delegated save passes the hand-off snapshot; the live history has
+        # moved on by the time the folder question is asked.
+        agent = self.make_agent("user: later, unrelated talk")
+        agent._save_pending_note({"title": "t", "content": "body"}, saver="Bob",
+                                 excerpt="user: save this as a note")
+        tx = agent.store.transcripts["note_test"]
+        self.assertIn("save this as a note", tx)
+        self.assertNotIn("unrelated talk", tx)
+
     def test_empty_history_falls_back_to_content(self):
         agent = self.make_agent("")
         agent._save_pending_note({"title": "t", "content": "note body"})
