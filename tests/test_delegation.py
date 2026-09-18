@@ -109,7 +109,7 @@ class TestRunDelegatedTask(unittest.TestCase):
         c.memory = SimpleNamespace(
             index_exchanges=lambda *a, **k: 0,
             query_rows=lambda *a, **k: Rows([], [], 0, None),
-            search=lambda q, caller=None: callers.append(caller) or "nothing found")
+            search=lambda q, caller=None, **kw: callers.append(caller) or "nothing found")
         c.run_delegated_task("alice", "what did we discuss?")
         self.assertEqual(callers, ["alice"])
 

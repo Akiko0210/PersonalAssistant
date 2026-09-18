@@ -13,7 +13,8 @@ from unittest import mock
 
 import config as cfg
 from brain import context
-from brain.memory import Rows
+from brain.memory import Rows, exchange_id
+from stores import chroma_store
 from stores.chroma_store import Hit
 from tests.llm_fixtures import (make_claude, system_text, text_reply,
                                 tool_reply)
@@ -22,9 +23,10 @@ H = 3600.0
 NOW = 1_800_000_000.0  # any fixed epoch; ages are relative to it
 
 
-def dense(id_, doc, sim, age_h=0.0, **meta):
-    """A dense hit at cosine `sim` (Chroma distance is 2 - 2cos) aged `age_h`."""
-    return Hit(2 * (1 - sim), doc, {"epoch": NOW - age_h * H, **meta}, id_)
+def dense(id_, doc, sim, age_h=0.0, vec=None, **meta):
+    """A dense hit at cosine `sim` (the store is cosine space: distance is
+    1 - cos) aged `age_h`, optionally carrying its stored vector."""
+    return Hit(1 - sim, doc, {"epoch": NOW - age_h * H, **meta}, id_, vec)
 
 
 def lexical(id_, doc, bm25, age_h=0.0, **meta):
@@ -34,11 +36,12 @@ def lexical(id_, doc, bm25, age_h=0.0, **meta):
 def fake_memory(dense_hits=(), lexical_hits=(), error=None):
     calls = []
 
-    def query_rows(query, n, caller):
+    def query_rows(query, n, caller, **kwargs):
         calls.append((query, n, caller))
         return Rows(list(dense_hits), list(lexical_hits), 1, error)
     return SimpleNamespace(query_rows=query_rows, calls=calls,
-                           index_exchanges=lambda *a, **k: 0)
+                           index_exchanges=lambda *a, **k: 0,
+                           backfill_keys=lambda *a, **k: (0, 0))
 
 
 def fake_kb(hits=()):
@@ -46,11 +49,16 @@ def fake_kb(hits=()):
 
 
 class TestScoring(unittest.TestCase):
-    def test_similarity_from_squared_l2_on_unit_vectors(self):
+    def test_similarity_follows_the_collections_space(self):
+        # chromadb gives a sentence-transformer collection cosine space, so
+        # d = 1 - cos. The old squared-L2 formula turned every distance into
+        # 0.5 + cos/2 and the relevance gate never fired (2026-09-18).
+        self.assertEqual(chroma_store.SPACE, "cosine")
         self.assertAlmostEqual(context.similarity(0), 1.0)
-        self.assertAlmostEqual(context.similarity(1), 0.5)
-        self.assertAlmostEqual(context.similarity(2), 0.0)
-        self.assertEqual(context.similarity(2.3), 0.0)  # drift past 2 clamps
+        self.assertAlmostEqual(context.similarity(0.5), 0.5)
+        self.assertAlmostEqual(context.similarity(1), 0.0)
+        self.assertEqual(context.similarity(1.1), 0.0)  # HNSW drift clamps
+        self.assertAlmostEqual(context.similarity(1, space="l2"), 0.5)
 
     def test_recency_halves_at_the_half_life_and_is_zero_when_unknown(self):
         with mock.patch.object(cfg, "CONTEXT_RECENCY_HALF_LIFE_H", 168):
@@ -212,6 +220,53 @@ class TestConverseSeams(unittest.TestCase):
         self.assertEqual(owner, "alice")
         self.assertFalse(skip)
         self.assertEqual(msgs[0]["content"], "remember this")
+
+
+class TestRender(unittest.TestCase):
+    def test_an_approximate_stamp_reads_on_or_before_with_no_age(self):
+        # The old staging file stamped text at flush time; the model once
+        # read such a stamp as "9:43am today" for words from the previous
+        # morning (2026-09-17 12:01).
+        exact = dense("x", "user: a\nassistant: b", 0.9, age_h=2,
+                      ts="2026-09-17T09:43:11-07:00", approx=False)
+        approx = dense("y", "user: I\nassistant: morning", 0.9, age_h=2,
+                       ts="2026-09-17T09:43:11", approx=True)
+        pull = context.build_context("q", owner="alice", kb=fake_kb(), now=NOW,
+                                     memory=fake_memory([exact, approx]))
+        self.assertIn('when="9:43am 9/17/2026" age="2 hours ago"', pull.block)
+        self.assertIn('when="on or before 9:43am 9/17/2026">', pull.block)
+
+
+class TestRedundancy(unittest.TestCase):
+    def test_the_fill_penalises_a_near_duplicate_of_what_it_already_kept(self):
+        # Nine exchanges *about* keeping a list once filled the budget ahead
+        # of the list itself (2026-09-17). Two near-duplicates at the top, a
+        # distinct exchange below them, and room for two.
+        a = dense("dup1", "user: are you keeping my list?\nassistant: yes", 0.60,
+                  vec=[1.0, 0.0, 0.0])
+        b = dense("dup2", "user: is my list going?\nassistant: it is", 0.58,
+                  vec=[0.99, 0.14, 0.0])
+        c = dense("list", "user: item two\nassistant: Your list now: one, two", 0.50,
+                  vec=[0.0, 1.0, 0.0])
+
+        def kept(lam):
+            with mock.patch.multiple(cfg, CONTEXT_MMR_LAMBDA=lam,
+                                     CONTEXT_CONVO_CHARS=95, CONTEXT_HIT_CHARS=800):
+                pull = context.build_context("q", owner="alice", kb=fake_kb(), now=NOW,
+                                             memory=fake_memory([a, b, c]))
+            return [x.id for x in pull.candidates if x.kept]
+        self.assertEqual(kept(1.0), ["dup1", "dup2"])  # plain score order
+        self.assertEqual(kept(0.7), ["dup1", "list"])  # the twin pays for its twin
+
+
+class TestTailSharing(unittest.TestCase):
+    def test_the_verbatim_tail_is_shared_with_the_search_tool(self):
+        c = make_claude(history=[
+            {"role": "user", "content": "q0", "ts": "2026-09-17T09:00:00-07:00"},
+            {"role": "assistant", "content": [{"type": "text", "text": "a0"}]}])
+        c.memory = fake_memory()
+        c.converse("now")
+        self.assertEqual(c._ctx.tail_ids, {exchange_id("alice", c.history[0])})
 
 
 if __name__ == "__main__":

@@ -534,14 +534,17 @@ class Claude:
         self._save_history()
 
     def index_saved_threads(self):
-        """Boot: make sure every persona's saved thread is in its exchange
-        index (idempotent — records already present are skipped), then fold
-        in the pre-retrieval staging file once. Also the embedding model's
-        warm-up: without it the first turn paid the cold load (~26 s on
-        2026-08-26). Failures are logged and retried next boot; a thread
+        """Boot: bring the saved records up to the current shape (assistant
+        companion keys, approximate-time stamps — memory.backfill_keys, a
+        one-time cost), make sure every persona's saved thread is in its
+        exchange index (idempotent — records already present are skipped),
+        then fold in the pre-retrieval staging file once. Also the embedding
+        model's warm-up: without it the first turn paid the cold load (~26 s
+        on 2026-08-26). Failures are logged and retried next boot; a thread
         that isn't indexed is still on disk."""
         t0 = time.monotonic()
         try:
+            keyed = [self.memory.backfill_keys(k) for k in agents.AGENTS]
             n = sum(self.memory.index_exchanges(hist.load(cfg.history_path(k)), k)
                     for k in agents.AGENTS)
             n += self.memory.migrate_pending()
@@ -549,7 +552,11 @@ class Claude:
             log.warning("exchange index backfill failed (will retry next "
                         "boot): %s", e)
             return
-        log.info("exchange index: %d new record(s) from saved threads (%.1fs)",
+        added, stamped = (sum(x) for x in zip(*keyed))
+        if added or stamped:
+            log.info("exchange index: %d companion key(s) added, %d record(s) "
+                     "stamped approximate (one-time upgrade)", added, stamped)
+        log.info("exchange index: %d new exchange(s) from saved threads (%.1fs)",
                  n, time.monotonic() - t0)
 
     # --- persistent conversation memory ---------------------------------------
@@ -679,6 +686,9 @@ class Claude:
                 query = f"{earlier[-1]} {user_text}"
         in_tail = {exchange_id(self.active, m) for m in self.history[wire_from:-1]
                    if m.get("role") == "user" and isinstance(m.get("content"), str)}
+        # The search tool excludes the same tail, so it can never hand the
+        # model its own current answers back as "past conversations".
+        self._ctx.tail_ids = frozenset(in_tail)
         return context.build_context(query, owner=self.active, memory=self.memory,
                                      kb=self.kb, exclude_ids=in_tail,
                                      focus=self._ctx.focus)

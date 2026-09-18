@@ -8,14 +8,18 @@ Nothing here loads Chroma, the embedding model, or a model client.
 
 import tempfile
 import unittest
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import config as cfg
-from brain import agents
+from brain import agents, context
 from brain.memory import ConversationMemory, exchange_id
 from lib.atomic_io import write_json_atomic
+from lib.dates import period_range, window_epochs
 from tests.store_fixtures import FakeCol
+from tools import ToolContext, dispatch
 
 
 def user(text, ts="2026-08-26T22:44:41-07:00"):
@@ -46,7 +50,7 @@ class TestIndexing(unittest.TestCase):
         self.assertNotEqual(exchange_id("alice", a),
                             exchange_id("alice", user("hi", ts="2026-01-01T00:00:00")))
 
-    def test_one_record_per_exchange_with_tool_traffic_folded_to_metadata(self):
+    def test_an_exchange_is_its_parent_plus_an_assistant_companion(self):
         history = [
             user("what time is it"),
             {"role": "assistant", "content": [
@@ -58,11 +62,20 @@ class TestIndexing(unittest.TestCase):
         ]
         self.assertEqual(self.mem.index_exchanges(history, "alice"), 1)
         ((ids, docs, metas),) = self.cols[self.col_name].upserts
+        xid = exchange_id("alice", history[0])
+        self.assertEqual(ids, [xid, xid + ":a"])
         self.assertEqual(docs[0], "user: what time is it\nassistant: It's nine.\n"
                                   "assistant: (Note to self — I saved the note.)")
-        self.assertEqual(metas[0]["tools"], "get_current_time")
-        self.assertEqual(metas[0]["kind"], "exchange")
-        self.assertIsInstance(metas[0]["epoch"], float)
+        # The companion embeds the reply's lead line but carries the whole
+        # exchange, so a hit on it reads back as its parent.
+        self.assertEqual(docs[1], "assistant: It's nine.")
+        self.assertEqual(metas[1]["exchange"], xid)
+        self.assertEqual(metas[1]["text"], docs[0])
+        for meta in metas:
+            self.assertEqual(meta["tools"], "get_current_time")
+            self.assertEqual(meta["kind"], "exchange")
+            self.assertIsInstance(meta["epoch"], float)
+            self.assertIs(meta["approx"], False)  # an offset-bearing stamp is exact
         self.assertNotIn("tool_result", docs[0])
 
     def test_an_unanswered_turn_is_not_a_record(self):
@@ -94,7 +107,7 @@ class TestRetrieval(unittest.TestCase):
         self.assertEqual(rows.dense, [])
         self.assertEqual([h.doc.split("\n")[0] for h in rows.lexical],
                          ["user: sell the SPX 5800 put"])
-        self.assertEqual(rows.count, 2)
+        self.assertEqual(rows.count, 4)  # records: two exchanges, two keys each
 
     def test_the_lexical_index_sees_a_record_written_after_it_was_built(self):
         self.mem.index_exchanges([user("first"), assistant("ok")], "alice")
@@ -188,6 +201,156 @@ class TestMigratePending(unittest.TestCase):
             ((ids, docs, metas),) = cols[cfg.agent_memory_collection("bob")].upserts
             self.assertEqual(docs[0], "user: switch to sonnet\nassistant: Done.")
             self.assertEqual(metas[0]["ts"], "2026-08-26T22:44:41")
+
+
+class TestCompanionKeys(unittest.TestCase):
+    """Two keys, one value (2026-09-18): a hit on the reply-only companion
+    reads back as its exchange, counts once, and is excluded with it."""
+
+    def setUp(self):
+        self.cols = {}
+        self.mem = make_memory(self.cols)
+        self.name = cfg.agent_memory_collection("alice")
+        self.full = "user: my first item\nassistant: Got it. Your list: one, first item."
+        stamp = {"ts": "2026-09-17T09:42:33-07:00", "approx": False}
+        self.cols[self.name] = FakeCol([
+            (self.full, stamp, 0.8, "xc_1"),
+            ("assistant: Got it. Your list: one, first item.",
+             {**stamp, "exchange": "xc_1", "part": "a", "text": self.full}, 0.2, "xc_1:a"),
+        ])
+
+    def test_key_hits_collapse_to_one_exchange_at_the_best_similarity(self):
+        rows = self.mem.query_rows("what is my list", caller="alice")
+        self.assertEqual([h.id for h in rows.dense], ["xc_1", "xc_1"])
+        self.assertEqual({h.doc for h in rows.dense}, {self.full})
+        self.assertNotIn("text", rows.dense[0].meta)
+        (c,) = context.fuse(rows.dense, rows.lexical)
+        self.assertAlmostEqual(c.sim, context.similarity(0.2))
+
+    def test_an_excluded_exchange_takes_its_companion_with_it(self):
+        out = self.mem.search("what is my list", caller="alice", exclude_ids={"xc_1"})
+        self.assertIn("Nothing in past conversations", out)
+
+    def test_the_lexical_corpus_has_one_entry_per_exchange(self):
+        cols = {}
+        mem = make_memory(cols)
+        mem.index_exchanges([user("sell the SPX put"), assistant("done")], "alice")
+        _, ids, docs, _ = mem._lexical_index(cfg.agent_memory_collection("alice"))
+        self.assertEqual(ids, [exchange_id("alice", user("sell the SPX put"))])
+        self.assertEqual(docs, ["user: sell the SPX put\nassistant: done"])
+
+
+class TestBackfillKeys(unittest.TestCase):
+    def test_legacy_records_gain_a_companion_and_an_approx_stamp_once(self):
+        cols = {}
+        mem = make_memory(cols)
+        col = cols.setdefault(cfg.agent_memory_collection("alice"), FakeCol())
+        # Two records from before the companion keys: one flush-stamped by
+        # the old staging file (naive ts), one exact (offset-bearing).
+        col.upsert(["xc_old", "xc_new"],
+                   ["user: I\nassistant: It's morning now — what's up?",
+                    "user: hi\nassistant: hello"],
+                   [{"agent": "alice", "kind": "exchange",
+                     "ts": "2026-09-17T09:43:11", "epoch": 1.0},
+                    {"agent": "alice", "kind": "exchange",
+                     "ts": "2026-09-17T09:43:11-07:00", "epoch": 2.0}])
+        self.assertEqual(mem.backfill_keys("alice"), (2, 2))
+        self.assertIs(col.rows["xc_old"][1]["approx"], True)
+        self.assertIs(col.rows["xc_new"][1]["approx"], False)
+        doc, meta = col.rows["xc_old:a"]
+        self.assertEqual(doc, "assistant: It's morning now — what's up?")
+        self.assertEqual((meta["exchange"], meta["approx"]), ("xc_old", True))
+        self.assertEqual(len(col.updates), 1)  # metadata only: nothing re-embedded
+        self.assertEqual(mem.backfill_keys("alice"), (0, 0))
+
+
+class TestTimeWindow(unittest.TestCase):
+    """A time window is a filter on exact stamps, not a similarity: the
+    exchanges from "this morning at 9:41" sit at cosine 0.02-0.09 against
+    that question (2026-09-17 12:10)."""
+
+    def setUp(self):
+        self.cols = {}
+        self.mem = make_memory(self.cols)
+        self.name = cfg.agent_memory_collection("alice")
+
+    def test_a_window_becomes_a_where_on_epoch_and_filters_the_lexical_list(self):
+        for text, ts in (("sell the SPX put", "2026-09-17T09:42:33-07:00"),
+                         ("SPX again, later", "2026-09-17T15:00:00-07:00"),
+                         ("SPX with a flush stamp", "2026-09-17T09:43:11")):
+            self.mem.index_exchanges([user(text, ts=ts), assistant("ok")], "alice")
+        window = window_epochs(since="2026-09-17T09:00:00-07:00",
+                               until="2026-09-17T10:00:00-07:00")
+        rows = self.mem.query_rows("SPX", caller="alice", window=window)
+        lo, hi = window
+        self.assertEqual(self.cols[self.name].wheres[-1],
+                         {"$and": [{"approx": False},
+                                   {"epoch": {"$gte": lo}}, {"epoch": {"$lte": hi}}]})
+        self.assertEqual([h.doc.split("\n")[0] for h in rows.lexical],
+                         ["user: sell the SPX put"])
+
+    def test_a_windowed_search_skips_the_gate_and_reads_oldest_first(self):
+        t1 = datetime.fromisoformat("2026-09-17T09:41:28-07:00").timestamp()
+        t2 = datetime.fromisoformat("2026-09-17T09:45:23-07:00").timestamp()
+        self.cols[self.name] = FakeCol([
+            ("user: item three\nassistant: Your list now: one, two, three.",
+             {"ts": "2026-09-17T09:45:23-07:00", "approx": False, "epoch": t2}, 0.95, "xc_2"),
+            ("user: start my list\nassistant: Ready. First item?",
+             {"ts": "2026-09-17T09:41:28-07:00", "approx": False, "epoch": t1}, 0.95, "xc_1"),
+        ])
+        out = self.mem.search("recall this morning", caller="alice",
+                              window=(t1 - 60, t2 + 60))
+        self.assertIn("(oldest first)", out)
+        self.assertLess(out.index("start my list"), out.index("item three"))
+        # The same hits, unwindowed, fail the gate: cosine 0.05 is noise.
+        self.assertIn("Nothing in past conversations",
+                      self.mem.search("recall this morning", caller="alice"))
+
+    def test_an_empty_window_says_so(self):
+        col = self.cols.setdefault(self.name, FakeCol())
+        t = datetime.fromisoformat("2026-09-17T15:00:00-07:00").timestamp()
+        col.upsert(["xc_1"], ["user: hi\nassistant: hello"],
+                   [{"ts": "2026-09-17T15:00:00-07:00", "approx": False, "epoch": t}])
+        out = self.mem.search("zzz", caller="alice", window=(t - 7200, t - 3600))
+        self.assertIn("among exactly-timed exchanges", out)
+        # A window with no `since` starts at epoch 0, which Windows cannot
+        # turn into a local time — the label must not try.
+        self.assertIn("between the beginning and",
+                      self.mem.search("zzz", caller="alice", window=(0.0, t - 3600)))
+
+
+class TestSearchToolSeam(unittest.TestCase):
+    def test_the_tool_passes_the_window_and_the_verbatim_tail(self):
+        seen = {}
+
+        def search(query, caller=None, window=None, exclude_ids=()):
+            seen.update(query=query, caller=caller, window=window,
+                        exclude_ids=exclude_ids)
+            return "ok"
+        ctx = ToolContext(memory=SimpleNamespace(search=search), active_agent="alice",
+                          tail_ids=frozenset({"xc_tail"}))
+        since, until = "2026-09-17T09:00:00-07:00", "2026-09-17T10:00:00-07:00"
+        self.assertEqual(dispatch(ctx, "search_past_conversations",
+                                  {"query": "the list", "since": since, "until": until}),
+                         "ok")
+        self.assertEqual(seen["window"], window_epochs(since=since, until=until))
+        self.assertEqual(seen["exclude_ids"], frozenset({"xc_tail"}))
+        self.assertEqual(seen["caller"], "alice")
+        dispatch(ctx, "search_past_conversations", {"query": "the list"})
+        self.assertIsNone(seen["window"])  # no time words, no window
+
+
+class TestDateWords(unittest.TestCase):
+    def test_periods_and_window_edges(self):
+        friday = date(2026, 9, 18)
+        self.assertEqual(period_range("last_week", today=friday),
+                         ("2026-09-07", "2026-09-13"))
+        self.assertEqual(period_range(None, "2026-09-01", None, today=friday),
+                         ("2026-09-01", "2026-09-18"))
+        self.assertIsNone(window_epochs())
+        lo, hi = window_epochs(since="2026-09-17", until="2026-09-17", today=friday)
+        self.assertEqual(datetime.fromtimestamp(hi) - datetime.fromtimestamp(lo),
+                         timedelta(hours=23, minutes=59, seconds=59))
 
 
 class TestEveryHatCanSearchMemory(unittest.TestCase):

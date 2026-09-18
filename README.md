@@ -239,9 +239,11 @@ exchanges weighted up — plus the best-matching knowledge chunks, fitted to a
 character budget (`CONTEXT_CONVO_CHARS`, `CONTEXT_KB_CHARS`). So "how did that
 butterfly do?" finds the exchange from three weeks ago without you saying
 "remember when". The `search_past_conversations` tool is still there for
-digging deeper than the budget allows; conversations from before the
-per-persona split live in a shared legacy archive every persona can read,
-labelled as such. Every pull is logged (`context pull …` lines in the session
+digging deeper than the budget allows — and when you name a time ("what did
+we talk about this morning around 9:40?", "yesterday") it filters by when
+things were said rather than by topic, and reads them back in order.
+Conversations from before the per-persona split live in a shared legacy
+archive every persona can read, labelled as such. Every pull is logged (`context pull …` lines in the session
 log, with the full candidate table when `CONTEXT_DEBUG_LOG` is on) so the
 thresholds can be tuned from what was actually retrieved.
 `scripts/seed_agent_memory.py` (run once, agent off) backfills each persona's

@@ -23,8 +23,11 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import numpy as np
+
 import config as cfg
 from brain import history as hist
+from stores import chroma_store
 from stores.knowledge import cite
 
 log = logging.getLogger("context")
@@ -44,6 +47,7 @@ class Candidate:
     id: str
     doc: str
     meta: dict
+    vec: object = None     # stored embedding, for the fill's redundancy penalty; None = no penalty
     sim: float = 0.0       # cosine from the dense list (0 when lexical-only)
     lex: float = 0.0       # BM25 relative to the turn's best lexical hit
     age_h: float = None    # hours since the record's time; None when unknown
@@ -64,11 +68,17 @@ class ContextPull:
 
 
 # --- scoring ----------------------------------------------------------------
-def similarity(dist) -> float:
-    """Cosine similarity from a Chroma distance. The collections use Chroma's
-    default squared-L2 space and all-MiniLM-L6-v2 emits unit-norm vectors, so
-    d = 2 - 2cos; clamped because HNSW distances drift past 2 by a hair."""
-    return max(0.0, 1.0 - float(dist) / 2.0)
+def similarity(dist, space=None) -> float:
+    """Cosine similarity from a Chroma distance, in the space the collections
+    were created in (chroma_store.SPACE — cosine, chosen by the embedding
+    function; d = 1 - cos). Until 2026-09-18 this assumed Chroma's old
+    squared-L2 default, d = 2 - 2cos, and so returned 0.5 + cos/2: every
+    candidate cleared CONTEXT_MIN_SIMILARITY and recency and BM25 quietly did
+    the ranking. Clamped because HNSW distances drift outside the range by a
+    hair."""
+    d = float(dist)
+    sim = 1.0 - d / 2.0 if (space or chroma_store.SPACE) == "l2" else 1.0 - d
+    return min(1.0, max(0.0, sim))
 
 
 def recency(age_h) -> float:
@@ -98,9 +108,15 @@ def age_hours(meta, now=None):
 
 def when(meta) -> str:
     """Human label for a record's time: the exchange stamp as "1:47pm
-    8/20/2026", a legacy summary's bare date, or "unknown date"."""
-    return (hist.time_label(meta.get("ts"))
-            or str(meta.get("date") or "unknown date"))
+    8/20/2026", a legacy summary's bare date, or "unknown date". A stamp the
+    old staging file wrote at flush time (`approx`) is only an upper bound on
+    when the words were said, and is labelled as one — the model once read
+    such a stamp as "9:43am today" for words from the previous morning
+    (2026-09-17 12:01)."""
+    label = hist.time_label(meta.get("ts"))
+    if label and meta.get("approx"):
+        return "on or before " + label
+    return label or str(meta.get("date") or "unknown date")
 
 
 def age_label(age_h):
@@ -129,13 +145,13 @@ def fuse(dense, lexical, *, now=None, exclude_ids=()):
     for h in dense:
         if h.id in exclude:
             continue
-        c = by_id.setdefault(h.id, Candidate("conversation", h.id, h.doc, h.meta))
+        c = by_id.setdefault(h.id, Candidate("conversation", h.id, h.doc, h.meta, h.vec))
         c.sim = max(c.sim, similarity(h.score))
     best = max((h.score for h in lexical), default=0.0)
     for h in lexical:
         if h.id in exclude or best <= 0:
             continue
-        c = by_id.setdefault(h.id, Candidate("conversation", h.id, h.doc, h.meta))
+        c = by_id.setdefault(h.id, Candidate("conversation", h.id, h.doc, h.meta, h.vec))
         c.lex = max(c.lex, h.score / best)
     for c in by_id.values():
         c.age_h = age_hours(c.meta, now)
@@ -155,20 +171,44 @@ def _clean(doc, cap=None):
     return text[:cap] if cap else text
 
 
+def _cos(a, b) -> float:
+    """Cosine between two stored vectors (unit-norm from MiniLM, not assumed)."""
+    a, b = np.asarray(a, dtype=float), np.asarray(b, dtype=float)
+    n = float(np.linalg.norm(a) * np.linalg.norm(b))
+    return float(a @ b) / n if n else 0.0
+
+
 def _fill(cands, budget, cap=None):
-    """Greedy whole-document fill by score order; an oversize document is
-    skipped, not truncated, so the next one that fits still gets in.
-    Returns the unused budget."""
+    """Greedy whole-document fill by MARGINAL score: a candidate's fused score
+    less a redundancy penalty against what is already kept (Carbonell &
+    Goldstein's MMR; λ = CONTEXT_MMR_LAMBDA, 1.0 = plain score order). The
+    top of a ranking is often a cluster of near-duplicates: for "what is my
+    to-do list" nine exchanges *about* keeping a list (pairwise cosine 0.6)
+    filled the budget while the list itself sat at rank 10 (2026-09-17).
+    Candidates without a vector (knowledge chunks) carry no penalty, so
+    their fill is plain score order. An oversize document is skipped, not
+    truncated, so the next one that fits still gets in. Returns the unused
+    budget."""
+    pool = []
     for c in cands:
-        if not c.gate:
+        if c.gate:
+            pool.append(c)
+        else:
             c.note = "gate"
-            continue
+    lam = cfg.CONTEXT_MMR_LAMBDA
+    kept = []
+    while pool:
+        c = max(pool, key=lambda c: lam * c.score - (1 - lam) * max(
+            (_cos(c.vec, k.vec) for k in kept
+             if c.vec is not None and k.vec is not None), default=0.0))
+        pool.remove(c)
         c.text = _clean(c.doc, cap)
         c.chars = len(c.text)
         if c.chars > budget:
             c.note = "budget"
             continue
         c.kept = True
+        kept.append(c)
         budget -= c.chars
     return budget
 
@@ -184,7 +224,9 @@ def render(candidates) -> str:
     for c in kept:
         if c.source == "conversation":
             attrs = f'source="conversation" when="{when(c.meta)}"'
-            if (label := age_label(c.age_h)):
+            # No age on an approximate stamp: "2 hours ago" is exactly the
+            # false precision the "on or before" label exists to avoid.
+            if (label := age_label(c.age_h)) and not c.meta.get("approx"):
                 attrs += f' age="{label}"'
             if c.meta.get("legacy"):
                 attrs += ' note="summary from the shared archive, before per-persona memory"'

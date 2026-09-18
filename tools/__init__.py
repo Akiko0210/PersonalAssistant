@@ -49,6 +49,13 @@ class ToolContext:
     # the session is exactly the failure mode that makes retrieval look
     # broken. Values may be lists (the store turns them into $in).
     focus: dict = field(default=None)
+    # Exchange ids in this turn's verbatim tail, set by Claude._pull_context.
+    # search_past_conversations excludes them, so a persona never reads its
+    # own current answers back as corroborating "past conversations" — at
+    # 12:08 on 2026-09-17 the tool returned Alice's replies from three minutes
+    # earlier and she took them as evidence. A delegated task's fresh
+    # ToolContext leaves it empty, which is right: it has no tail.
+    tail_ids: frozenset = frozenset()
     # Factual notes about work a tool did *beyond* the string it returned — a
     # deferred save, or a sub-dialogue that ran in its own model memory. Only
     # a tool's return value lands in history automatically; anything that

@@ -164,7 +164,9 @@ KB_MEDIA_MODEL = "small.en"
 # ends. The pre-isolation shared collection is read-only legacy — its summary
 # records are readable by every persona and labelled as such.
 MEMORY_COLLECTION = "conversations"  # legacy shared archive, read-only
-MEMORY_SEARCH_RESULTS = 3            # records the search_past_conversations tool returns
+# The "look deeper" tool must never look shallower than the Background it goes
+# beyond: it returned 3 while the block weighed 12 candidates (2026-09-17).
+MEMORY_SEARCH_RESULTS = 8            # exchanges the search_past_conversations tool returns
 
 # --- Retrieval-first context ---------------------------------------------------
 # What the model sees about the past, every turn: the last few exchanges
@@ -175,11 +177,12 @@ MEMORY_SEARCH_RESULTS = 3            # records the search_past_conversations too
 # settle.
 CONTEXT_RECENT_EXCHANGES = 2      # previous exchanges sent verbatim; older ones reach the model by retrieval
 CONTEXT_SHORT_QUERY_WORDS = 8     # under this, the previous user turn joins the retrieval query: short turns are the follow-ups
-CONTEXT_CANDIDATES = 12           # rows per retriever per store before fusion — more than fits, so ranking has a choice
+CONTEXT_CANDIDATES = 16           # exchanges per retriever per store before fusion — more than fits, so ranking has a choice; at 12 the list read-back sat just outside the pool for a short question that had borrowed its previous turn (scripts/eval_retrieval.py, 2026-09-18)
+CONTEXT_MMR_LAMBDA = 0.7          # fill by marginal score, λ·score − (1−λ)·cosine to what is already kept (MMR); 1.0 = plain score order, which let nine near-duplicate "about the list" exchanges fill the budget ahead of the list itself (2026-09-17). 0.7 keeps the list and both harness controls
 CONTEXT_CONVO_CHARS = 4000        # ~1k tokens of past exchanges per turn
 CONTEXT_KB_CHARS = 3000           # ~750 tokens of reference chunks; also takes the conversation budget's leftover
 CONTEXT_HIT_CHARS = 800           # per-exchange cap so one long reply can't eat the budget
-CONTEXT_MIN_SIMILARITY = 0.25     # cosine gate for dense hits; MiniLM puts unrelated short texts at 0.0-0.2 — tune from the log
+CONTEXT_MIN_SIMILARITY = 0.25     # cosine gate for dense hits (a real cosine: the store is cosine space — until 2026-09-18 similarity() read 0.5+cos/2 and this never fired); MiniLM puts unrelated short texts at 0.0-0.2 — retune from scripts/eval_retrieval.py
 CONTEXT_MIN_LEXICAL = 0.5         # BM25 gate, relative to the turn's best lexical hit — a small personal corpus has no stable absolute scale
 CONTEXT_LEXICAL_WEIGHT = 0.5      # BM25's share of the fused score: dense leads, exact names/tickers/numbers boost
 CONTEXT_RECENCY_WEIGHT = 0.3      # Park-style additive recency term: reorders relevant hits, never rescues irrelevant ones
@@ -525,9 +528,12 @@ OVERRIDABLE = {
     # memory / search
     "HISTORY_MAX_MESSAGES": int, "SEARCH_RESULTS": int, "KB_SEARCH_RESULTS": int,
     "MEMORY_SEARCH_RESULTS": int,
-    # retrieval-first context
-    "CONTEXT_RECENT_EXCHANGES": int, "CONTEXT_CONVO_CHARS": int,
-    "CONTEXT_KB_CHARS": int, "CONTEXT_MIN_SIMILARITY": float,
+    # retrieval-first context (the knobs scripts/eval_retrieval.py sweeps)
+    "CONTEXT_RECENT_EXCHANGES": int, "CONTEXT_CANDIDATES": int,
+    "CONTEXT_CONVO_CHARS": int, "CONTEXT_KB_CHARS": int,
+    "CONTEXT_MIN_SIMILARITY": float, "CONTEXT_MIN_LEXICAL": float,
+    "CONTEXT_LEXICAL_WEIGHT": float, "CONTEXT_RECENCY_WEIGHT": float,
+    "CONTEXT_MMR_LAMBDA": float, "CONTEXT_SHORT_QUERY_WORDS": int,
     "CONTEXT_DEBUG_LOG": bool,
     # headset button
     "MEDIA_KEEPALIVE": bool, "MEDIA_CLICK_DEDUPE_S": float,

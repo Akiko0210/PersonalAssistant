@@ -1,0 +1,70 @@
+[
+  {
+    "label": "todo_1208 — the list read-back for 'what is my to-do list' (2026-09-17)",
+    "owner": "alice",
+    "query": "What is— my today's to-do list.",
+    "prev_user": "And you like do you remember any problem that we had this week",
+    "as_of": "2026-09-17T12:08:50-07:00",
+    "exclude_ts": ["2026-09-17T12:06:48", "2026-09-17T12:07:43"],
+    "expect_ts": ["2026-09-17T09:45:23", "2026-09-17T09:43:11", "2026-09-17T09:42:33"],
+    "require": "any"
+  },
+  {
+    "label": "todo_1208_bare — the same question without the borrowed previous turn (short-query rule cost)",
+    "owner": "alice",
+    "query": "What is— my today's to-do list.",
+    "as_of": "2026-09-17T12:08:50-07:00",
+    "exclude_ts": ["2026-09-17T12:06:48", "2026-09-17T12:07:43"],
+    "expect_ts": ["2026-09-17T09:45:23", "2026-09-17T09:43:11", "2026-09-17T09:42:33"],
+    "require": "any"
+  },
+  {
+    "label": "morning_1210 — 'this morning around 9:41' as a time window (2026-09-17)",
+    "owner": "alice",
+    "query": "Can you try to recall our conversation from this morning like 9 41 a.m.",
+    "as_of": "2026-09-17T12:10:43-07:00",
+    "window": {"since": "2026-09-17T09:00", "until": "2026-09-17T10:00"},
+    "expect_ts": ["2026-09-17T09:41:28-07:00", "2026-09-17T09:42:33-07:00",
+                  "2026-09-17T09:43:11-07:00", "2026-09-17T09:44:58-07:00",
+                  "2026-09-17T09:45:23-07:00"],
+    "require": "all"
+  },
+  {
+    "label": "list_0920 — 'tell me about my list' the next morning (2026-09-18)",
+    "owner": "alice",
+    "query": "Tell me about my list.",
+    "prev_user": "Thank you. Who am I talking with?",
+    "as_of": "2026-09-18T09:20:07-07:00",
+    "expect_ts": ["2026-09-17T09:45:23", "2026-09-17T09:43:11", "2026-09-17T09:42:33"],
+    "require": "any"
+  },
+  {
+    "label": "save_six_0935 — all six of the morning's items when asked to save the list (2026-09-18)",
+    "owner": "alice",
+    "query": "Let's save that note now.",
+    "prev_user": "That's it for now.",
+    "as_of": "2026-09-18T09:35:32-07:00",
+    "exclude_ts": ["2026-09-18T09:34:37", "2026-09-18T09:34:58", "2026-09-18T09:35:14"],
+    "expect_ts": ["2026-09-18T09:24", "2026-09-18T09:25", "2026-09-18T09:26",
+                  "2026-09-18T09:28", "2026-09-18T09:29", "2026-09-18T09:32"],
+    "require": "all",
+    "stretch": true
+  },
+  {
+    "label": "open_old_summary — a July archive summary for 'problems with the agent' loses to recent moderate matches (recency policy; the lexical gate does not change it — 0.5/0.8/0.95 measured 2026-09-18)",
+    "owner": "alice",
+    "query": "I'm asking about the problems that I was having with you, the agent.",
+    "as_of": "2026-09-17T12:06:48-07:00",
+    "expect_ids": ["conv_2026-07-17_183444"],
+    "require": "any",
+    "stretch": true
+  },
+  {
+    "label": "control_ticker — an exact ticker still wins on the lexical side",
+    "owner": "tom",
+    "query": "how did the SPX position do",
+    "as_of": "2026-09-18T10:00:00-07:00",
+    "expect_text": ["SPX"],
+    "require": "any"
+  }
+]

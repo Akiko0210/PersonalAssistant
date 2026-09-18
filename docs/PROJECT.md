@@ -460,18 +460,41 @@ with the volatile Background after it (Anthropic's prompt-caching layout).
 2. **Exchange index** — every exchange is embedded into `conversations_<key>`
    the moment its turn ends (`ConversationMemory.index_exchanges`, also called
    at boot over the saved threads, idempotently — deterministic ids, so a
-   deferred self-note overwrites its exchange). Each turn `brain/context.py`
-   pulls candidates from it, dense and lexical, fuses them
+   deferred self-note overwrites its exchange). Each exchange is stored under
+   TWO keys that share one value: the parent record (the whole
+   `user:…/assistant:…` text) and a companion (`<id>:a`, the LEAD LINE of the
+   reply, carrying the parent id and the full text in metadata). The lead
+   line is the sentence that frames the exchange; the user's turn and the
+   rest of the reply are its substance, and a vector over the substance
+   matched neither — for "what is my to-do list" the read-back ranked 93rd
+   keyed on the whole exchange, 69th on the whole reply, 9th on its lead line
+   (measured 2026-09-18 over 259 exchanges). Hits
+   collapse to the parent id before fusion and BM25 indexes one entry per
+   exchange, so a record never counts twice. The collections are in cosine
+   space (chromadb lets the embedding function choose it), which
+   `context.similarity` reads from `chroma_store.SPACE` — until 2026-09-18 it
+   assumed squared-L2 and the relevance gate never fired. Each turn
+   `brain/context.py` pulls candidates, dense and lexical, fuses them
    (`score = cosine + 0.5·bm25_rel + 0.3·recency`, gated at
    `CONTEXT_MIN_SIMILARITY` / `CONTEXT_MIN_LEXICAL`), fills
-   `CONTEXT_CONVO_CHARS`, then knowledge chunks into `CONTEXT_KB_CHARS` plus the
-   leftover, and renders the Background as the last system block. Short
+   `CONTEXT_CONVO_CHARS` by *marginal* score (MMR, `CONTEXT_MMR_LAMBDA`: a
+   redundancy penalty against what is already kept — the top of a ranking is
+   often a cluster of near-duplicates, and nine exchanges *about* keeping a
+   list once filled the budget ahead of the list itself), then knowledge
+   chunks into `CONTEXT_KB_CHARS` plus the leftover, and renders the
+   Background as the last system block. Short
    utterances borrow the previous user turn as their retrieval query (they are
    the anaphoric follow-ups). `search_past_conversations` runs the same ranking
-   without the budget, for "tell me everything about X". The pre-isolation
-   `conversations` collection stays readable by all as legacy summaries, and
-   the old staging file is folded in once at boot (`migrate_pending`) and
-   parked as `.bak`.
+   deeper (`MEMORY_SEARCH_RESULTS`) and never returns the verbatim tail; given
+   a time window (`period` / `since` / `until` → a `where` on `epoch`) the
+   window replaces the gate and the exchanges come back oldest-first — time
+   words carry no embedding signal, so "this morning at 9:41" is a filter, not
+   a query (LongMemEval's time-aware expansion). Records whose stamp is a
+   flush time rather than a speech time (the old staging file's) are marked
+   `approx`, render as "on or before …", and never satisfy a window. The
+   pre-isolation `conversations` collection stays readable by all as legacy
+   summaries, and the old staging file is folded in once at boot
+   (`migrate_pending`) and parked as `.bak`.
 3. **Notes and knowledge** — deliberate, saved artifacts, filed in category
    folders and semantically searchable, plus the shared `knowledge`
    collection. Notes and common knowledge are the SHARED write paths:
@@ -480,10 +503,18 @@ with the volatile Background after it (Anthropic's prompt-caching layout).
 
 Every pull logs one `context pull` line (INFO) and, with `CONTEXT_DEBUG_LOG`,
 the per-candidate table and the block itself (DEBUG on the `context` logger).
-The thresholds in `config.py` are tuned from those lines. Levers deliberately
-not pulled yet, each a per-turn model call or a second model: fact-augmented
-keys (Mem0-style extraction), LLM query rewriting for follow-ups, and a
-cross-encoder rerank.
+The thresholds in `config.py` are tuned from those lines and from
+`scripts/eval_retrieval.py`, which replays logged questions against a copy of
+the store as it stood at the time and reports where each expected exchange
+ranked (`--set KEY=VALUE` sweeps a knob; `--backfill` previews a store
+upgrade). Levers deliberately not pulled, each a per-turn model call or a
+second model: fact-augmented keys (Mem0-style extraction) and LLM query
+rewriting for follow-ups. A cross-encoder rerank was measured on 2026-09-18
+(`ms-marco-MiniLM-L6-v2`, on the harness's own candidates) and rejected: it
+put a July summary first but lost the list read-backs the plain fill kept —
+MS MARCO passage relevance prefers exchanges that restate the question over
+the one that answers it, on short spoken exchanges asked about as a
+conversation. MMR at the fill fixed those cases without a second model.
 
 ---
 

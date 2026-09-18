@@ -15,8 +15,10 @@ class FakeCol:
 
     def __init__(self, hits=()):
         self.upserts = []      # (ids, documents, metadatas)
+        self.updates = []      # (ids, metadatas) — metadata-only writes
         self.hits = list(hits)  # (doc, meta, distance[, id])
         self.queries = 0
+        self.wheres = []       # the where= of every query, None when absent
         self.rows = {}         # id -> (doc, meta), from upserts
 
     def upsert(self, ids, documents, metadatas):
@@ -24,11 +26,18 @@ class FakeCol:
         for id_, doc, meta in zip(ids, documents, metadatas):
             self.rows[id_] = (doc, meta)
 
+    def update(self, ids, metadatas):
+        self.updates.append((list(ids), list(metadatas)))
+        for id_, meta in zip(ids, metadatas):
+            if id_ in self.rows:
+                self.rows[id_] = (self.rows[id_][0], meta)
+
     def count(self):
         return len(self.hits) or len(self.rows)
 
-    def query(self, query_texts, n_results, **kwargs):
+    def query(self, query_texts, n_results, where=None, **kwargs):
         self.queries += 1
+        self.wheres.append(where)
         rows = self.hits[:n_results]
         return {"ids": [[r[3] if len(r) > 3 else f"hit{i}"
                          for i, r in enumerate(rows)]],

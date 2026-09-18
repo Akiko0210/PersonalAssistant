@@ -16,6 +16,7 @@ Design rules:
 
 from datetime import date, timedelta
 
+from lib.dates import PERIODS, period_range
 from tools import tool
 from trading import config as tcfg
 from trading import strategies as tstrat
@@ -561,10 +562,7 @@ def get_positions(ctx, args):
     "input_schema": {
         "type": "object",
         "properties": {
-            "period": {"type": "string",
-                       "enum": ["today", "yesterday", "this_week",
-                                "last_week", "this_month", "last_month",
-                                "this_year"],
+            "period": {"type": "string", "enum": list(PERIODS),
                        "description": "Named period (preferred)."},
             "start_date": {"type": "string", "description": "ISO date."},
             "end_date": {"type": "string", "description": "ISO date."},
@@ -576,7 +574,8 @@ def get_pnl(ctx, args):
     eng, err = _engine()
     if err:
         return err
-    start, end = _period_range(args)
+    start, end = period_range(args.get("period"), args.get("start_date"),
+                              args.get("end_date"))
     try:
         rep = eng.pnl_report(start, end, underlying=args.get("underlying"))
     except Exception as e:
@@ -595,34 +594,6 @@ def get_pnl(ctx, args):
     if rep.note:
         parts.append(rep.note.strip())
     return ". ".join(parts) + "."
-
-
-def _period_range(args):
-    today = date.today()
-    period = args.get("period")
-    if not period:
-        return (args.get("start_date") or today.isoformat(),
-                args.get("end_date") or today.isoformat())
-    monday = today - timedelta(days=today.weekday())
-    first = today.replace(day=1)
-    if period == "today":
-        return today.isoformat(), today.isoformat()
-    if period == "yesterday":
-        d = today - timedelta(days=1)
-        return d.isoformat(), d.isoformat()
-    if period == "this_week":
-        return monday.isoformat(), today.isoformat()
-    if period == "last_week":
-        return ((monday - timedelta(days=7)).isoformat(),
-                (monday - timedelta(days=1)).isoformat())
-    if period == "this_month":
-        return first.isoformat(), today.isoformat()
-    if period == "last_month":
-        last_end = first - timedelta(days=1)
-        return last_end.replace(day=1).isoformat(), last_end.isoformat()
-    if period == "this_year":
-        return today.replace(month=1, day=1).isoformat(), today.isoformat()
-    return today.isoformat(), today.isoformat()
 
 
 @tool({

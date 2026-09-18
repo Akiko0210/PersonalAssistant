@@ -488,7 +488,7 @@ class KnowledgeStore:
         if not rows:
             return "I couldn't find anything about that in your trading knowledge."
         return "\n\n".join(f"[{cite(meta)}] {' '.join(doc.split())[:400]}"
-                           for _, doc, meta, _ in rows)
+                           for _, doc, meta, *_ in rows)
 
     def list_sources(self) -> str:
         manifest = self._load_manifest()

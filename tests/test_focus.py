@@ -34,17 +34,14 @@ class TestFocusWhere(unittest.TestCase):
 
 
 class RecordingCol(FakeCol):
-    """A FakeCol that records the where= of every query."""
-
-    def __init__(self, hits=()):
-        super().__init__(hits)
-        self.wheres = []
+    """A FakeCol whose canned hits honour a where= (FakeCol itself records
+    the clause but serves every hit regardless)."""
 
     def query(self, query_texts, n_results, where=None):
-        self.wheres.append(where)
         if where is not None and not self.hits_match(where):
+            self.wheres.append(where)
             return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
-        return super().query(query_texts, n_results)
+        return super().query(query_texts, n_results, where=where)
 
     def hits_match(self, where):
         # Enough filter semantics for these tests: equality on flat keys.
