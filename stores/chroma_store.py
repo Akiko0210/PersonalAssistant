@@ -14,6 +14,11 @@ from chromadb.utils import embedding_functions
 import config as cfg
 
 log = logging.getLogger("chroma")
+# sentence-transformers prints a tqdm "Batches" bar for every encode whenever
+# logging is at INFO — one per retrieval, and a continuous stream during the
+# boot-time fact extraction (2026-09-22). The bars carry nothing the log lines
+# don't.
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
 # One retrieval row. `score` is the retriever's native number — Chroma's
 # distance for a dense query, BM25 for a lexical one — so the caller fusing
