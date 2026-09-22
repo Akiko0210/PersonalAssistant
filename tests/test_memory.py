@@ -1,24 +1,21 @@
 """Tests for the exchange index (brain/memory.py): what gets written per
-turn, how it is read back (dense + lexical, per persona), and the honest
-failure paths — a broken collection is reported as unsearchable, never as
-"nothing there" (2026-07-27 08:12, the hnsw segment reader fault).
+turn, how it is read back (dense + lexical, per persona), the marks the fact
+extractor leaves, the recall tool's seams, and the honest failure paths — a
+broken collection is reported as unsearchable, never as "nothing there"
+(2026-07-27 08:12, the hnsw segment reader fault).
 
 Nothing here loads Chroma, the embedding model, or a model client.
 """
 
-import tempfile
 import unittest
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
-from unittest import mock
 
 import config as cfg
 from brain import agents, context
 from brain.memory import ConversationMemory, exchange_id
-from lib.atomic_io import write_json_atomic
 from lib.dates import period_range, window_epochs
-from tests.store_fixtures import FakeCol
+from tests.store_fixtures import FakeCol, memory_over
 from tools import ToolContext, dispatch
 
 
@@ -30,17 +27,10 @@ def assistant(text):
     return {"role": "assistant", "content": [{"type": "text", "text": text}]}
 
 
-def make_memory(cols):
-    mem = ConversationMemory.__new__(ConversationMemory)
-    mem._cols, mem._lexical = {}, {}
-    mem._col_for = lambda name: cols.setdefault(name, FakeCol())
-    return mem
-
-
 class TestIndexing(unittest.TestCase):
     def setUp(self):
         self.cols = {}
-        self.mem = make_memory(self.cols)
+        self.mem = memory_over(self.cols)
         self.col_name = cfg.agent_memory_collection("alice")
 
     def test_exchange_ids_are_deterministic_and_stamp_sensitive(self):
@@ -77,6 +67,9 @@ class TestIndexing(unittest.TestCase):
             self.assertIsInstance(meta["epoch"], float)
             self.assertIs(meta["approx"], False)  # an offset-bearing stamp is exact
         self.assertNotIn("tool_result", docs[0])
+        # exchanges_of is the one derivation the index and the extractor share.
+        ((x, doc, meta),) = self.mem.exchanges_of(history, "alice")
+        self.assertEqual((x, doc, meta["tools"]), (xid, docs[0], "get_current_time"))
 
     def test_an_unanswered_turn_is_not_a_record(self):
         self.assertEqual(self.mem.index_exchanges([user("hello?")], "alice"), 0)
@@ -91,10 +84,30 @@ class TestIndexing(unittest.TestCase):
                                                   skip_existing=False), 1)
 
 
+class TestExtractorMarks(unittest.TestCase):
+    def test_unread_exchanges_come_oldest_first_and_marks_stick(self):
+        cols = {}
+        mem = memory_over(cols)
+        later = user("second", ts="2026-09-18T09:25:00-07:00")
+        first = user("first", ts="2026-09-18T09:24:00-07:00")
+        mem.index_exchanges([later, assistant("b"), first, assistant("a")], "alice")
+        pending = mem.unextracted("alice")
+        self.assertEqual([x for x, _, _ in pending],
+                         [exchange_id("alice", first), exchange_id("alice", later)])
+        self.assertEqual(pending[0][1], "user: first\nassistant: a")
+        mem.mark_extracted("alice", exchange_id("alice", first))
+        self.assertEqual([x for x, _, _ in mem.unextracted("alice")],
+                         [exchange_id("alice", later)])
+        # A metadata-only merge: the record keeps everything else it had.
+        col = cols[cfg.agent_memory_collection("alice")]
+        meta = col.rows[exchange_id("alice", first)][1]
+        self.assertEqual((meta["extracted"], meta["kind"]), (True, "exchange"))
+
+
 class TestRetrieval(unittest.TestCase):
     def setUp(self):
         self.cols = {}
-        self.mem = make_memory(self.cols)
+        self.mem = memory_over(self.cols)
 
     def test_lexical_hits_come_from_the_indexed_records(self):
         # The dense fake returns nothing; BM25 over the same records finds
@@ -127,6 +140,17 @@ class TestRetrieval(unittest.TestCase):
         out = self.mem.search("summary", caller="alice")
         self.assertIn("[2026-07-25 (from the shared archive", out)
         self.assertIn("archived summary text", out)
+
+    def test_fetch_reads_exchanges_by_id_oldest_first(self):
+        a = user("first thing", ts="2026-09-18T09:24:00-07:00")
+        b = user("second thing", ts="2026-09-18T09:25:00-07:00")
+        self.mem.index_exchanges([b, assistant("B"), a, assistant("A")], "alice")
+        out = self.mem.fetch([exchange_id("alice", b), exchange_id("alice", a), "xc_nope"],
+                             caller="alice")
+        self.assertLess(out.index("first thing"), out.index("second thing"))
+        self.assertIn("[9:24am 9/18/2026]", out)
+        self.assertIn("(1 id(s) not found.)", out)
+        self.assertIn("None of those", self.mem.fetch(["xc_nope"], caller="alice"))
 
 
 class TestArchiveFailureIsHonest(unittest.TestCase):
@@ -181,35 +205,13 @@ class TestArchiveFailureIsHonest(unittest.TestCase):
         self.assertEqual(self.ensure_calls, 4)
 
 
-class TestMigratePending(unittest.TestCase):
-    def test_batches_are_indexed_and_the_file_is_parked(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "memory_pending.json"
-            write_json_atomic(path, [
-                {"ts": "2026-08-26T22:44:41", "agent": "bob",
-                 "lines": ["user: switch to sonnet", "assistant: Done."]},
-                {"ts": "2026-07-01T10:00:00", "agent": None,
-                 "lines": ["user: legacy", "assistant: untagged"]},
-            ])
-            cols = {}
-            mem = make_memory(cols)
-            with mock.patch.object(cfg, "MEMORY_PENDING_PATH", path):
-                self.assertEqual(mem.migrate_pending(), 1)
-                self.assertEqual(mem.migrate_pending(), 0)  # file is gone
-            self.assertFalse(path.exists())
-            self.assertTrue((Path(tmp) / "memory_pending.json.bak").exists())
-            ((ids, docs, metas),) = cols[cfg.agent_memory_collection("bob")].upserts
-            self.assertEqual(docs[0], "user: switch to sonnet\nassistant: Done.")
-            self.assertEqual(metas[0]["ts"], "2026-08-26T22:44:41")
-
-
 class TestCompanionKeys(unittest.TestCase):
     """Two keys, one value (2026-09-18): a hit on the reply-only companion
     reads back as its exchange, counts once, and is excluded with it."""
 
     def setUp(self):
         self.cols = {}
-        self.mem = make_memory(self.cols)
+        self.mem = memory_over(self.cols)
         self.name = cfg.agent_memory_collection("alice")
         self.full = "user: my first item\nassistant: Got it. Your list: one, first item."
         stamp = {"ts": "2026-09-17T09:42:33-07:00", "approx": False}
@@ -233,7 +235,7 @@ class TestCompanionKeys(unittest.TestCase):
 
     def test_the_lexical_corpus_has_one_entry_per_exchange(self):
         cols = {}
-        mem = make_memory(cols)
+        mem = memory_over(cols)
         mem.index_exchanges([user("sell the SPX put"), assistant("done")], "alice")
         _, ids, docs, _ = mem._lexical_index(cfg.agent_memory_collection("alice"))
         self.assertEqual(ids, [exchange_id("alice", user("sell the SPX put"))])
@@ -243,7 +245,7 @@ class TestCompanionKeys(unittest.TestCase):
 class TestBackfillKeys(unittest.TestCase):
     def test_legacy_records_gain_a_companion_and_an_approx_stamp_once(self):
         cols = {}
-        mem = make_memory(cols)
+        mem = memory_over(cols)
         col = cols.setdefault(cfg.agent_memory_collection("alice"), FakeCol())
         # Two records from before the companion keys: one flush-stamped by
         # the old staging file (naive ts), one exact (offset-bearing).
@@ -271,7 +273,7 @@ class TestTimeWindow(unittest.TestCase):
 
     def setUp(self):
         self.cols = {}
-        self.mem = make_memory(self.cols)
+        self.mem = memory_over(self.cols)
         self.name = cfg.agent_memory_collection("alice")
 
     def test_a_window_becomes_a_where_on_epoch_and_filters_the_lexical_list(self):
@@ -306,6 +308,18 @@ class TestTimeWindow(unittest.TestCase):
         self.assertIn("Nothing in past conversations",
                       self.mem.search("recall this morning", caller="alice"))
 
+    def test_a_window_without_a_topic_is_a_plain_read_of_the_stretch(self):
+        for text, ts in (("third", "2026-09-17T09:45:00-07:00"),
+                         ("first", "2026-09-17T09:41:00-07:00"),
+                         ("outside", "2026-09-17T15:00:00-07:00")):
+            self.mem.index_exchanges([user(text, ts=ts), assistant("ok")], "alice")
+        window = window_epochs(since="2026-09-17T09:00:00-07:00",
+                               until="2026-09-17T10:00:00-07:00")
+        out = self.mem.search("", caller="alice", window=window)
+        self.assertEqual(self.cols[self.name].queries, 0)  # nothing to embed
+        self.assertLess(out.index("user: first"), out.index("user: third"))
+        self.assertNotIn("outside", out)
+
     def test_an_empty_window_says_so(self):
         col = self.cols.setdefault(self.name, FakeCol())
         t = datetime.fromisoformat("2026-09-17T15:00:00-07:00").timestamp()
@@ -319,25 +333,50 @@ class TestTimeWindow(unittest.TestCase):
                       self.mem.search("zzz", caller="alice", window=(0.0, t - 3600)))
 
 
-class TestSearchToolSeam(unittest.TestCase):
-    def test_the_tool_passes_the_window_and_the_verbatim_tail(self):
-        seen = {}
+class TestRecallTool(unittest.TestCase):
+    def setUp(self):
+        self.seen = {}
+        seen = self.seen
 
         def search(query, caller=None, window=None, exclude_ids=()):
             seen.update(query=query, caller=caller, window=window,
                         exclude_ids=exclude_ids)
-            return "ok"
-        ctx = ToolContext(memory=SimpleNamespace(search=search), active_agent="alice",
-                          tail_ids=frozenset({"xc_tail"}))
+            return "From past conversations:\n[9:00am] user: x"
+        self.kb_text = ""
+        self.ctx = ToolContext(
+            memory=SimpleNamespace(search=search,
+                                   fetch=lambda ids, caller=None:
+                                   seen.update(ids=ids, fetch_caller=caller) or "fetched"),
+            kb=SimpleNamespace(search=lambda q, caller=None, focus=None: self.kb_text),
+            active_agent="alice", tail_ids=frozenset({"xc_tail"}))
+
+    def test_a_topic_and_window_reach_the_search_with_the_verbatim_tail(self):
         since, until = "2026-09-17T09:00:00-07:00", "2026-09-17T10:00:00-07:00"
-        self.assertEqual(dispatch(ctx, "search_past_conversations",
-                                  {"query": "the list", "since": since, "until": until}),
-                         "ok")
-        self.assertEqual(seen["window"], window_epochs(since=since, until=until))
-        self.assertEqual(seen["exclude_ids"], frozenset({"xc_tail"}))
-        self.assertEqual(seen["caller"], "alice")
-        dispatch(ctx, "search_past_conversations", {"query": "the list"})
-        self.assertIsNone(seen["window"])  # no time words, no window
+        out = dispatch(self.ctx, "recall", {"query": "the list", "since": since,
+                                            "until": until})
+        self.assertIn("From past conversations", out)
+        self.assertEqual(self.seen["window"], window_epochs(since=since, until=until))
+        self.assertEqual(self.seen["exclude_ids"], frozenset({"xc_tail"}))
+        self.assertEqual(self.seen["caller"], "alice")
+        dispatch(self.ctx, "recall", {"query": "the list"})
+        self.assertIsNone(self.seen["window"])  # no time words, no window
+
+    def test_a_window_alone_is_enough_and_nothing_at_all_is_not(self):
+        dispatch(self.ctx, "recall", {"period": "yesterday"})
+        self.assertEqual(self.seen["query"], "")
+        self.assertIsNotNone(self.seen["window"])
+        self.assertIn("Give recall a topic", dispatch(self.ctx, "recall", {}))
+
+    def test_ids_read_the_exchanges_behind_a_fact(self):
+        self.assertEqual(dispatch(self.ctx, "recall", {"ids": ["xc_1", "xc_2"]}), "fetched")
+        self.assertEqual((self.seen["ids"], self.seen["fetch_caller"]),
+                         (["xc_1", "xc_2"], "alice"))
+
+    def test_reference_passages_are_appended_only_when_there_are_any(self):
+        self.assertNotIn("reference material", dispatch(self.ctx, "recall", {"query": "x"}))
+        self.kb_text = "[Book, p.3] a passage"
+        out = dispatch(self.ctx, "recall", {"query": "x"})
+        self.assertIn("From the reference material:\n[Book, p.3]", out)
 
 
 class TestDateWords(unittest.TestCase):
@@ -353,14 +392,14 @@ class TestDateWords(unittest.TestCase):
                          timedelta(hours=23, minutes=59, seconds=59))
 
 
-class TestEveryHatCanSearchMemory(unittest.TestCase):
-    def test_own_memory_is_searchable_by_every_persona(self):
-        # A hat without the search tool cannot obey "review your memory" —
+class TestEveryHatCanRecall(unittest.TestCase):
+    def test_own_memory_is_reachable_by_every_persona(self):
+        # A hat without the memory tool cannot obey "review your memory" —
         # the exact 2026-07-20 failure. The Background covers the common
         # case now, but the rule stands: every persona must reliably reach
         # its OWN past when asked for more.
         for key, agent in agents.AGENTS.items():
-            self.assertIn("search_past_conversations", agent["tools"], key)
+            self.assertIn("recall", agent["tools"], key)
 
 
 if __name__ == "__main__":

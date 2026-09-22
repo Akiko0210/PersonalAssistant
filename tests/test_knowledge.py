@@ -339,14 +339,13 @@ class TestScopedSearch(unittest.TestCase):
 
     def test_manifest_guard_is_scoped_to_the_caller(self):
         # Only a Tom-private source exists: Tom searches, Alice (and a
-        # caller-less probe) get the honest nothing-ingested message.
+        # caller-less probe) get nothing — the recall tool phrases that.
         self.cols[cfg.agent_knowledge_collection("tom")] = FakeCol(
             [("private passage", {"title": "Tom Plan"}, 0.1)])
         with self.manifest({"source": "b", "collection": "tom"}):
             self.assertIn("Tom Plan", self.store.search("x", caller="tom"))
-            self.assertIn("No trading knowledge",
-                          self.store.search("x", caller="alice"))
-            self.assertIn("No trading knowledge", self.store.search("x"))
+            self.assertEqual(self.store.search("x", caller="alice"), "")
+            self.assertEqual(self.store.search("x"), "")
 
     def test_forget_deletes_from_the_entrys_own_collection(self):
         deleted = []

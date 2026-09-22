@@ -1,7 +1,7 @@
 """Date words shared by tools — a named period or ISO bounds to a day range,
 and the same to an epoch window for metadata filters. Lifted from
-tools/trading_tools (get_pnl) so search_past_conversations can take the same
-arguments without importing the trading package. Leaf: stdlib only.
+tools/trading_tools (get_pnl) so the recall tool can take the same arguments
+without importing the trading package. Leaf: stdlib only.
 """
 
 from datetime import date, datetime, timedelta

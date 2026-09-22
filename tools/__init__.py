@@ -25,6 +25,7 @@ class ToolContext:
     discord: object = None    # DiscordData
     kb: object = None         # KnowledgeStore
     memory: object = None     # ConversationMemory
+    facts: object = None      # FactStore
     # Set by save_conversation_note; the agent picks it up after the reply and
     # runs the folder dialogue + save (see voice_agent._save_pending_note).
     pending_note: dict = field(default=None)
@@ -50,8 +51,8 @@ class ToolContext:
     # broken. Values may be lists (the store turns them into $in).
     focus: dict = field(default=None)
     # Exchange ids in this turn's verbatim tail, set by Claude._pull_context.
-    # search_past_conversations excludes them, so a persona never reads its
-    # own current answers back as corroborating "past conversations" — at
+    # recall excludes them, so a persona never reads its own current answers
+    # back as corroborating "past conversations" — at
     # 12:08 on 2026-09-17 the tool returned Alice's replies from three minutes
     # earlier and she took them as evidence. A delegated task's fresh
     # ToolContext leaves it empty, which is right: it has no tail.
@@ -111,7 +112,6 @@ from tools import note_tools      # noqa: E402,F401
 from tools import discord_tools   # noqa: E402,F401
 from tools import time_tools      # noqa: E402,F401
 from tools import memory_tools    # noqa: E402,F401
-from tools import knowledge_tools # noqa: E402,F401
 from tools import focus_tools     # noqa: E402,F401
 from tools import model_tools     # noqa: E402,F401
 from tools import project_tools   # noqa: E402,F401

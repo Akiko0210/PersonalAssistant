@@ -98,7 +98,7 @@ class TestPerAgentToolFiltering(unittest.TestCase):
         self.assertNotIn("search_notes", alice)
         self.assertNotIn("save_conversation_note", tom)
         self.assertIn("search_notes", bob)
-        self.assertIn("search_knowledge", tom)
+        self.assertIn("recall", tom)
 
     def test_exclude_still_works_alongside_include(self):
         names = [t["name"] for t in

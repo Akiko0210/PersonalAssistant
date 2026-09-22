@@ -45,8 +45,8 @@ PENDING_DIR = DATA_DIR / "pending"
 # Reference material (trading books/PDFs/text) the user drops in to build a
 # searchable knowledge base. Kept at the project root (not under data/) so it's
 # easy to find and manage. Ingested once into a persistent Chroma collection —
-# which lives in data/chroma — and queried on demand via the search_knowledge
-# tool, never pasted into the conversation.
+# which lives in data/chroma — and queried by retrieval each turn and by the
+# recall tool on demand, never pasted into the conversation.
 KNOWLEDGE_DIR = BASE_DIR / "knowledge"
 KNOWLEDGE_MANIFEST = KNOWLEDGE_DIR / "manifest.json"  # {sha256: {source,title,...}}
 # Conversation transcript: each persona keeps its OWN thread with the user,
@@ -64,14 +64,6 @@ def history_path(key):
     return DATA_DIR / f"history_{key}.json"
 
 
-# The pre-isolation single shared history. Only the one-time migration in
-# llm.py touches it (renames to .bak); scripts/seed_agent_memory.py mines the
-# session logs instead, which cover the same turns with attribution.
-HISTORY_PATH = DATA_DIR / "history.json"
-# Legacy: the pre-retrieval design staged text that fell off the window here
-# for a boot-time summary. Read once by ConversationMemory.migrate_pending,
-# which folds the batches into the exchange index and parks the file as .bak.
-MEMORY_PENDING_PATH = DATA_DIR / "memory_pending.json"
 # Legacy flat locations — only referenced by the one-time migration in notes.py.
 SUMMARY_DIR = DATA_DIR / "summaries"
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
@@ -148,9 +140,13 @@ def agent_memory_collection(key):
     return f"conversations_{key}"
 
 
+def agent_facts_collection(key):
+    return f"facts_{key}"
+
+
 KB_CHUNK_CHARS = 1000                # target characters per embedded chunk
 KB_CHUNK_OVERLAP = 150               # characters shared between adjacent chunks
-KB_SEARCH_RESULTS = 5                # chunks returned per search_knowledge call
+KB_SEARCH_RESULTS = 5                # reference chunks the recall tool returns
 # Recorded lecture material, transcribed by Whisper on the way in. Decoding is
 # handled by PyAV (bundled with faster-whisper), so no ffmpeg install is needed.
 KB_MEDIA_EXTS = (".mp4", ".m4a", ".mp3", ".mkv", ".mov", ".wav", ".webm")
@@ -166,7 +162,7 @@ KB_MEDIA_MODEL = "small.en"
 MEMORY_COLLECTION = "conversations"  # legacy shared archive, read-only
 # The "look deeper" tool must never look shallower than the Background it goes
 # beyond: it returned 3 while the block weighed 12 candidates (2026-09-17).
-MEMORY_SEARCH_RESULTS = 8            # exchanges the search_past_conversations tool returns
+MEMORY_SEARCH_RESULTS = 8            # exchanges the recall tool returns
 
 # --- Retrieval-first context ---------------------------------------------------
 # What the model sees about the past, every turn: the last few exchanges
@@ -176,7 +172,6 @@ MEMORY_SEARCH_RESULTS = 8            # exchanges the search_past_conversations t
 # "context" logger's lines, not guessed; leave CONTEXT_DEBUG_LOG on until they
 # settle.
 CONTEXT_RECENT_EXCHANGES = 2      # previous exchanges sent verbatim; older ones reach the model by retrieval
-CONTEXT_SHORT_QUERY_WORDS = 8     # under this, the previous user turn joins the retrieval query: short turns are the follow-ups
 CONTEXT_CANDIDATES = 16           # exchanges per retriever per store before fusion — more than fits, so ranking has a choice; at 12 the list read-back sat just outside the pool for a short question that had borrowed its previous turn (scripts/eval_retrieval.py, 2026-09-18)
 CONTEXT_MMR_LAMBDA = 0.7          # fill by marginal score, λ·score − (1−λ)·cosine to what is already kept (MMR); 1.0 = plain score order, which let nine near-duplicate "about the list" exchanges fill the budget ahead of the list itself (2026-09-17). 0.7 keeps the list and both harness controls
 CONTEXT_CONVO_CHARS = 4000        # ~1k tokens of past exchanges per turn
@@ -188,6 +183,25 @@ CONTEXT_LEXICAL_WEIGHT = 0.5      # BM25's share of the fused score: dense leads
 CONTEXT_RECENCY_WEIGHT = 0.3      # Park-style additive recency term: reorders relevant hits, never rescues irrelevant ones
 CONTEXT_RECENCY_HALF_LIFE_H = 168 # a week-old exchange keeps half its recency credit (Park et al. use ~5.8 days)
 CONTEXT_DEBUG_LOG = True          # candidate table + full block at DEBUG on the "context" logger; turn off once tuned
+
+# --- Query understanding and fact extraction -------------------------------------
+# Two small model calls bracket every turn. BEFORE retrieval, one reads the last
+# few exchanges and turns the utterance into what the stores can act on
+# (brain/query.py): a self-contained query — embeddings cannot resolve "the
+# other one" — a time window when a time was named (a filter: "this morning at
+# 9:41" sits at cosine 0.02-0.09 against the exchanges it means), and which
+# tracked entities it is about (their facts are then included by key). AFTER
+# the reply, off the speaking path, another reads the finished exchange against
+# the facts already known and says what became true (brain/facts.py): six
+# to-do items arrived in six exchanges on 2026-09-18 and top-k retrieval could
+# reach one of them; a list is one fact, kept current.
+QUERY_MODEL = "claude-haiku-4-5"     # on the turn's critical path: latency matters (CONVO_MODELS is defined below)
+QUERY_RECENT_EXCHANGES = 4           # exchanges the rewrite reads for pronouns and topic
+QUERY_TIMEOUT_S = 8.0                # past this the turn retrieves on the raw utterance
+FACTS_MODEL = "claude-sonnet-5"      # async, so quality over speed: a wrong fact is worse than a missing one
+FACTS_CANDIDATES = 12                # current facts the extractor sees by hybrid search on the exchange, so an addition becomes an update, not a duplicate
+FACTS_RECENT = 8                     # ...plus the most recently established ones: the list being built now is what the next item updates, however unlike its words
+FACTS_KNOWN_ENTITIES = 80            # entity keys shown so the rewrite can name them and the extractor reuses them instead of inventing
 
 # --- Text-to-speech (local: SAPI / NSSpeechSynthesizer / Piper) ---------------
 TTS_RATE = 175                # words per minute
@@ -440,8 +454,10 @@ CONVO_SYSTEM_BASE = (
     "bugs or system behaviour. "
     "Only your last few exchanges with the user appear verbatim; earlier "
     "conversations reach you through a Background section retrieved for each "
-    "turn — use it naturally, as your own memory, and call "
-    "search_past_conversations only when you need more than it shows. "
+    "turn: the past exchanges that bear on the message, and the facts you have "
+    "learned, each dated as of when it was established — use it naturally, as "
+    "your own memory, and call recall only when you need more than it shows or "
+    "the exact words behind a fact. "
     "The system prefixes each user message with the local time it was spoken, "
     "like (1:47pm 8/20/2026). Use the stamps to notice time passing: when a "
     "message arrives hours or days after the previous one, earlier context may "
@@ -533,8 +549,10 @@ OVERRIDABLE = {
     "CONTEXT_CONVO_CHARS": int, "CONTEXT_KB_CHARS": int,
     "CONTEXT_MIN_SIMILARITY": float, "CONTEXT_MIN_LEXICAL": float,
     "CONTEXT_LEXICAL_WEIGHT": float, "CONTEXT_RECENCY_WEIGHT": float,
-    "CONTEXT_MMR_LAMBDA": float, "CONTEXT_SHORT_QUERY_WORDS": int,
-    "CONTEXT_DEBUG_LOG": bool,
+    "CONTEXT_MMR_LAMBDA": float, "CONTEXT_DEBUG_LOG": bool,
+    # query understanding / fact extraction
+    "QUERY_MODEL": str, "QUERY_RECENT_EXCHANGES": int, "QUERY_TIMEOUT_S": float,
+    "FACTS_MODEL": str, "FACTS_CANDIDATES": int, "FACTS_RECENT": int,
     # headset button
     "MEDIA_KEEPALIVE": bool, "MEDIA_CLICK_DEDUPE_S": float,
 }

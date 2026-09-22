@@ -57,9 +57,10 @@ _UNSET = object()
 
 def make_claude(responses=None, *, active=None, convo_model=_UNSET,
                 history=None):
-    """A Claude shell via __new__ — no API client, stores, or embedding model.
-    Covers the union of what converse / run_delegated_task / switch_to /
-    flush_tool_events touch; the extras are inert for narrower tests."""
+    """A Claude shell via __new__ — no API client, stores, embedding model or
+    memory worker. Covers the union of what converse / run_delegated_task /
+    switch_to / flush_tool_events touch; the extras are inert for narrower
+    tests."""
     c = Claude.__new__(Claude)
     c.client = SimpleNamespace(messages=ScriptedMessages(responses))
     c._deepseek = None
@@ -71,7 +72,18 @@ def make_claude(responses=None, *, active=None, convo_model=_UNSET,
     # the exchange index write is a no-op — tests that care install their own.
     c.kb = SimpleNamespace(query_rows=lambda *a, **k: [])
     c.memory = SimpleNamespace(index_exchanges=lambda *a, **k: 0,
+                               exchanges_of=lambda *a, **k: [],
                                query_rows=lambda *a, **k: Rows([], [], 0, None))
+    c.facts = SimpleNamespace(query_rows=lambda *a, **k: Rows([], [], 0, None),
+                              current=lambda *a, **k: [],
+                              entities=lambda *a, **k: [])
+    # No memory worker: _remember runs inline, so a test sees the write when
+    # converse() returns. No small-model calls: the rewrite gets "" and falls
+    # back to the raw utterance, the extractor finds nothing durable; a test
+    # that wants either binds its own callable.
+    c._jobs = None
+    c._rewriter = lambda: (lambda system, prompt: "")
+    c._extractor = lambda: (lambda system, prompt: '{"ops": []}')
     c._ctx = ToolContext(
         active_agent=c.active,
         convo_model=(cfg.CONVO_MODELS["haiku"] if convo_model is _UNSET

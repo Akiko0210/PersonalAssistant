@@ -5,7 +5,7 @@ chunked, embedded once, and stored in a persistent Chroma collection (under
 ``data/chroma``) separate from notes. PDFs and text are read directly; video and
 audio (``.mp4`` and friends) are transcribed by Whisper first, and their chunks
 carry the timestamp they were spoken at so a citation points at the moment to
-rewatch. The agent queries all of it on demand via the ``search_knowledge`` tool,
+rewatch. The agent queries all of it on demand via the ``recall`` tool,
 so the content is never pasted into the conversation.
 
 Ingestion is idempotent: each file is identified by the SHA-256 of its bytes and
@@ -47,7 +47,7 @@ def _hms(seconds) -> str:
 
 def cite(meta) -> str:
     """A chunk's citation: "Title, p.12" for a book page, "Title, 14:32" for a
-    moment in a recording, or just the title. Shared by the search_knowledge
+    moment in a recording, or just the title. Shared by the recall
     tool and the per-turn Background (brain/context.py)."""
     title = meta.get("title", meta.get("source", "source"))
     page, at = meta.get("page"), meta.get("t")
@@ -450,7 +450,7 @@ class KnowledgeStore:
         and a SOFT one on common — reference chunks aren't reliably
         strategy-tagged, so an empty filtered result falls back to unfiltered
         rather than hiding the textbook. The structured seam behind both the
-        search_knowledge tool and the per-turn Background (brain/context.py)."""
+        recall tool and the per-turn Background (brain/context.py)."""
         n = n or cfg.KB_SEARCH_RESULTS
         where = _focus_where(focus)
         rows = []
@@ -473,6 +473,8 @@ class KnowledgeStore:
 
     def search(self, query: str, n: int = None, caller: str = None,
                focus: dict = None) -> str:
+        """Cited passages for the recall tool; "" when nothing is ingested in
+        the caller's scope or nothing matches — the tool does the wording."""
         n = n or cfg.KB_SEARCH_RESULTS
         allowed = self._allowed_targets(caller)
         manifest = self._load_manifest()
@@ -481,12 +483,10 @@ class KnowledgeStore:
         in_scope = [e for e in manifest.values()
                     if e.get("collection", cfg.COMMON_COLLECTION) in allowed]
         if not in_scope:
-            return ("No trading knowledge has been ingested yet. Add PDFs, text, "
-                    "or video files to the knowledge folder and run "
-                    "python voice_agent.py --ingest.")
+            return ""
         rows = self.query_rows(query, n, caller, focus)
         if not rows:
-            return "I couldn't find anything about that in your trading knowledge."
+            return ""
         return "\n\n".join(f"[{cite(meta)}] {' '.join(doc.split())[:400]}"
                            for _, doc, meta, *_ in rows)
 

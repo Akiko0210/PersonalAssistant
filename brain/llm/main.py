@@ -9,6 +9,8 @@ beside this one — `anthropic.py`, `deepseek.py`; `config.model_provider` is
 the id→provider routing name."""
 
 import logging
+import queue
+import threading
 import time
 from datetime import datetime
 
@@ -22,10 +24,12 @@ from brain import agents
 from stores import categories
 import config as cfg
 from brain import history as hist
-from lib.atomic_io import park, write_json_atomic
+from lib.atomic_io import write_json_atomic
 from stores.discord_data import DiscordData
 from stores.knowledge import KnowledgeStore
 from brain import context
+from brain import query as understanding
+from brain.facts import FactStore, catch_up, extractor, learn
 from brain.memory import ConversationMemory, exchange_id
 from tools import ToolContext, api_tools, dispatch
 from tools.focus_tools import focus_prompt_block
@@ -157,8 +161,19 @@ class Claude:
         # ingestion) so the embedding model loads at most once per process; selftest
         # passes none, so fall back to a fresh instance.
         self.kb = kb if kb is not None else KnowledgeStore()
-        # The exchange index every turn retrieves from and writes to.
+        # The exchange index every turn retrieves from and writes to, and the
+        # facts derived from it (brain/facts.py).
         self.memory = ConversationMemory()
+        self.facts = FactStore()
+        # The memory worker: indexing and fact extraction run here, after the
+        # reply is already being spoken. One thread, in order — "add item
+        # four" only reads as an update to a list the extractor has already
+        # seen. Live exchanges queue ahead of any boot backlog. Nothing here
+        # is precious: an exchange the process died on is still in history,
+        # and the next boot re-indexes and re-reads whatever went unmarked.
+        self._jobs = queue.PriorityQueue()
+        self._seq = 0
+        threading.Thread(target=self._work, daemon=True, name="memory").start()
         # Personas: per-agent system prompt, tools, model, voice — and since
         # the memory split, each keeps its OWN history thread (self.history is
         # always the ACTIVE persona's; switch_to swaps files). The registry
@@ -173,15 +188,14 @@ class Claude:
         # pending conversation note and the active conversation model (which the
         # set_conversation_model tool can switch mid-session).
         self._ctx = ToolContext(store=self.store, discord=self.discord,
-                                kb=self.kb, memory=self.memory,
+                                kb=self.kb, memory=self.memory, facts=self.facts,
                                 convo_model=agents.registry_model(self.active),
                                 active_agent=self.active)
         self._active_since = datetime.now()
         self._write_agent_state()
         # Conversation memory: restore the active persona's own thread (trimmed)
         # so it remembers its last conversation across restarts; saved back to
-        # disk after every turn. The pre-isolation shared file is parked first.
-        self._migrate_legacy_history()
+        # disk after every turn.
         self.history = self._load_history()
         # Looped while we wait on the model, so the user hears the agent thinking.
         self.idle = idle if idle is not None else _NullIdle()
@@ -197,6 +211,15 @@ class Claude:
         if self._deepseek is None:
             self._deepseek = deepseek.make_client()
         return self._deepseek
+
+    def _rewriter(self):
+        """The query rewrite's model call on the client serving QUERY_MODEL
+        (tests bind a string here)."""
+        return understanding.rewriter(self.client_for(cfg.QUERY_MODEL))
+
+    def _extractor(self):
+        """The fact extractor's model call on the client serving FACTS_MODEL."""
+        return extractor(self.client_for(cfg.FACTS_MODEL))
 
     # Set by the save_conversation_note tool; the agent picks it up after the
     # reply and runs the folder dialogue + save (see voice_agent).
@@ -371,7 +394,7 @@ class Claude:
         hat = agents.AGENTS[key]
         model = self.model_for(key)
         sub_ctx = ToolContext(store=self.store, discord=self.discord,
-                              kb=self.kb, memory=self.memory,
+                              kb=self.kb, memory=self.memory, facts=self.facts,
                               convo_model=model, active_agent=key,
                               # Focus is session state, not persona state: a
                               # delegated lookup honours the same narrowing
@@ -382,7 +405,8 @@ class Claude:
         # Alice what we discussed about X" reads Alice's exchanges without a
         # tool call.
         pull = context.build_context(task, owner=key, memory=self.memory,
-                                     kb=self.kb, focus=self._ctx.focus)
+                                     facts=self.facts, kb=self.kb,
+                                     focus=self._ctx.focus)
         system = system_blocks(
             DELEGATION_PROMPT.format(name=hat["name"], role=hat["role"])
             + "\n\n" + hat["persona"] + focus_prompt_block(self._ctx.focus),
@@ -522,7 +546,7 @@ class Claude:
         self.history = hist.sanitize(self.history)
         if persist:
             self._save_history()
-            self._index_last_exchange()  # the self-note belongs in the exchange's record
+            self._remember()  # the self-note belongs in the exchange's record
 
     def record_unanswered(self, user_text: str):
         """Keep a transcribed utterance in history when a hotkey cut the turn
@@ -538,16 +562,18 @@ class Claude:
         companion keys, approximate-time stamps — memory.backfill_keys, a
         one-time cost), make sure every persona's saved thread is in its
         exchange index (idempotent — records already present are skipped),
-        then fold in the pre-retrieval staging file once. Also the embedding
-        model's warm-up: without it the first turn paid the cold load (~26 s
-        on 2026-08-26). Failures are logged and retried next boot; a thread
+        then queue every exchange the fact extractor has not read for the
+        memory worker, oldest first (the first boot after the fact store
+        arrived reads the whole history: one model call per exchange, in
+        the background, logged every 25). Also the embedding model's
+        warm-up: without it the first turn paid the cold load (~26 s on
+        2026-08-26). Failures are logged and retried next boot; a thread
         that isn't indexed is still on disk."""
         t0 = time.monotonic()
         try:
             keyed = [self.memory.backfill_keys(k) for k in agents.AGENTS]
             n = sum(self.memory.index_exchanges(hist.load(cfg.history_path(k)), k)
                     for k in agents.AGENTS)
-            n += self.memory.migrate_pending()
         except Exception as e:  # noqa: BLE001 - never block startup
             log.warning("exchange index backfill failed (will retry next "
                         "boot): %s", e)
@@ -558,6 +584,23 @@ class Claude:
                      "stamped approximate (one-time upgrade)", added, stamped)
         log.info("exchange index: %d new exchange(s) from saved threads (%.1fs)",
                  n, time.monotonic() - t0)
+        for k in agents.AGENTS:
+            self._enqueue(lambda k=k: self._catch_up(k), priority=1)
+
+    def _catch_up(self, owner):
+        """The extractor's boot pass for one persona, on the memory worker."""
+        pending = len(self.memory.unextracted(owner))
+        if not pending:
+            return
+        log.info("facts: %s has %d exchange(s) the extractor has not read; "
+                 "reading them in the background (%s)", owner, pending,
+                 cfg.FACTS_MODEL)
+        t0 = time.monotonic()
+        read, failed = catch_up(
+            self._extractor(), self.memory, self.facts, owner,
+            progress=lambda i, n: log.info("facts: %s %d/%d", owner, i, n))
+        log.info("facts: %s caught up — %d read, %d failed (%.0fs)", owner,
+                 read, failed, time.monotonic() - t0)
 
     # --- persistent conversation memory ---------------------------------------
     @staticmethod
@@ -569,30 +612,10 @@ class Claude:
     @staticmethod
     def _trim(history):
         """Sanitize + cap the persisted transcript. The cap loses nothing:
-        every exchange was indexed the moment its turn ended
-        (_index_last_exchange), so whatever falls off here is already
-        retrievable. Sanitize first — never carry an orphaned tool call
-        forward."""
+        every exchange is indexed as its turn ends (_remember), so whatever
+        falls off here is already retrievable. Sanitize first — never carry
+        an orphaned tool call forward."""
         return hist.trim(hist.sanitize(history), cfg.HISTORY_MAX_MESSAGES)
-
-    @staticmethod
-    def _migrate_legacy_history():
-        """One-shot: park the pre-isolation shared history.json as .bak. Its
-        turns are not staged anywhere — the session logs hold the same turns
-        WITH speaker attribution, and scripts/seed_agent_memory.py mines those
-        into each persona's own archive instead.
-
-        Never overwrites an existing backup (atomic_io.park): this machine
-        already had a hand-made history.json.bak from a month earlier, and
-        migrating over it would have destroyed the only copy."""
-        if not cfg.HISTORY_PATH.exists():
-            return
-        try:
-            target = park(cfg.HISTORY_PATH)
-            log.info("shared history.json parked as %s (threads are per-agent "
-                     "now; seed_agent_memory.py mines the logs)", target.name)
-        except OSError as e:
-            log.warning("could not park legacy history.json: %s", e)
 
     def _load_history(self):
         h = hist.load(cfg.history_path(self.active))
@@ -604,7 +627,7 @@ class Claude:
     def _save_history(self):
         # Saved untrimmed: trimming happens on load / at each turn. This file
         # is the dashboard's transcript; the model's memory is the exchange
-        # index, written right after this save (_index_last_exchange).
+        # index and the facts, written by the worker right after this save.
         hist.save(cfg.history_path(self.active), self.history)
 
     def converse(self, user_text: str) -> str:
@@ -669,47 +692,76 @@ class Claude:
             # moment the user says "switch to DeepSeek". One atomic write a
             # turn, next to the history save that already happens here.
             self._write_agent_state()
-            self._index_last_exchange()
+            self._remember()
 
     def _pull_context(self, user_text, wire_from):
-        """The Background for this turn. Short utterances are the anaphoric
-        ones ("what about the other one?"), so under CONTEXT_SHORT_QUERY_WORDS
-        the previous user utterance joins the retrieval query; a long one
-        stands alone, since always appending would drag the old topic into a
-        new one. Exchanges already in the verbatim tail are excluded so the
-        model never reads the same words twice. build_context never raises."""
-        query = user_text
-        if len(user_text.split()) < cfg.CONTEXT_SHORT_QUERY_WORDS:
-            earlier = [m["content"] for m in self.history[:-1]
-                       if m.get("role") == "user" and isinstance(m.get("content"), str)]
-            if earlier:
-                query = f"{earlier[-1]} {user_text}"
+        """The Background for this turn. The utterance is first read against
+        the last QUERY_RECENT_EXCHANGES exchanges (brain/query.understand):
+        a self-contained query, a time window if a time was named, and the
+        tracked entities it is about. Exchanges already in the verbatim tail
+        are excluded so the model never reads the same words twice. Neither
+        step raises."""
+        recent = [t for m in self.history[hist.tail_start(
+                      self.history, cfg.QUERY_RECENT_EXCHANGES):-1]
+                  if (t := ConversationMemory._message_text(m))]
+        q = understanding.understand(
+            self._rewriter(), user_text, recent,
+            now=self.history[-1].get("ts", ""),
+            known_entities=self.facts.entities(self.active))
         in_tail = {exchange_id(self.active, m) for m in self.history[wire_from:-1]
                    if m.get("role") == "user" and isinstance(m.get("content"), str)}
-        # The search tool excludes the same tail, so it can never hand the
-        # model its own current answers back as "past conversations".
+        # recall excludes the same tail, so it can never hand the model its
+        # own current answers back as "past conversations".
         self._ctx.tail_ids = frozenset(in_tail)
-        return context.build_context(query, owner=self.active, memory=self.memory,
-                                     kb=self.kb, exclude_ids=in_tail,
-                                     focus=self._ctx.focus)
+        return context.build_context(q, owner=self.active, memory=self.memory,
+                                     facts=self.facts, kb=self.kb,
+                                     exclude_ids=in_tail, focus=self._ctx.focus)
 
-    def _index_last_exchange(self):
-        """Embed the exchange that just ended into the persona's index, so the
-        next turn can retrieve it. Re-derived from history rather than
-        remembered, so it is right after a persona switch too, and a deferred
-        self-note (flush_tool_events(persist=True)) overwrites the same
-        record. Never allowed to break a turn."""
-        start = hist.tail_start(self.history, 0)
+    # --- the memory worker ----------------------------------------------------
+    def _remember(self):
+        """Hand the exchange that just ended to the memory worker: index it,
+        then learn its facts. Re-derived from history rather than remembered,
+        so it is right after a persona switch too, and a deferred self-note
+        (flush_tool_events(persist=True)) overwrites the same record. Runs
+        after converse() has returned, so the reply is spoken meanwhile; the
+        next turn sees this exchange verbatim in its tail before retrieval
+        could need it."""
+        owner = self.active
+        msgs = list(self.history[hist.tail_start(self.history, 0):])
+        self._enqueue(lambda: self._learn_exchange(owner, msgs))
+
+    def _learn_exchange(self, owner, msgs):
         t0 = time.monotonic()
-        try:
-            n = self.memory.index_exchanges(self.history[start:], self.active,
-                                            skip_existing=False)
-        except Exception as e:  # noqa: BLE001
-            log.warning("could not index the last exchange: %s", e)
+        if not self.memory.index_exchanges(msgs, owner, skip_existing=False):
             return
-        if n:
-            log.info("indexed exchange for %s (%.0f ms)", self.active,
-                     (time.monotonic() - t0) * 1000)
+        ask = self._extractor()
+        counts = [learn(ask, self.memory, self.facts, owner, xid, doc, meta)
+                  for xid, doc, meta in self.memory.exchanges_of(msgs, owner)]
+        log.info("remembered exchange for %s: facts %s (%.0f ms)", owner,
+                 ", ".join("+%d ~%d -%d" % c if c else "extraction failed"
+                           for c in counts) or "none",
+                 (time.monotonic() - t0) * 1000)
+
+    def _enqueue(self, job, priority=0):
+        """Queue `job` for the memory worker — a live exchange (0) ahead of a
+        boot backlog (1) — or run it right here when there is no worker
+        (tests and scripts build the object without one)."""
+        if self._jobs is None:
+            self._run(job)
+            return
+        self._seq += 1
+        self._jobs.put((priority, self._seq, job))
+
+    def _work(self):
+        while True:
+            self._run(self._jobs.get()[2])
+
+    @staticmethod
+    def _run(job):
+        try:
+            job()
+        except Exception:  # noqa: BLE001 - memory must never cost a turn, or the worker
+            log.exception("memory job failed")
 
     # --- summarisation -------------------------------------------------------
     @staticmethod

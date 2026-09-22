@@ -40,8 +40,8 @@ AGENTS = {
             "Tom own those; hand over when the user wants real work done "
             "there."
         ),
-        "tools": {"get_current_time", "describe_project",
-                  "search_past_conversations", "get_current_model",
+        "tools": {"get_current_time", "describe_project", "recall",
+                  "get_current_model",
                   "set_conversation_model", "switch_agent", "ask_agent",
                   # Gmail. send_email is confirm-by-instruction: its
                   # description requires the user's explicit go-ahead on the
@@ -70,9 +70,9 @@ AGENTS = {
             "move_note. When a question is scoped to one folder (e.g. 'my "
             "latest note in General'), pass that folder to search_notes or "
             "list_recent_notes instead of filtering yourself. "
-            "Earlier conversations are retrieved into your Background "
-            "automatically; use search_past_conversations when the user wants "
-            "more than it shows. "
+            "Earlier conversations and what you have learned are retrieved "
+            "into your Background automatically; use recall when the user "
+            "wants more than it shows. "
             "Only save a conversation as a note when the user explicitly asks "
             "you to ('save that as a note', 'make a note of that'). When they "
             "do, call save_conversation_note with a clear title and "
@@ -90,7 +90,7 @@ AGENTS = {
         "tools": {"search_notes", "list_recent_notes", "read_note",
                   "list_folders", "count_notes", "create_folder",
                   "rename_folder", "delete_folder", "move_note",
-                  "save_conversation_note", "search_past_conversations",
+                  "save_conversation_note", "recall",
                   "get_current_time", "get_current_model",
                   "set_conversation_model", "switch_agent", "ask_agent"},
         "reads": (),
@@ -112,8 +112,8 @@ AGENTS = {
             "ticket and explicitly said to go ahead; never set its confirmed "
             "flag otherwise. You have a "
             "trading knowledge base built from reference material the user "
-            "ingested (books, PDFs, and course videos). Use search_knowledge "
-            "for questions about trading concepts, strategies, or definitions "
+            "ingested (books, PDFs, and course videos). Use recall for "
+            "questions about trading concepts, strategies, or definitions "
             "that such material would cover, and cite the source when it helps "
             "— the page for a book, the timestamp for a video, so the user can "
             "go straight to it. "
@@ -126,14 +126,14 @@ AGENTS = {
             "character. The user trades mostly SPX and RUT index options, "
             "plus occasional options on crude oil futures."
         ),
-        # search_past_conversations is deliberately in EVERY hat's allowlist:
-        # the conversation memory is shared, so every persona must be able to
-        # search it — this hat (then named Cobe) once couldn't recall a trade
-        # structure that had aged out of the window mid-session because only
-        # Bob had the tool (session_2026-07-20.log 21:07, "Review your memory").
+        # recall is deliberately in EVERY hat's allowlist: every persona must
+        # be able to reach its own past when asked for more — this hat (then
+        # named Cobe) once couldn't recall a trade structure that had aged out
+        # of the window mid-session because only Bob had the memory tool
+        # (session_2026-07-20.log 21:07, "Review your memory").
         "tools": {"get_recent_discord_messages", "search_discord_messages",
-                  "get_recent_trades", "search_knowledge", "get_current_time",
-                  "search_past_conversations", "get_current_model",
+                  "get_recent_trades", "recall", "get_current_time",
+                  "get_current_model",
                   "set_conversation_model", "switch_agent", "ask_agent",
                   # Real trading (tastytrade) — the tools existed on the
                   # feat/trading branch but were never added here, so voice
@@ -187,7 +187,7 @@ AGENTS = {
             "biases directly when you spot them: confirmation bias, "
             "anchoring, loss aversion, recency, sunk cost. Your knowledge "
             "base holds full texts on trading psychology (Douglas, "
-            "Schwager, Taleb, Steenbarger); use search_knowledge to ground "
+            "Schwager, Taleb, Steenbarger); use recall to ground "
             "your coaching in it and cite the book when it helps. Tone: "
             "calm, direct, non-judgemental — ask more than you answer, and "
             "hold the user accountable without ever shaming them."
@@ -197,8 +197,7 @@ AGENTS = {
         # actual fills arrive (planned thinkorswim/Schwab import), a
         # read-only trades tool goes here so post-trade reviews see real
         # executions instead of relying on the user's retelling.
-        "tools": {"search_knowledge", "get_current_time",
-                  "search_past_conversations", "get_current_model",
+        "tools": {"recall", "get_current_time", "get_current_model",
                   "set_conversation_model", "switch_agent", "ask_agent"},
         "reads": (),
         "model": "sonnet",      # coaching nuance over latency

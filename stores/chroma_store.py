@@ -83,3 +83,16 @@ def collection(name):
                     name, space, SPACE)
     _spaces[name] = space
     return col
+
+
+def drop(name) -> bool:
+    """Delete a collection outright. Only the fact store's rebuild
+    (scripts/rebuild_facts.py) does this — facts are a derived index and are
+    regenerated from the exchanges; nothing in the agent deletes a
+    collection. False when there was none to delete."""
+    try:
+        chromadb.PersistentClient(path=str(cfg.CHROMA_DIR)).delete_collection(name)
+    except Exception:  # noqa: BLE001 - chromadb's not-found error class has moved between versions
+        return False
+    _spaces.pop(name, None)
+    return True

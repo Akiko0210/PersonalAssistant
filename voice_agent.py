@@ -134,7 +134,8 @@ class Agent:
         self.idle = IdleSound()  # "thinking" cue, looped during model calls
         self.llm = Claude(self.store, self.idle, self.kb)
         # Make sure every saved thread is in the exchange index (idempotent;
-        # a no-op after the first boot) and fold in any legacy staging file.
+        # a no-op after the first boot) and hand the fact extractor whatever it
+        # has not read yet (it runs on the memory worker, in the background).
         # This also loads the embedding model here, at startup, rather than
         # on the first turn.
         self.llm.index_saved_threads()

@@ -1,31 +1,42 @@
-"""Tools over the persona's conversation memory (ConversationMemory)."""
+"""The recall tool: the one way past the Background.
+
+Every turn already retrieves the exchanges, facts and reference passages that
+bear on the message (brain/context.py). What that one shot cannot do is the
+second question the model only knows to ask after reading the first answer —
+"the list mentions a dentist; when did we last discuss the dentist?" — the
+exact words behind a fact (its `from` ids), a stretch of time read in order,
+or more depth than the budget holds. One tool covers all four, over the
+caller's own exchange index and the reference material it may read.
+"""
 
 from lib.dates import PERIODS, window_epochs
 from tools import tool
 
 
 @tool({
-    "name": "search_past_conversations",
+    "name": "recall",
     "description": (
-        "Search YOUR OWN past exchanges with the user — every conversation you "
-        "have had, back to the beginning — for more detail than the Background "
-        "section already shows. The most relevant past exchanges are retrieved "
-        "into your Background automatically each turn, so reach for this when "
-        "the user asks for more ('what exactly did I say', 'list everything we "
-        "discussed about X', 'when did we last talk about Y') or when the "
-        "Background has nothing on a topic you would expect to remember. Time "
-        "words carry no weight in the search itself: when the user refers to a "
-        "time ('this morning', 'yesterday around 9:20', 'last week'), pass "
-        "period or since/until — the window then replaces topic relevance and "
-        "the exchanges come back in order. You know the current time from the "
-        "stamp on each user message. This never sees another assistant's "
-        "conversations — for those, ask them with ask_agent."
+        "Look further into your own memory than the Background shows: your "
+        "past exchanges with the user (back to the beginning) and the user's "
+        "ingested reference material (books, PDFs, course videos — cited by "
+        "page or timestamp). Use it when the Background raises a second "
+        "question, when the user asks for more ('what exactly did I say', "
+        "'everything we discussed about X'), to read the exact exchanges "
+        "behind a fact (pass its `from` ids), or when the user names a time "
+        "('this morning', 'yesterday around 9:20', 'last week'): time words "
+        "carry no weight in a search, so pass period or since/until — the "
+        "window then replaces topic relevance and the exchanges come back in "
+        "order; with a window alone you get that stretch of conversation. You "
+        "know the current time from the stamp on each user message. This "
+        "never sees another assistant's conversations — ask them with "
+        "ask_agent."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "query": {"type": "string",
-                      "description": "Topic to look for in past conversations"},
+                      "description": "Topic to look for. Optional when a time "
+                                     "window or ids are given."},
             "period": {"type": "string", "enum": list(PERIODS),
                        "description": "Named day range, local time — for "
                                       "'yesterday', 'last week'."},
@@ -35,11 +46,22 @@ from tools import tool
             "until": {"type": "string",
                       "description": "ISO local date or datetime: end of the window. "
                                      "A bare date means the end of that day."},
+            "ids": {"type": "array", "items": {"type": "string"},
+                    "description": "Exchange ids to read in full — the `from` "
+                                   "attribute of a Background fact."},
         },
-        "required": ["query"],
     },
 })
-def search_past_conversations(ctx, args):
+def recall(ctx, args):
+    if args.get("ids"):
+        return ctx.memory.fetch(args["ids"], caller=ctx.active_agent)
+    query = (args.get("query") or "").strip()
     window = window_epochs(args.get("period"), args.get("since"), args.get("until"))
-    return ctx.memory.search(args["query"], caller=ctx.active_agent,
-                             window=window, exclude_ids=ctx.tail_ids)
+    if not query and window is None:
+        return "Give recall a topic, a time window, or exchange ids."
+    parts = [ctx.memory.search(query, caller=ctx.active_agent, window=window,
+                               exclude_ids=ctx.tail_ids)]
+    if query and ctx.kb is not None:
+        if passages := ctx.kb.search(query, caller=ctx.active_agent, focus=ctx.focus):
+            parts.append("From the reference material:\n" + passages)
+    return "\n\n".join(parts)

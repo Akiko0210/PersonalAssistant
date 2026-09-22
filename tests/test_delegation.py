@@ -102,7 +102,7 @@ class TestRunDelegatedTask(unittest.TestCase):
         # Alice searches ALICE's memory — the sub-context's active_agent is
         # what the store scopes by, so it must carry the delegate's key.
         c = make_claude([
-            tool_reply("search_past_conversations", {"query": "diagonals"}),
+            tool_reply("recall", {"query": "diagonals"}),
             text_reply("we discussed diagonals"),
         ])
         callers = []
