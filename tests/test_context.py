@@ -305,11 +305,14 @@ class TestConverseSeams(unittest.TestCase):
         c = make_claude([text_reply("fine")])
         c.memory = fake_memory()
 
-        def no_key(model):
-            raise RuntimeError("DEEPSEEK_API_KEY is not set")
-        c.client_for = no_key
+        def client_for(model):
+            if cfg.model_provider(model) == "deepseek":
+                raise RuntimeError("DEEPSEEK_API_KEY is not set")
+            return c.client
+        c.client_for = client_for
         del c._rewriter  # the fixture's stub; exercise the real one
-        self.assertEqual(c.converse("hi"), "fine")
+        with mock.patch.object(cfg, "QUERY_MODEL", "deepseek-v4-flash"):
+            self.assertEqual(c.converse("hi"), "fine")
         self.assertEqual(c.memory.calls[0][0], "hi")
 
     def test_the_pull_is_scoped_to_the_active_persona(self):
