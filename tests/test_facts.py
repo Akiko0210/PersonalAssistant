@@ -88,6 +88,30 @@ class TestApply(unittest.TestCase):
         self.assertNotIn("epoch", meta)
 
 
+class TestIsolation(unittest.TestCase):
+    """The same rule as the exchange index: a persona reads its own facts
+    (plus registry grants) and writes only its own; there is no parameter
+    through which it can name another persona's collection."""
+
+    def test_reads_and_writes_stay_in_the_callers_own_collection(self):
+        cols = {}
+        facts = facts_over(cols)
+        facts.apply("alice", [add("person:user", "Prefers black coffee.")],
+                    xid="xc_1", ts=T1, epoch=1.0)
+        facts.query_rows("coffee", owner="tom")
+        facts.current("tom", ["person:user"])
+        facts.entities("tom")
+        self.assertEqual(set(cols), {cfg.agent_facts_collection("alice"),
+                                     cfg.agent_facts_collection("tom")})
+        self.assertEqual(cols[cfg.agent_facts_collection("tom")].upserts, [])
+        self.assertEqual(facts.current("tom", ["person:user"]), [])
+        # An update naming a fact Tom cannot see is dropped, not applied.
+        (alice_fact,) = cols[cfg.agent_facts_collection("alice")].rows
+        self.assertEqual(facts.apply("tom", [{"op": "update", "id": alice_fact,
+                                              "value": "x"}],
+                                     xid="xc_2", ts=T2, epoch=2.0), (0, 0, 0))
+
+
 class TestExtract(unittest.TestCase):
     def setUp(self):
         self.known = [Hit(0.1, "todo:2026-09-18: Items: one.",
