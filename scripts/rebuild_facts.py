@@ -50,12 +50,12 @@ def main():
         return 1
     try:
         from brain.facts import FactStore, catch_up, extractor
-        from brain.llm import anthropic as anthropic_api
+        from brain.llm.main import make_client
         from brain.memory import ConversationMemory
         from stores import chroma_store
 
         memory, facts = ConversationMemory(), FactStore()
-        ask_facts = extractor(anthropic_api.make_client())
+        ask_facts = extractor(make_client(cfg.FACTS_MODEL))
 
         for owner in owners:
             col = memory._col_for(cfg.agent_memory_collection(owner))

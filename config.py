@@ -195,10 +195,10 @@ CONTEXT_DEBUG_LOG = True          # candidate table + full block at DEBUG on the
 # the facts already known and says what became true (brain/facts.py): six
 # to-do items arrived in six exchanges on 2026-09-18 and top-k retrieval could
 # reach one of them; a list is one fact, kept current.
-QUERY_MODEL = "claude-haiku-4-5"     # on the turn's critical path: latency matters (CONVO_MODELS is defined below)
+QUERY_MODEL = "deepseek-v4-flash"    # on the turn's critical path; DeepSeek Flash by the user's choice (2026-09-22) — needs DEEPSEEK_API_KEY, else the turn falls back to the raw words
 QUERY_RECENT_EXCHANGES = 4           # exchanges the rewrite reads for pronouns and topic
 QUERY_TIMEOUT_S = 8.0                # past this the turn retrieves on the raw utterance
-FACTS_MODEL = "claude-sonnet-5"      # async, so quality over speed: a wrong fact is worse than a missing one
+FACTS_MODEL = "deepseek-v4-flash"    # async; DeepSeek Flash by the user's choice (2026-09-22). Sonnet 5 was the measured baseline (harness, 7/7); re-measure after any change
 FACTS_CANDIDATES = 12                # current facts the extractor sees by hybrid search on the exchange, so an addition becomes an update, not a duplicate
 FACTS_RECENT = 8                     # ...plus the most recently established ones: the list being built now is what the next item updates, however unlike its words
 FACTS_KNOWN_ENTITIES = 80            # entity keys shown so the rewrite can name them and the extractor reuses them instead of inventing

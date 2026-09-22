@@ -141,6 +141,13 @@ def system_blocks(static, background=""):
     return blocks
 
 
+def make_client(model_id):
+    """A fresh client for the provider serving `model_id` — what the offline
+    scripts use where the engine has Claude.client_for (which caches)."""
+    return (deepseek.make_client() if cfg.model_provider(model_id) == "deepseek"
+            else anthropic_api.make_client())
+
+
 class _NullIdle:
     """No-op stand-in so Claude runs without an idle-sound controller (selftest)."""
 
@@ -215,11 +222,25 @@ class Claude:
     def _rewriter(self):
         """The query rewrite's model call on the client serving QUERY_MODEL
         (tests bind a string here)."""
-        return understanding.rewriter(self.client_for(cfg.QUERY_MODEL))
+        return self._bound(understanding.rewriter, cfg.QUERY_MODEL)
 
     def _extractor(self):
         """The fact extractor's model call on the client serving FACTS_MODEL."""
-        return extractor(self.client_for(cfg.FACTS_MODEL))
+        return self._bound(extractor, cfg.FACTS_MODEL)
+
+    def _bound(self, factory, model):
+        """`factory` over the client serving `model`. A provider whose key is
+        missing (a dashboard edit can point QUERY_MODEL at DeepSeek without
+        one) must not cost the turn: the call comes back failing instead, and
+        both callers already treat a failing call as no answer."""
+        try:
+            return factory(self.client_for(model))
+        except RuntimeError as e:
+            err = e
+
+            def unavailable(system, prompt):
+                raise err
+            return unavailable
 
     # Set by the save_conversation_note tool; the agent picks it up after the
     # reply and runs the folder dialogue + save (see voice_agent).

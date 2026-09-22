@@ -298,6 +298,20 @@ class TestConverseSeams(unittest.TestCase):
         c.converse("what about the other one?")
         self.assertEqual(c.memory.calls[0][0], "what about the other one?")
 
+    def test_a_missing_provider_key_costs_the_rewrite_not_the_turn(self):
+        # QUERY_MODEL can be pointed at DeepSeek from the dashboard without
+        # DEEPSEEK_API_KEY; client_for then raises, and the turn must still
+        # answer — on the raw words.
+        c = make_claude([text_reply("fine")])
+        c.memory = fake_memory()
+
+        def no_key(model):
+            raise RuntimeError("DEEPSEEK_API_KEY is not set")
+        c.client_for = no_key
+        del c._rewriter  # the fixture's stub; exercise the real one
+        self.assertEqual(c.converse("hi"), "fine")
+        self.assertEqual(c.memory.calls[0][0], "hi")
+
     def test_the_pull_is_scoped_to_the_active_persona(self):
         c = make_claude(active="tom")
         c.memory = fake_memory()

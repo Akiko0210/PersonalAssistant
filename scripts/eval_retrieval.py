@@ -184,13 +184,10 @@ def main():
         print(f"backfill: {added} companion(s) added, {stamped} record(s) stamped "
               f"({time.monotonic() - t0:.1f}s)")
 
-    client = None
-    if args.extract or args.understand:
-        from brain.llm import anthropic as anthropic_api
-        client = anthropic_api.make_client()
+    from brain.llm.main import make_client  # routes each model to its provider
 
     if args.extract:
-        ask_facts = extractor(client)
+        ask_facts = extractor(make_client(cfg.FACTS_MODEL))
         for k in owners:
             t0 = time.monotonic()
             read, failed = catch_up(
@@ -207,7 +204,7 @@ def main():
             for doc, meta in rows[-60:]:
                 print(f"    [{str(meta.get('ts'))[:16]}] {' '.join(doc.split())[:110]}")
 
-    ask_query = rewriter(client) if args.understand else None
+    ask_query = rewriter(make_client(cfg.QUERY_MODEL)) if args.understand else None
 
     def clock(epoch):
         return datetime.fromtimestamp(epoch).strftime("%m/%d %H:%M") if epoch > 0 else "start"
