@@ -444,6 +444,13 @@ central list or dispatch chain.
   `review_order`, `submit_order` (requires review + explicit confirmation),
   `list_orders`, `cancel_order`, `get_positions`, `get_pnl`, `clear_ticket` —
   real trading via the tastytrade API (see the trading package above).
+- **trade log** (`trade_log_tools.py`): `log_trade` (an email fill alert →
+  one logged order), `import_statement` (a thinkorswim statement CSV →
+  authoritative rows with fees; refused unless it ties out to its TOTAL row),
+  `query_trade_log` (trades + exact totals + open legs, filtered by period,
+  account, symbol, strategy or refs), `trade_log_positions` (positions under
+  the user's zero-net rule, with exact P&L). Writers are Tom's; the two
+  readers are Linda's too. Details under the trading package above.
 
 ---
 

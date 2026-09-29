@@ -31,6 +31,14 @@ Current state this plan builds on:
 
 ## 1. A trading journal for Tom
 
+> **Update 2026-09-29:** the *fills* half of this item now exists as the
+> SQLite trade log (`trading/trade_log.py`, PROJECT.md "The trade log"):
+> thinkorswim fills, exact cash, positions and P&L. What remains here is the
+> *narrative* half — thesis notes and what-happened-and-why, tagged for focus
+> mode. When building it, link entries to the log's `ref`s rather than
+> re-recording fills, and skip the auto-journal-on-submit and Discord
+> backfill steps that the trade log now covers.
+
 ### Goal
 
 A *trading journal* holding recent trading information (fills, adjustments,
