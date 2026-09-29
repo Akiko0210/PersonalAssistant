@@ -116,6 +116,28 @@ class TypedMessageTests(unittest.TestCase):
         agent.run_conversation_turn()
         self.assertEqual(agent.llm.calls, ["hello there"])
 
+    def test_a_message_sent_while_speaking_is_answered_next_not_later(self):
+        # The off-by-one: _deliver_interjections shares its wake event with
+        # the typed queue and clears it on entry, which swallowed the signal
+        # for a message typed mid-reply. The loop then blocked on the mic
+        # until the NEXT message woke it and popped the OLDER one, leaving
+        # every answer one behind (reported 2026-09-16).
+        agent = make_agent()
+        agent._after_reply = lambda interrupted: None
+        agent.queue_typed_message("first")      # arrives while the agent talks
+        agent._deliver_interjections()          # runs before the next listen
+        self.assertTrue(agent.interject.is_set())
+
+        agent.run_conversation_turn()
+        self.assertEqual(agent.llm.calls, ["first"])
+
+    def test_the_wake_clears_once_nothing_is_waiting(self):
+        # The re-arm must be conditional, or the loop would spin instead of
+        # settling into a blocking listen.
+        agent = make_agent()
+        agent._deliver_interjections()
+        self.assertFalse(agent.interject.is_set())
+
     def test_persona_addressing_works_typed(self):
         agent = make_agent()
         agent._after_reply = lambda interrupted: None
@@ -189,6 +211,24 @@ class EmbeddedTests(unittest.TestCase):
         self.addCleanup(handle.stop)
         self.assertIsNotNone(handle.port)
         self.assertTrue(dashboard.agent_running())  # no lock probe needed
+
+    def test_the_dashboard_comes_back_on_an_immediate_restart(self):
+        # Quitting the agent and relaunching it within the minute left it with
+        # no web UI at all: the dashboard page polls constantly, so its
+        # just-closed connections sit in TIME_WAIT and a non-reusable bind is
+        # refused (session_2026-09-16.log 00:39 and 01:12). The traffic below
+        # is what creates those remnants — without it the rebind would pass
+        # either way.
+        first = dashboard.serve_embedded(make_control_agent(), port=0)
+        port = first.port
+        for _ in range(3):
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/api/overview",
+                                   timeout=5).read()
+        first.stop()
+
+        second = dashboard.serve_embedded(make_control_agent(), port=port)
+        self.addCleanup(second.stop)
+        self.assertEqual(second.port, port)
 
     def test_a_taken_port_fails_soft(self):
         first = dashboard.serve_embedded(make_control_agent(), port=0)

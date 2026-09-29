@@ -231,21 +231,39 @@ their own thread (`data/history_<name>.json`), saved after every turn and
 restored on the next start. What you tell one, the others cannot see: ask Tom
 what you discussed with Alice and he'll say he doesn't have access — and
 offer to ask her. Accept, and Alice answers from her own memory as a spoken
-interjection. The live window keeps each thread's most recent exchanges
+interjection. Each thread's transcript is kept on disk for the dashboard
 (`HISTORY_MAX_MESSAGES` in `config.py`).
 
-Older conversation isn't lost when it ages out of a window: its text is
-staged to `data/memory_pending.json` tagged with its persona, and at boot the
-agent consolidates each persona's staged text — one quick model call
-summarises it into a dense memory record embedded in that persona's own
-`conversations_<name>` collection in Chroma. Ask "what did we talk about last
-week?" and the persona searches its own archive
-(`search_past_conversations`); conversations from before the per-persona
+**What the model actually sees each turn is chosen by relevance, not by a
+window.** Every user/assistant exchange is embedded into that persona's own
+`conversations_<name>` collection in Chroma as the turn ends, and — after the
+reply is already being spoken — a second model reads the exchange and updates
+the persona's *facts*: what is true now (a list's current contents, a
+decision, a preference), each fact naming the exchanges it came from. Before
+each reply a small model first reads your words against the last few
+exchanges — so "what about the other one?" becomes a question memory can
+answer, "this morning around 9:40" becomes a time filter, and "my list"
+names the thing whose facts should come along. The agent then sends only the
+last couple of exchanges verbatim (`CONTEXT_RECENT_EXCHANGES`) and retrieves a
+*Background* block for the rest: the facts about what you named, then the
+most relevant past exchanges and facts — found by embedding similarity
+**and** a BM25 keyword index, so tickers, names and numbers match exactly,
+with recent ones weighted up — plus the best-matching knowledge chunks,
+fitted to a character budget (`CONTEXT_CONVO_CHARS`, `CONTEXT_KB_CHARS`). So
+"how did that butterfly do?" finds the exchange from three weeks ago without
+you saying "remember when", and "what's on my list?" gets the whole list,
+not whichever items happened to rank. The `recall` tool is there for digging
+deeper: a follow-up the Background raised, the exact exchanges behind a fact,
+or a stretch of time ("what did we talk about this morning around 9:40?",
+"yesterday") read back in order. Conversations from before the per-persona
 split live in a shared legacy archive every persona can read, labelled as
-such. Consolidation only runs when enough has accumulated, and if it fails
-(e.g. offline) the staged text is kept and retried next boot.
+such. Every turn is logged (`query`, `context pull` and `remembered exchange`
+lines in the session log, with the full candidate table when
+`CONTEXT_DEBUG_LOG` is on) so the thresholds can be tuned from what was
+actually retrieved; `scripts/rebuild_facts.py` regenerates a persona's facts
+from its exchanges whenever the extractor changes.
 `scripts/seed_agent_memory.py` (run once, agent off) backfills each persona's
-archive from the session logs.
+index from the session logs.
 
 Knowledge splits the same way: the dashboard's ingest has a target selector,
 so a document can go into the common knowledge base (all personas) or one
@@ -380,8 +398,8 @@ noticeably better on jargon and, as a one-time cost, usually worth it) and
 `KB_MEDIA_EXTS`. `KB_MEDIA_MODEL` is also settable from the dashboard.
 
 After that, ask trading questions in conversation ("what does my course say about
-iron condors?"). The agent uses the `search_knowledge` tool on demand and cites the
-source — a page for books, a timestamp like `14:32` for video. `run.bat --kb-list`
+iron condors?"). The agent retrieves from it every turn, digs deeper with the
+`recall` tool on demand, and cites the source — a page for books, a timestamp like `14:32` for video. `run.bat --kb-list`
 shows what's been ingested, with page count or running time. The content stays
 local and, like the rest of `data/`, is gitignored.
 
@@ -441,6 +459,26 @@ invalidates the review. *"Cancel the order"*, *"what are my positions?"*, and
 *"how much did I make this week on SPX?"* work as expected. Design and API
 research: [TRADING_PLAN.md](docs/TRADING_PLAN.md),
 [TRADING_RESEARCH.md](docs/TRADING_RESEARCH.md).
+
+## Trade log for thinkorswim (Tom)
+
+Tom keeps a log of your thinkorswim/Schwab fills in
+`data/trading/trade_log.db` (SQLite), and prices your positions from it.
+
+- **Fill alerts.** Ask *"Tom, log my latest thinkorswim fill."* He reads the
+  alert email and logs it. The cash is exact, but fees stay pending until a
+  statement arrives.
+- **Statements.** Export the account statement CSV from thinkorswim into your
+  statements folder (`~/Dropbox/1eac notes/analysis` by default, or set
+  `TRADE_STATEMENTS_DIR`), then say *"Tom, import my latest statement."* A
+  statement is the authoritative record: it adds exact fees and expirations,
+  and it replaces the alert-logged fills of the span it covers. It is refused
+  if its rows don't add up to its own TOTAL row.
+- **Positions.** A position is the minimal set of trades whose legs net to
+  zero. Ask *"what was my P&L on calendars in August?"* or *"list my open
+  positions on the IRA."* Every figure is summed from the log. If you have
+  several accounts and don't name one, Tom asks which. Linda can read the log
+  too, for post-trade reviews.
 
 ## Switching the model by voice
 

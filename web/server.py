@@ -2,7 +2,7 @@
 
 A visual companion to the running (or resting) agent: browse notes and
 folders, read transcripts, inspect the live conversation history, long-term
-memory staging, the knowledge base, Discord captures, and session logs — and
+the knowledge base, Discord captures, and session logs — and
 adjust the tunable config values (endpointing, settle window, barge-in,
 models, ...) from a form instead of editing config.py.
 
@@ -42,6 +42,7 @@ import argparse
 import json
 import logging
 import re
+import socket
 import sys
 import threading
 import time
@@ -159,6 +160,15 @@ TUNABLES = [
     dict(key="SUMMARY_MODEL", group="Models & tokens", label="Summary model",
          type="choice", choices=model_choices(SUMMARY_MODEL_LABELS, cfg.SUMMARY_MODEL),
          help="Model used for note summaries (quality matters more than latency here)."),
+    dict(key="QUERY_MODEL", group="Models & tokens", label="Query model",
+         type="choice", choices=model_choices(cfg.CONVO_MODEL_LABELS, cfg.QUERY_MODEL),
+         help="Reads your words before each reply (a self-contained query, a time window, the things it is about). On the turn's critical path, so a fast model."),
+    dict(key="QUERY_TIMEOUT_S", group="Models & tokens", label="Query timeout",
+         type="float", min=1.0, max=30.0, step=0.5, unit="s",
+         help="Past this the turn retrieves on your raw words instead of waiting."),
+    dict(key="FACTS_MODEL", group="Models & tokens", label="Facts model",
+         type="choice", choices=model_choices(SUMMARY_MODEL_LABELS, cfg.FACTS_MODEL),
+         help="Reads each finished exchange for what became true (lists, decisions, preferences). Runs after the reply is spoken, so quality over speed."),
     dict(key="CONVO_MAX_TOKENS", group="Models & tokens", label="Reply budget",
          type="int", min=256, max=16384, step=256, unit="tokens",
          help="Must cover tool calls too — a saved note travels inside the reply. Billed as used, so a roomy cap costs nothing on short replies."),
@@ -179,18 +189,30 @@ TUNABLES = [
          type="text", nullable=True,
          help="SAPI voice id substring; leave empty for the system default."),
     # -- Memory & search ------------------------------------------------------
-    dict(key="HISTORY_MAX_MESSAGES", group="Memory & search", label="History window",
+    dict(key="HISTORY_MAX_MESSAGES", group="Memory & search", label="Transcript kept",
          type="int", min=4, max=200, step=2, unit="msgs",
-         help="Messages kept when persisting/restoring conversation history."),
+         help="Messages kept on disk per persona (what this dashboard shows). The model sees the recent exchanges below plus retrieved Background, not this window."),
+    dict(key="CONTEXT_RECENT_EXCHANGES", group="Memory & search", label="Recent exchanges verbatim",
+         type="int", min=0, max=10, step=1, unit="",
+         help="Previous user/assistant exchanges sent to the model word for word each turn. Everything older reaches it by retrieval."),
+    dict(key="CONTEXT_CONVO_CHARS", group="Memory & search", label="Past-conversation budget",
+         type="int", min=0, max=12000, step=500, unit="chars",
+         help="Characters of retrieved past exchanges per turn (~4 chars per token)."),
+    dict(key="CONTEXT_KB_CHARS", group="Memory & search", label="Knowledge budget",
+         type="int", min=0, max=12000, step=500, unit="chars",
+         help="Characters of retrieved reference chunks per turn; also takes what the conversation budget leaves unused."),
+    dict(key="CONTEXT_MIN_SIMILARITY", group="Memory & search", label="Relevance floor",
+         type="float", min=0.0, max=0.9, step=0.05, unit="",
+         help="Cosine similarity a retrieved item needs to enter the Background. Lower pulls more, riskier context; check the context log lines."),
     dict(key="SEARCH_RESULTS", group="Memory & search", label="Note search results",
          type="int", min=1, max=20, step=1, unit="",
          help="Results per search_notes call."),
     dict(key="KB_SEARCH_RESULTS", group="Memory & search", label="Knowledge results",
          type="int", min=1, max=20, step=1, unit="",
-         help="Chunks returned per search_knowledge call."),
+         help="Reference chunks per recall call."),
     dict(key="MEMORY_SEARCH_RESULTS", group="Memory & search", label="Memory results",
          type="int", min=1, max=10, step=1, unit="",
-         help="Summaries returned per search_past_conversations call."),
+         help="Past exchanges per recall call."),
     # -- Headset button -------------------------------------------------------
     dict(key="MEDIA_KEEPALIVE", group="Headset button", label="Media keepalive",
          type="bool",
@@ -276,7 +298,7 @@ def validate_payload(payload):
 
 # The lock probe below is cheap but not free: when no agent holds the lock, the
 # probe takes it and releasing DELETES the lock file. The sidebar polls it from
-# every open tab, in a folder Dropbox is watching — so the answer is memoised
+# every open tab, so the answer is memoised
 # for a moment. Staleness is bounded by the TTL and harmless: this drives
 # display and the standalone controls' error message. The ingest job does NOT
 # use this — it proves the agent is absent by taking the real lock
@@ -332,7 +354,6 @@ def api_overview():
     # live windows.
     n_history = sum(len(read_json(cfg.history_path(k), []))
                     for k in agents_registry.AGENTS)
-    pending = read_json(cfg.MEMORY_PENDING_PATH, [])
     manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     logs = sorted(cfg.LOG_DIR.glob("session_*.log")) if cfg.LOG_DIR.exists() else []
 
@@ -357,7 +378,6 @@ def api_overview():
             if slug not in folders
         ],
         "history_messages": n_history,
-        "memory_pending": len(pending),
         "knowledge_docs": len(manifest),
         "log_files": len(logs),
         "convo_model": cfg.convo_model_label(cfg.CONVO_MODEL),
@@ -714,11 +734,6 @@ def api_history(limit=200, agent=None):
                        for k, a in agents_registry.AGENTS.items()]}
 
 
-def api_memory():
-    return {"pending": read_json(cfg.MEMORY_PENDING_PATH, []),
-            "min_messages": cfg.MEMORY_MIN_MESSAGES}
-
-
 def api_knowledge():
     manifest = read_json(cfg.KNOWLEDGE_MANIFEST, {})
     docs = [{"hash": h[:12], **info} for h, info in manifest.items()]
@@ -996,8 +1011,6 @@ class Handler(BaseHTTPRequestHandler):
             if route == "/api/history":
                 return self._send(200, api_history(int(arg("limit", "200")),
                                                    arg("agent", None)))
-            if route == "/api/memory":
-                return self._send(200, api_memory())
             if route == "/api/knowledge":
                 return self._send(200, api_knowledge())
             if route == "/api/knowledge/job":
@@ -1102,16 +1115,38 @@ class Handler(BaseHTTPRequestHandler):
 
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
-    # Windows quirk: with the inherited allow_reuse_address=True a second bind
-    # on the same port silently SUCCEEDS, so a port conflict would go
-    # undetected instead of producing the honest error/soft-fail below.
-    allow_reuse_address = False
+    # The stdlib default (True), restored deliberately — see _port_is_serving
+    # for why the bind alone can't be trusted to detect a real conflict.
+    allow_reuse_address = True
+
+
+def _port_is_serving(port, timeout=0.2):
+    """True when something is already LISTENING on `port`.
+
+    The bind alone cannot answer this portably, and both ways of asking it
+    are wrong on one OS. With allow_reuse_address=False a bind fails on
+    macOS/Linux merely because the LAST dashboard's closed connections are
+    still in TIME_WAIT — and the page polls constantly, so there always are
+    some: restarting the agent within the minute came up with no web UI at
+    all (session_2026-09-16.log 00:39 and 01:12). With it True, a second bind
+    on Windows silently succeeds and a genuine conflict goes undetected.
+
+    A connection attempt separates the two cases on every OS: only a live
+    listener accepts one, while TIME_WAIT remnants refuse."""
+    if not port:
+        return False  # port 0 means "any free port"; there is nothing to probe
+    with socket.socket() as probe:
+        probe.settimeout(timeout)
+        return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
 def build_server(port, agent=None):
     """The dashboard server, not yet serving. `agent` is the live Agent when
     embedded in the agent process, None standalone; Handler reads it via
-    self.server.agent. Raises OSError if the port can't be bound."""
+    self.server.agent. Raises OSError if the port is already served or can't
+    be bound."""
+    if _port_is_serving(port):
+        raise OSError(f"port {port} is already serving")
     server = _Server(("127.0.0.1", port), Handler)
     server.agent = agent
     return server

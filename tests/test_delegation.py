@@ -17,6 +17,7 @@ import unittest
 from types import SimpleNamespace
 
 from brain import agents
+from brain.memory import Rows
 import config as cfg
 from voice_agent import Agent
 from tests.llm_fixtures import (FakeBlock, make_claude as _make_claude,
@@ -101,14 +102,14 @@ class TestRunDelegatedTask(unittest.TestCase):
         # Alice searches ALICE's memory — the sub-context's active_agent is
         # what the store scopes by, so it must carry the delegate's key.
         c = make_claude([
-            tool_reply("search_past_conversations", {"query": "diagonals"}),
+            tool_reply("recall", {"query": "diagonals"}),
             text_reply("we discussed diagonals"),
         ])
         callers = []
         c.memory = SimpleNamespace(
-            record_dropped=lambda dropped, owner: None,
-            search=lambda q, client=None, caller=None:
-                callers.append(caller) or "nothing found")
+            index_exchanges=lambda *a, **k: 0,
+            query_rows=lambda *a, **k: Rows([], [], 0, None),
+            search=lambda q, caller=None, **kw: callers.append(caller) or "nothing found")
         c.run_delegated_task("alice", "what did we discuss?")
         self.assertEqual(callers, ["alice"])
 
@@ -183,6 +184,7 @@ class _Shell:
                                    exception=lambda *a: None)
         self.interject = threading.Event()
         self.interjections = queue.Queue()
+        self.typed = queue.Queue()  # delivery re-arms the wake for these
 
     def say(self, text, **kw):
         self.spoken.append((text, kw))
@@ -288,6 +290,15 @@ class TestInterjectionDelivery(unittest.TestCase):
         shell.interject.set()
         Agent._deliver_interjections(shell)
         self.assertFalse(shell.interject.is_set())
+
+    def test_a_waiting_typed_message_keeps_the_wake_armed(self):
+        # The event is shared with the dashboard's queue; clearing it here
+        # once swallowed a message typed mid-reply (see test_web_controls).
+        shell = _Shell()
+        shell.typed.put(("hello", None))
+        shell.interject.set()
+        Agent._deliver_interjections(shell)
+        self.assertTrue(shell.interject.is_set())
 
     def test_voice_restored_even_when_the_save_flow_raises(self):
         shell = _Shell(active="alice")

@@ -16,7 +16,8 @@ agent's dashboard"). Code lives in topic packages: `speech/` (mic, STT, TTS,
 barge-in), `media_control/` (headset buttons: portable gesture decoding in
 `gestures.py`, per-OS channels in `windows.py`/`macos.py`/`linux.py`, wired
 by `main.py`), `brain/` (llm/ — the engine in `main.py`, providers in
-`anthropic.py`/`deepseek.py` — plus agents, history, memory), `stores/`
+`anthropic.py`/`deepseek.py` — plus agents, history, memory, facts, query,
+context), `stores/`
 (notes, knowledge, categories), `lib/` (leaf utilities), `web/` (server +
 static), `tools/` (the tool registry), and `trading/`. Entry points and
 `config.py` stay at root.
@@ -74,8 +75,9 @@ yourself editing them, stop and reconsider.
 - Several Pythons per machine, only one with the deps: `.claude/launch.json`
   pins it (Windows Store Python on the PC, `.venv` on the Mac) — keep the pin
   pointed at whichever interpreter has the deps on the machine you're on.
-- `data/` is Dropbox-synced: use `lib/atomic_io` for state files (it retries
-  Windows sharing violations); avoid chatty disk writes.
+- `data/` is the user's own state and is gitignored: use `lib/atomic_io` for
+  state files (atomic temp-and-rename, with a retry for Windows file-lock
+  violations); avoid chatty disk writes.
 - The single-instance lock (`lib/single_instance/`) means agent-side
   scripts and a running agent are mutually exclusive; probing the lock
   deletes the lock file when free (`web/server.py` memoises the probe).

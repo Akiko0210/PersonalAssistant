@@ -60,7 +60,7 @@ class TestAtomicWrite(unittest.TestCase):
 
     def test_transient_sharing_violation_is_retried(self):
         # Windows: os.replace fails with PermissionError while another process
-        # (Dropbox sync, AV scanner) briefly holds the destination open. Those
+        # (an AV scanner, the Search indexer) briefly holds it open. Those
         # holds clear in milliseconds — the write must retry, not crash.
         real_replace = os.replace
         calls = {"n": 0}

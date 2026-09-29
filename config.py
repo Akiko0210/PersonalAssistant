@@ -45,14 +45,18 @@ PENDING_DIR = DATA_DIR / "pending"
 # Reference material (trading books/PDFs/text) the user drops in to build a
 # searchable knowledge base. Kept at the project root (not under data/) so it's
 # easy to find and manage. Ingested once into a persistent Chroma collection —
-# which lives in data/chroma — and queried on demand via the search_knowledge
-# tool, never pasted into the conversation.
+# which lives in data/chroma — and queried by retrieval each turn and by the
+# recall tool on demand, never pasted into the conversation.
 KNOWLEDGE_DIR = BASE_DIR / "knowledge"
 KNOWLEDGE_MANIFEST = KNOWLEDGE_DIR / "manifest.json"  # {sha256: {source,title,...}}
-# Conversation memory: each persona keeps its OWN thread with the user, saved
-# after every turn and restored (trimmed) on the next boot. Isolation is
+# Conversation transcript: each persona keeps its OWN thread with the user,
+# saved after every turn and restored (trimmed) on the next boot. Isolation is
 # structural — Tom's file simply never contains Alice's turns — so "what did I
 # tell Alice?" is answered by asking Alice (ask_agent), not by filtering.
+# This cap is the DASHBOARD's transcript length, not what the model sees: the
+# model gets the last CONTEXT_RECENT_EXCHANGES verbatim plus a retrieved
+# Background ("Retrieval-first context" below), and every exchange is indexed
+# the moment it ends, so nothing falls off this window unremembered.
 HISTORY_MAX_MESSAGES = 40   # messages kept when persisting/restoring a thread
 
 
@@ -60,15 +64,6 @@ def history_path(key):
     return DATA_DIR / f"history_{key}.json"
 
 
-# The pre-isolation single shared history. Only the one-time migration in
-# llm.py touches it (renames to .bak); scripts/seed_agent_memory.py mines the
-# session logs instead, which cover the same turns with attribution.
-HISTORY_PATH = DATA_DIR / "history.json"
-# Long-term memory: messages that fall off the window above are not lost — their
-# text is staged here, then consolidated (summarised by the model and embedded
-# into a persistent Chroma collection) so older conversations stay searchable
-# via the search_past_conversations tool.
-MEMORY_PENDING_PATH = DATA_DIR / "memory_pending.json"
 # Legacy flat locations — only referenced by the one-time migration in notes.py.
 SUMMARY_DIR = DATA_DIR / "summaries"
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
@@ -85,9 +80,11 @@ DISCORD_LOG_PATH = DISCORD_DIR / "discord_log.md"
 DISCORD_TRADES_PATH = DISCORD_DIR / "trades.txt"
 
 # --- Gmail (email tools) ------------------------------------------------------
-# OAuth artifacts live in data/ so one browser consent (python -m lib.gmail_auth)
-# syncs to the other machine via Dropbox. The client secret comes from the
-# Google Cloud console (Auth Platform -> Clients -> Download JSON).
+# OAuth artifacts live in data/ with the rest of the user's own state, so they
+# are gitignored and a credential can never enter version control. The consent
+# (python -m lib.gmail_auth) is per machine; copy gmail_token.json across by
+# hand to skip repeating it. The client secret comes from the Google Cloud
+# console (Auth Platform -> Clients -> Download JSON).
 GMAIL_CLIENT_SECRET_PATH = DATA_DIR / "gmail_client_secret.json"
 GMAIL_TOKEN_PATH = DATA_DIR / "gmail_token.json"
 # The consent flow's loopback port. Deliberately NOT DASHBOARD_PORT: both
@@ -148,9 +145,13 @@ def agent_memory_collection(key):
     return f"conversations_{key}"
 
 
+def agent_facts_collection(key):
+    return f"facts_{key}"
+
+
 KB_CHUNK_CHARS = 1000                # target characters per embedded chunk
 KB_CHUNK_OVERLAP = 150               # characters shared between adjacent chunks
-KB_SEARCH_RESULTS = 5                # chunks returned per search_knowledge call
+KB_SEARCH_RESULTS = 5                # reference chunks the recall tool returns
 # Recorded lecture material, transcribed by Whisper on the way in. Decoding is
 # handled by PyAV (bundled with faster-whisper), so no ffmpeg install is needed.
 KB_MEDIA_EXTS = (".mp4", ".m4a", ".mp3", ".mkv", ".mov", ".wav", ".webm")
@@ -158,11 +159,54 @@ KB_MEDIA_EXTS = (".mp4", ".m4a", ".mp3", ".mkv", ".mov", ".wav", ".webm")
 # live dictation: medium.en is noticeably better on jargon and worth it here.
 KB_MEDIA_MODEL = "small.en"
 
-# --- Long-term conversation memory --------------------------------------------
-MEMORY_COLLECTION = "conversations"  # Chroma collection of archived summaries
-MEMORY_MIN_MESSAGES = 6              # consolidate only once this many lines staged
-MEMORY_MAX_TOKENS = 700              # budget for one consolidation summary
-MEMORY_SEARCH_RESULTS = 3            # summaries returned per search
+# --- Conversation memory --------------------------------------------------------
+# Each persona's exchanges live in conversations_<key> (agent_memory_collection
+# above): one record per user↔assistant exchange, written the moment its turn
+# ends. The pre-isolation shared collection is read-only legacy — its summary
+# records are readable by every persona and labelled as such.
+MEMORY_COLLECTION = "conversations"  # legacy shared archive, read-only
+# The "look deeper" tool must never look shallower than the Background it goes
+# beyond: it returned 3 while the block weighed 12 candidates (2026-09-17).
+MEMORY_SEARCH_RESULTS = 8            # exchanges the recall tool returns
+
+# --- Retrieval-first context ---------------------------------------------------
+# What the model sees about the past, every turn: the last few exchanges
+# verbatim, then a Background block retrieved from the exchange index (dense +
+# BM25, recency-weighted — brain/context.py) and the knowledge base, filled to
+# a character budget (~4 chars per token). The thresholds are tuned from the
+# "context" logger's lines, not guessed; leave CONTEXT_DEBUG_LOG on until they
+# settle.
+CONTEXT_RECENT_EXCHANGES = 2      # previous exchanges sent verbatim; older ones reach the model by retrieval
+CONTEXT_CANDIDATES = 16           # exchanges per retriever per store before fusion — more than fits, so ranking has a choice; at 12 the list read-back sat just outside the pool for a short question that had borrowed its previous turn (scripts/eval_retrieval.py, 2026-09-18)
+CONTEXT_MMR_LAMBDA = 0.7          # fill by marginal score, λ·score − (1−λ)·cosine to what is already kept (MMR); 1.0 = plain score order, which let nine near-duplicate "about the list" exchanges fill the budget ahead of the list itself (2026-09-17). 0.7 keeps the list and both harness controls
+CONTEXT_CONVO_CHARS = 4000        # ~1k tokens of past exchanges per turn
+CONTEXT_KB_CHARS = 3000           # ~750 tokens of reference chunks; also takes the conversation budget's leftover
+CONTEXT_HIT_CHARS = 800           # per-exchange cap so one long reply can't eat the budget
+CONTEXT_MIN_SIMILARITY = 0.25     # cosine gate for dense hits (a real cosine: the store is cosine space — until 2026-09-18 similarity() read 0.5+cos/2 and this never fired); MiniLM puts unrelated short texts at 0.0-0.2 — retune from scripts/eval_retrieval.py
+CONTEXT_MIN_LEXICAL = 0.5         # BM25 gate, relative to the turn's best lexical hit — a small personal corpus has no stable absolute scale
+CONTEXT_LEXICAL_WEIGHT = 0.5      # BM25's share of the fused score: dense leads, exact names/tickers/numbers boost
+CONTEXT_RECENCY_WEIGHT = 0.3      # Park-style additive recency term: reorders relevant hits, never rescues irrelevant ones
+CONTEXT_RECENCY_HALF_LIFE_H = 168 # a week-old exchange keeps half its recency credit (Park et al. use ~5.8 days)
+CONTEXT_DEBUG_LOG = True          # candidate table + full block at DEBUG on the "context" logger; turn off once tuned
+
+# --- Query understanding and fact extraction -------------------------------------
+# Two small model calls bracket every turn. BEFORE retrieval, one reads the last
+# few exchanges and turns the utterance into what the stores can act on
+# (brain/query.py): a self-contained query — embeddings cannot resolve "the
+# other one" — a time window when a time was named (a filter: "this morning at
+# 9:41" sits at cosine 0.02-0.09 against the exchanges it means), and which
+# tracked entities it is about (their facts are then included by key). AFTER
+# the reply, off the speaking path, another reads the finished exchange against
+# the facts already known and says what became true (brain/facts.py): six
+# to-do items arrived in six exchanges on 2026-09-18 and top-k retrieval could
+# reach one of them; a list is one fact, kept current.
+QUERY_MODEL = "deepseek-v4-flash"    # on the turn's critical path; DeepSeek Flash by the user's choice (2026-09-22) — needs DEEPSEEK_API_KEY, else the turn falls back to the raw words
+QUERY_RECENT_EXCHANGES = 4           # exchanges the rewrite reads for pronouns and topic
+QUERY_TIMEOUT_S = 8.0                # past this the turn retrieves on the raw utterance
+FACTS_MODEL = "deepseek-v4-flash"    # async; DeepSeek Flash by the user's choice (2026-09-22). Sonnet 5 was the measured baseline (harness, 7/7); re-measure after any change
+FACTS_CANDIDATES = 12                # current facts the extractor sees by hybrid search on the exchange, so an addition becomes an update, not a duplicate
+FACTS_RECENT = 8                     # ...plus the most recently established ones: the list being built now is what the next item updates, however unlike its words
+FACTS_KNOWN_ENTITIES = 80            # entity keys shown so the rewrite can name them and the extractor reuses them instead of inventing
 
 # --- Text-to-speech (local: SAPI / NSSpeechSynthesizer / Piper) ---------------
 TTS_RATE = 175                # words per minute
@@ -172,7 +216,8 @@ TTS_VOICE = None              # None = system default; or a voice-name substring
 # Hugging Face the first time the agent talks (~60 MB), the way faster-whisper
 # fetches its model. Others: `python -m piper.download_voices en_US-ryan-medium
 # --data-dir <PIPER_VOICE_DIR>`; TTS_VOICE / a persona's tts_voice then pick one
-# by substring ("ryan"). Kept out of data/: models are not for Dropbox.
+# by substring ("ryan"). Kept out of data/: a ~60 MB model is a cache, not
+# the user's state.
 PIPER_VOICE = "en_US-lessac-medium"
 PIPER_VOICE_DIR = Path.home() / ".cache" / "piper"
 
@@ -390,8 +435,10 @@ CONVO_SYSTEM_BASE = (
     "conversational — a sentence or two unless more detail is clearly wanted. "
     "Do not use markdown, bullet points, or emoji; write plain spoken sentences. "
     "You have tools available. ALWAYS call the relevant tool to answer any factual "
-    "question — never answer from memory or conversation history when a tool can "
-    "provide the answer. "
+    "question about the CURRENT state of something — notes, email, trades, the "
+    "time, the system — never from memory or conversation history when a tool can "
+    "report it. What was said or decided in earlier conversations is different: "
+    "that may come from the Background section without a tool call. "
     "Ground rules about your own actions: every action you take happens through a "
     "tool call, and tools are synchronous — they return their result before you "
     "speak. From your perspective a tool call can never hang, run in the "
@@ -410,8 +457,12 @@ CONVO_SYSTEM_BASE = (
     "Past notes and conversation summaries record what was said at the time — "
     "treat them as claims, not established facts, especially self-diagnoses of "
     "bugs or system behaviour. "
-    "Your conversation history is saved and restored across restarts, so you may "
-    "remember earlier sessions — treat restored history as past conversations. "
+    "Only your last few exchanges with the user appear verbatim; earlier "
+    "conversations reach you through a Background section retrieved for each "
+    "turn: the past exchanges that bear on the message, and the facts you have "
+    "learned, each dated as of when it was established — use it naturally, as "
+    "your own memory, and call recall only when you need more than it shows or "
+    "the exact words behind a fact. "
     "The system prefixes each user message with the local time it was spoken, "
     "like (1:47pm 8/20/2026). Use the stamps to notice time passing: when a "
     "message arrives hours or days after the previous one, earlier context may "
@@ -498,6 +549,15 @@ OVERRIDABLE = {
     # memory / search
     "HISTORY_MAX_MESSAGES": int, "SEARCH_RESULTS": int, "KB_SEARCH_RESULTS": int,
     "MEMORY_SEARCH_RESULTS": int,
+    # retrieval-first context (the knobs scripts/eval_retrieval.py sweeps)
+    "CONTEXT_RECENT_EXCHANGES": int, "CONTEXT_CANDIDATES": int,
+    "CONTEXT_CONVO_CHARS": int, "CONTEXT_KB_CHARS": int,
+    "CONTEXT_MIN_SIMILARITY": float, "CONTEXT_MIN_LEXICAL": float,
+    "CONTEXT_LEXICAL_WEIGHT": float, "CONTEXT_RECENCY_WEIGHT": float,
+    "CONTEXT_MMR_LAMBDA": float, "CONTEXT_DEBUG_LOG": bool,
+    # query understanding / fact extraction
+    "QUERY_MODEL": str, "QUERY_RECENT_EXCHANGES": int, "QUERY_TIMEOUT_S": float,
+    "FACTS_MODEL": str, "FACTS_CANDIDATES": int, "FACTS_RECENT": int,
     # headset button
     "MEDIA_KEEPALIVE": bool, "MEDIA_CLICK_DEDUPE_S": float,
     # microphone

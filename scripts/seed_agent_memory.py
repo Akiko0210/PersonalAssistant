@@ -1,13 +1,12 @@
-"""One-shot: seed each persona's conversation archive from the session logs.
+"""One-shot: seed each persona's exchange index from the session logs.
 
-The per-agent memory split starts every persona with an empty archive, but the
-recent session logs (logs/session_*.log) hold full transcripts — and every
-turn in them is attributable: each boot starts on DEFAULT_AGENT, and every
-switch is logged ("=== talking to X" / "active agent -> x"). This script
-replays that attribution, groups the turns into persona-per-day chunks,
-summarises each with the same CONSOLIDATE_PROMPT the live consolidator uses,
-and upserts into conversations_<key>. Ids are deterministic
-(conv_<date>_<key>_seed), so re-running overwrites rather than duplicates.
+The session logs (logs/session_*.log) hold full transcripts, and every turn
+in them is attributable: each boot starts on DEFAULT_AGENT, and every switch
+is logged ("=== talking to X" / "active agent -> x"). This script replays that
+attribution and indexes the turns as exchange records through the same
+ConversationMemory.index_exchanges the live agent uses — no model call, one
+record per user/assistant exchange, stamped with the log line's time. Ids are
+deterministic, so re-running skips what is already indexed.
 
 ONLY THE LAST `--days` DAYS OF LOGS ARE READ (default 7). Personas did not
 exist before 2026-07-20 — the first switch line in these logs names "Cobe",
@@ -15,12 +14,9 @@ a persona since renamed and no longer in the alias map. In an older log there
 is nothing to attribute turns to, so every one of them would be filed under
 DEFAULT_AGENT and Alice would "remember" months of conversations that were
 never hers. A first run against all 24 logs produced exactly that: 26 Alice
-records reaching back to June. The window is the guard; seeded records that
-fall outside it are pruned on each run, so narrowing the window cleans up
-after a wider one.
+records reaching back to June. The window is the guard.
 
-Cost: one model call per persona-day chunk with enough lines. Run with the
-agent OFF:
+Run with the agent OFF (it writes the same Chroma store):
 
     python -m scripts.seed_agent_memory [--days N] [--dry-run]
 """
@@ -33,19 +29,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv()  # ANTHROPIC_API_KEY, same as voice_agent's startup
-except ImportError:
-    pass
-
 import config as cfg  # noqa: E402
 from brain import agents  # noqa: E402
-from brain.memory import CONSOLIDATE_PROMPT  # noqa: E402
 from lib.single_instance.main import AlreadyRunning, SingleInstance  # noqa: E402
 
 # One log line: "2026-08-10 09:22:11,286 agent    INFO    <message>".
-_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) \d{2}:\d{2}:\d{2},\d+ "
+_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2}),\d+ "
                    r"\S+\s+\S+\s+(.*)$")
 _SWITCH_BANNER = re.compile(r"^=== talking to (\w+) ")
 _SWITCH_LOG = re.compile(r"^active agent -> (\w+)")
@@ -53,7 +42,6 @@ _SWITCH_LOG = re.compile(r"^active agent -> (\w+)")
 _USER = re.compile(r"^you(?: \(typed\)| \(continued\))?: (.*)$")
 _AGENT = re.compile(r"^agent: (.*)$")
 
-_CHUNK_CHAR_BUDGET = 100_000  # ~25k tokens; newest lines win, like recall
 _LOG_NAME = re.compile(r"session_(\d{4}-\d{2}-\d{2})\.log$")
 DEFAULT_DAYS = 7  # see the module docstring: older logs predate personas
 
@@ -77,7 +65,9 @@ def select_logs(paths, days, today=None):
 
 
 def parse_logs(paths):
-    """(date, persona, 'role: text') turns from the session logs, in order.
+    """[date, persona, 'role: text', ts] turns from the session logs, in
+    order — `ts` is the line's local time as ISO, the stamp the exchange
+    record is dated by.
 
     Attribution state machine: a boot marker resets the persona to
     DEFAULT_AGENT (a fresh process always starts there); a switch line flips
@@ -93,7 +83,8 @@ def parse_logs(paths):
                 if current is not None and raw.strip():
                     current[2] = current[2] + " " + raw.strip()
                 continue
-            date, msg = m.group(1), m.group(2)
+            date, clock, msg = m.group(1), m.group(2), m.group(3)
+            ts = f"{date}T{clock}"
             current = None
             if msg.startswith("startup took"):
                 persona = agents.DEFAULT_AGENT
@@ -104,12 +95,12 @@ def parse_logs(paths):
                 continue
             user = _USER.match(msg)
             if user:
-                current = [date, persona, "user: " + user.group(1)]
+                current = [date, persona, "user: " + user.group(1), ts]
                 turns.append(current)
                 continue
             reply = _AGENT.match(msg)
             if reply:
-                current = [date, persona, "assistant: " + reply.group(1)]
+                current = [date, persona, "assistant: " + reply.group(1), ts]
                 turns.append(current)
     return turns
 
@@ -117,79 +108,34 @@ def parse_logs(paths):
 def chunk_by_persona_day(turns):
     """{(persona, date): [line, ...]} preserving turn order."""
     chunks = {}
-    for date, persona, line in turns:
+    for date, persona, line, _ in turns:
         chunks.setdefault((persona, date), []).append(line)
     return chunks
 
 
-def prune_outside_window(cutoff, dry_run=False):
-    """Drop previously seeded records older than the cutoff. Touches ONLY
-    records this script wrote (metadata seeded=True), so a summary the live
-    agent consolidated can never be caught by it. Ids are fetched and
-    filtered here rather than handed to Chroma as a range query — the dates
-    are strings, and a where= comparison on those is not worth trusting with
-    a delete."""
-    from brain import agents as agent_registry
-    from stores import chroma_store
-
-    removed = 0
-    for key in agent_registry.AGENTS:
-        col = chroma_store.collection(cfg.agent_memory_collection(key))
-        got = col.get(where={"seeded": True}, include=["metadatas"])
-        stale = [i for i, m in zip(got["ids"], got["metadatas"])
-                 if (m or {}).get("date", "") < cutoff.isoformat()]
-        if not stale:
-            continue
-        print(f"  {'would prune' if dry_run else 'pruned'} {len(stale)} "
-              f"stale seeded record(s) from {key}", flush=True)
-        if not dry_run:
-            col.delete(ids=stale)
-        removed += len(stale)
-    return removed
-
-
-def summarise_and_store(chunks, dry_run=False):
-    import anthropic
-    from stores import chroma_store
-
-    client = None if dry_run else anthropic.Anthropic()
-    seeded = 0
-    # `day`, not `date`: the module-level datetime.date import must stay
-    # reachable from inside this function.
-    for (persona, day), lines in sorted(chunks.items(), key=lambda i: i[0][1]):
-        if len(lines) < cfg.MEMORY_MIN_MESSAGES:
-            print(f"  skip {persona} {day}: only {len(lines)} line(s)", flush=True)
-            continue
-        if dry_run:
-            print(f"  would seed {persona} {day}: {len(lines)} line(s)", flush=True)
-            continue
-        transcript = f"[{day}]\n" + "\n".join(lines)
-        # Newest-last budget, mirroring recall_staged: a marathon day must not
-        # blow the request; the tail of the day is the part worth keeping.
-        transcript = transcript[-_CHUNK_CHAR_BUDGET:]
-        resp = client.messages.create(
-            model=cfg.CONVO_MODEL,
-            max_tokens=cfg.MEMORY_MAX_TOKENS,
-            thinking={"type": "disabled"},
-            messages=[{"role": "user",
-                       "content": CONSOLIDATE_PROMPT + transcript}],
-        )
-        summary = "".join(b.text for b in resp.content
-                          if b.type == "text").strip()
-        if not summary:
-            print(f"  {persona} {day}: model returned nothing; skipped",
-                  flush=True)
-            continue
-        col = chroma_store.collection(cfg.agent_memory_collection(persona))
-        col.upsert(ids=[f"conv_{day}_{persona}_seed"],
-                   documents=[summary],
-                   metadatas=[{"date": day, "messages": len(lines),
-                               "seeded": True}])
-        seeded += 1
+def index_turns(turns, dry_run=False):
+    """Index the attributed turns as exchange records, per persona, in log
+    order. Returns how many new records were written (0 on a dry run)."""
+    by_persona = {}
+    for _, persona, line, ts in turns:
+        role, _, text = line.partition(": ")
+        by_persona.setdefault(persona, []).append(
+            {"role": role, "content": text, "ts": ts})
+    if dry_run:
+        for persona, msgs in by_persona.items():
+            print(f"  would index {persona}: {len(msgs)} turn(s)", flush=True)
+        return 0
+    from brain.memory import ConversationMemory  # heavy; only for a real run
+    memory = ConversationMemory()
+    written = 0
+    for persona, msgs in by_persona.items():
+        n = memory.index_exchanges(msgs, persona)
+        written += n
         # flush: stdout is block-buffered when redirected, and a run that
         # dies mid-way otherwise leaves a log showing nothing happened.
-        print(f"  seeded {persona} {day}: {len(lines)} line(s)", flush=True)
-    return seeded
+        print(f"  {persona}: {n} new exchange(s) from {len(msgs)} turn(s)",
+              flush=True)
+    return written
 
 
 def main():
@@ -231,11 +177,9 @@ def main():
         chunks = chunk_by_persona_day(turns)
         print(f"{len(turns)} attributed turn(s) across {len(paths)} log(s), "
               f"{len(chunks)} persona-day chunk(s):", flush=True)
-        pruned = prune_outside_window(cutoff, dry_run=args.dry_run)
-        seeded = summarise_and_store(chunks, dry_run=args.dry_run)
+        written = index_turns(turns, dry_run=args.dry_run)
         if not args.dry_run:
-            print(f"Done — {seeded} archive record(s) written, "
-                  f"{pruned} stale record(s) pruned.")
+            print(f"Done — {written} new exchange record(s) written.")
     finally:
         if not args.dry_run:
             lock.release()

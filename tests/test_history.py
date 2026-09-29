@@ -172,3 +172,18 @@ class TestSaveLoad(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTailStart(unittest.TestCase):
+    def test_a_previous_exchange_with_a_tool_round_is_kept_whole(self):
+        # The failure this replaces: trim(h, 4) over this history pops to
+        # [u2], dropping the whole previous exchange because it used a tool.
+        h = [user("u1"), assistant_tool_use("a"), tool_result("a"),
+             assistant_text("done"), user("u2")]
+        self.assertEqual(history.tail_start(h, 1), 0)
+        self.assertEqual(history.tail_start(h, 0), 4)
+
+    def test_fewer_exchanges_than_asked_means_the_whole_history(self):
+        h = [user("u1"), assistant_text("a1"), user("u2")]
+        self.assertEqual(history.tail_start(h, 5), 0)
+        self.assertEqual(history.tail_start([], 2), 0)

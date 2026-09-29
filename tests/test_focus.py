@@ -7,8 +7,8 @@ from unittest import mock
 from brain import agents
 import config as cfg
 from stores.knowledge import KnowledgeStore, _focus_where
-from tests.llm_fixtures import make_claude, text_reply, tool_reply
-from tests.test_knowledge import FakeCol, fake_store
+from tests.llm_fixtures import make_claude, system_text, text_reply, tool_reply
+from tests.store_fixtures import FakeCol, fake_store
 from tools import ToolContext, dispatch
 from tools.focus_tools import describe_focus, focus_prompt_block
 
@@ -34,17 +34,14 @@ class TestFocusWhere(unittest.TestCase):
 
 
 class RecordingCol(FakeCol):
-    """A FakeCol that records the where= of every query."""
-
-    def __init__(self, hits=()):
-        super().__init__(hits)
-        self.wheres = []
+    """A FakeCol whose canned hits honour a where= (FakeCol itself records
+    the clause but serves every hit regardless)."""
 
     def query(self, query_texts, n_results, where=None):
-        self.wheres.append(where)
         if where is not None and not self.hits_match(where):
+            self.wheres.append(where)
             return {"documents": [[]], "metadatas": [[]], "distances": [[]]}
-        return super().query(query_texts, n_results)
+        return super().query(query_texts, n_results, where=where)
 
     def hits_match(self, where):
         # Enough filter semantics for these tests: equality on flat keys.
@@ -139,10 +136,10 @@ class TestFocusInThePrompt(unittest.TestCase):
     def test_prompt_line_appears_exactly_when_focus_is_set(self):
         c = make_claude(active="tom")
         c.converse("hello")
-        self.assertNotIn("Focus:", c.client.messages.calls[0]["system"])
+        self.assertNotIn("Focus:", system_text(c.client.messages.calls[0]))
         c._ctx.focus = {"strategy": "double_diagonal"}
         c.converse("how are my diagonals?")
-        system = c.client.messages.calls[1]["system"]
+        system = system_text(c.client.messages.calls[1])
         self.assertIn("Focus: retrieval is narrowed to strategy "
                       "double_diagonal", system)
         self.assertIn("clear_focus", system)
@@ -161,7 +158,7 @@ class TestFocusInThePrompt(unittest.TestCase):
         c._ctx.focus = {"strategy": "butterfly"}
         c.run_delegated_task("bob", "look something up")
         self.assertIn("Focus: retrieval is narrowed to strategy butterfly",
-                      c.client.messages.calls[0]["system"])
+                      system_text(c.client.messages.calls[0]))
 
     def test_empty_focus_adds_no_prompt_block(self):
         self.assertEqual(focus_prompt_block(None), "")

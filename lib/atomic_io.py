@@ -13,6 +13,7 @@ import json
 import os
 import tempfile
 import time
+from pathlib import Path
 
 
 def read_json(path, fallback, *, expect=None, warn=None):
@@ -72,10 +73,11 @@ def _replace_with_retry(tmp, path, attempts=6, first_delay=0.05):
 
     Unlike the in-place write this module replaced, os.replace needs delete
     access on the destination — and fails with PermissionError while any other
-    process holds the file open without FILE_SHARE_DELETE. This project's data/
-    lives in a Dropbox-synced folder, where the sync client (and AV/indexers)
-    routinely holds JSON files open for a moment; those holds clear in
-    milliseconds, so a few quick retries turn a spurious crash into a wait.
+    process holds the file open without FILE_SHARE_DELETE. On Windows an AV
+    scanner or the Search indexer routinely holds a JSON file open for a
+    moment, as would any file-sync client pointed at data/; those holds clear
+    in milliseconds, so a few quick retries turn a spurious crash into a
+    wait.
     Total worst-case wait ~1.5s before the PermissionError propagates."""
     delay = first_delay
     for attempt in range(attempts):
@@ -87,3 +89,19 @@ def _replace_with_retry(tmp, path, attempts=6, first_delay=0.05):
                 raise
             time.sleep(delay)
             delay *= 2
+
+
+def park(path):
+    """Rename `path` to a .bak beside it, never clobbering an existing backup.
+    Path.replace is an atomic rename that overwrites its destination silently,
+    and a hand-made history.json.bak was once the only copy of a month of
+    conversation — so a taken name gets .bak2, .bak3, ... instead. Returns the
+    new path; raises OSError like the rename it wraps."""
+    path = Path(path)
+    target = path.with_suffix(path.suffix + ".bak")
+    n = 2
+    while target.exists():
+        target = path.with_suffix(f"{path.suffix}.bak{n}")
+        n += 1
+    path.replace(target)
+    return target

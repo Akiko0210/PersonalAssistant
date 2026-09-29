@@ -5,7 +5,7 @@ chunked, embedded once, and stored in a persistent Chroma collection (under
 ``data/chroma``) separate from notes. PDFs and text are read directly; video and
 audio (``.mp4`` and friends) are transcribed by Whisper first, and their chunks
 carry the timestamp they were spoken at so a citation points at the moment to
-rewatch. The agent queries all of it on demand via the ``search_knowledge`` tool,
+rewatch. The agent queries all of it on demand via the ``recall`` tool,
 so the content is never pasted into the conversation.
 
 Ingestion is idempotent: each file is identified by the SHA-256 of its bytes and
@@ -43,6 +43,19 @@ def _hms(seconds) -> str:
     total = max(0, int(seconds or 0))
     hours, minutes, secs = total // 3600, (total % 3600) // 60, total % 60
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+def cite(meta) -> str:
+    """A chunk's citation: "Title, p.12" for a book page, "Title, 14:32" for a
+    moment in a recording, or just the title. Shared by the recall
+    tool and the per-turn Background (brain/context.py)."""
+    title = meta.get("title", meta.get("source", "source"))
+    page, at = meta.get("page"), meta.get("t")
+    if page:
+        return f"{title}, p.{page}"
+    if at is not None:
+        return f"{title}, {_hms(at)}"  # a moment to rewatch
+    return str(title)
 
 
 def _focus_where(focus):
@@ -428,28 +441,20 @@ class KnowledgeStore:
         isolation is which collections get queried, not a filter)."""
         return (cfg.COMMON_COLLECTION, *agents.readable_owners(caller))
 
-    def search(self, query: str, n: int = None, caller: str = None,
-               focus: dict = None) -> str:
+    def query_rows(self, query: str, n: int = None, caller: str = None,
+                   focus: dict = None) -> list:
+        """Top-`n` chunks across every collection `caller` may read, as
+        chroma_store.Hit rows sorted by distance (same embedding space in
+        every collection, so distances are comparable). Focus is a HARD
+        filter on private collections (we tag those entries at write time)
+        and a SOFT one on common — reference chunks aren't reliably
+        strategy-tagged, so an empty filtered result falls back to unfiltered
+        rather than hiding the textbook. The structured seam behind both the
+        recall tool and the per-turn Background (brain/context.py)."""
         n = n or cfg.KB_SEARCH_RESULTS
-        allowed = self._allowed_targets(caller)
-        manifest = self._load_manifest()
-        # Guard on the manifest *within scope*: a private-only ingest must not
-        # make the common-only caller think there is something to find.
-        in_scope = [e for e in manifest.values()
-                    if e.get("collection", cfg.COMMON_COLLECTION) in allowed]
-        if not in_scope:
-            return ("No trading knowledge has been ingested yet. Add PDFs, text, "
-                    "or video files to the knowledge folder and run "
-                    "python voice_agent.py --ingest.")
-        # Same embedding space in every collection, so distances are
-        # comparable: query each readable collection, merge, keep the top n.
-        # Focus is a HARD filter on private collections (we tag those entries
-        # at write time) and a SOFT one on common — reference chunks aren't
-        # reliably strategy-tagged, so an empty filtered result falls back to
-        # unfiltered rather than hiding the textbook.
         where = _focus_where(focus)
-        hits = []
-        for label in allowed:
+        rows = []
+        for label in self._allowed_targets(caller):
             col = self._col_for(_collection_name(label))
             count = col.count()
             if count == 0:
@@ -462,27 +467,28 @@ class KnowledgeStore:
                     res = col.query(**kwargs)
             else:
                 res = col.query(**kwargs)
-            docs = res.get("documents", [[]])[0]
-            metas = res.get("metadatas", [[]])[0]
-            dists = res.get("distances", [[]])[0]
-            for doc, meta, dist in zip(docs, metas, dists):
-                hits.append((dist, doc, meta or {}))
-        if not hits:
-            return "I couldn't find anything about that in your trading knowledge."
-        hits.sort(key=lambda h: h[0])
-        out = []
-        for _, doc, meta in hits[:n]:
-            title = meta.get("title", meta.get("source", "source"))
-            page, at = meta.get("page"), meta.get("t")
-            if page:
-                cite = f"{title}, p.{page}"
-            elif at is not None:
-                cite = f"{title}, {_hms(at)}"  # a moment to rewatch
-            else:
-                cite = title
-            snippet = " ".join(doc.split())[:400]
-            out.append(f"[{cite}] {snippet}")
-        return "\n\n".join(out)
+            rows.extend(chroma_store.hits(res))
+        rows.sort(key=lambda h: h.score)
+        return rows[:n]
+
+    def search(self, query: str, n: int = None, caller: str = None,
+               focus: dict = None) -> str:
+        """Cited passages for the recall tool; "" when nothing is ingested in
+        the caller's scope or nothing matches — the tool does the wording."""
+        n = n or cfg.KB_SEARCH_RESULTS
+        allowed = self._allowed_targets(caller)
+        manifest = self._load_manifest()
+        # Guard on the manifest *within scope*: a private-only ingest must not
+        # make the common-only caller think there is something to find.
+        in_scope = [e for e in manifest.values()
+                    if e.get("collection", cfg.COMMON_COLLECTION) in allowed]
+        if not in_scope:
+            return ""
+        rows = self.query_rows(query, n, caller, focus)
+        if not rows:
+            return ""
+        return "\n\n".join(f"[{cite(meta)}] {' '.join(doc.split())[:400]}"
+                           for _, doc, meta, *_ in rows)
 
     def list_sources(self) -> str:
         manifest = self._load_manifest()

@@ -100,6 +100,11 @@ def setup_logging():
         format="%(asctime)s %(name)-8s %(levelname)-7s %(message)s",
         handlers=handlers,
     )
+    # The per-turn context pull logs its candidate table and the full
+    # Background block at DEBUG; the retrieval thresholds are tuned from
+    # those lines, so the flag turns them on without flooding everything else.
+    logging.getLogger("context").setLevel(
+        logging.DEBUG if cfg.CONTEXT_DEBUG_LOG else logging.INFO)
     return logging.getLogger("agent")
 
 
@@ -128,11 +133,12 @@ class Agent:
         self.log.info(self.kb.ingest_folder(include_media=False))
         self.idle = IdleSound()  # "thinking" cue, looped during model calls
         self.llm = Claude(self.store, self.idle, self.kb)
-        # Fold any conversation text that aged out of the rolling window into
-        # long-term memory. No-op on most boots; one quick model call otherwise.
-        archived = self.llm.consolidate_memory()
-        if archived:
-            self.log.info(archived)
+        # Make sure every saved thread is in the exchange index (idempotent;
+        # a no-op after the first boot) and hand the fact extractor whatever it
+        # has not read yet (it runs on the memory worker, in the background).
+        # This also loads the embedding model here, at startup, rather than
+        # on the first turn.
+        self.llm.index_saved_threads()
         self.log.info("loading speech model...")
         self.stt = Transcriber()
         self.log.info("startup took %.1fs", time.monotonic() - t0)
@@ -242,11 +248,12 @@ class Agent:
 
     def queue_typed_message(self, text: str, target=None):
         """A message typed into the dashboard, arriving on a web handler
-        thread. Queued, not answered here: the turn loop picks it up at the
-        next utterance boundary, so it never cuts off speech in progress. The
-        wake event is honoured while muted — typing is exactly what a muted
-        user does — and honoured only between utterances, so it cannot
-        truncate one.
+        thread. Queued, not answered here: the turn loop picks it up, waking
+        from an idle listen or cutting a reply short (see say()) — sending a
+        message is the user taking the floor, exactly like speaking over the
+        agent, and waiting for it to finish talking was the behaviour the
+        user asked to be rid of. The wake event is honoured while muted —
+        typing is exactly what a muted user does.
 
         target: the persona whose thread the dashboard was showing (None =
         whoever is active). Carried with the text so the answer lands in the
@@ -563,7 +570,15 @@ class Agent:
         the floor: buffered speech or a muted microphone leaves the queue
         untouched for the next boundary. A voice barge-in mid-delivery does
         the same: the user took the floor, the rest of the queue waits."""
+        # The wake event is SHARED with the typed-message queue, so clearing
+        # it here must not swallow a message that arrived while the agent was
+        # speaking. Re-arm when one is still waiting: without this, a message
+        # typed mid-reply sat unread until the NEXT one woke the loop, which
+        # then popped the older message — every answer one behind, forever
+        # (dashboard, reported 2026-09-16).
         self.interject.clear()
+        if not self.typed.empty():
+            self.interject.set()
         if self.audio.muted.is_set() or self.audio.has_buffered_speech():
             return
         while True:
@@ -716,10 +731,12 @@ class Agent:
 
         voice:    stop when the user starts talking (voice barge-in).
         commands: stop when a *silencing* action command (note-taking, quit)
-                  arrives. Mute is not one — it deafens the microphone and
-                  leaves the reply to finish (see _hold_for_gesture). Turned off
-                  only for the folder-destination question, so those commands
-                  don't disrupt that exchange — voice barge-in still works there.
+                  or a dashboard message arrives. Mute is not one — it deafens
+                  the microphone and leaves the reply to finish (see
+                  _hold_for_gesture). Turned off only for the
+                  folder-destination question, so neither those commands nor a
+                  typed message disrupt that exchange (it would strand the
+                  prepared note) — voice barge-in still works there.
         save_resume: remember the unsaid tail for the "continue" command.
 
         Falls back to plain blocking speech for short status acks (voice=False) or
@@ -767,6 +784,17 @@ class Agent:
                 # A silencing command with no click behind it — an AirPods
                 # Next/Previous, already decoded in firmware.
                 self.tts.stop()
+                return False
+            if commands and not self.typed.empty():
+                # A dashboard message is the user taking the floor, the same
+                # as talking over the reply — stop and let the main loop
+                # answer it. Not gated on `voice`: no microphone is involved,
+                # and it returns False for the same reason — nothing is
+                # buffered for capture, the message is already queued.
+                self.tts.stop()
+                if save_resume:
+                    self._save_interrupted(text, time.monotonic() - start)
+                self.log.info("(message typed — stopping the reply)")
                 return False
             res = self.audio.poll_speech(timeout=0.1, return_frame=True)
             if res is None:

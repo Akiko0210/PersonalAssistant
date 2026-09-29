@@ -124,8 +124,8 @@ work is in what it can reach and what it says.
   Note it in the entry either way so the next reader isn't confused.
 - **Tools.** Read-only:
   `search_trading_journal`, `recent_trading_activity`, `get_focus`,
-  `search_knowledge`, `get_positions`, `get_pnl`, `get_recent_trades`,
-  `search_past_conversations`, `get_current_time`, `get_current_model`,
+  `recall`, `get_positions`, `get_pnl`, `get_recent_trades`,
+  `get_current_time`, `get_current_model`,
   `set_conversation_model`, `switch_agent`, `ask_agent`.
   **Explicitly not** `build_strategy`, `adjust_leg`, `set_order_terms`,
   `review_order`, `submit_order`, `cancel_order`, `clear_ticket`.

@@ -4,7 +4,25 @@
     {
       "name": "dashboard",
       "runtimeExecutable": "C:\\Users\\EAC\\AppData\\Local\\Microsoft\\WindowsApps\\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\\python.exe",
-      "runtimeArgs": ["-m", "web.server", "--no-browser", "--port", "8899"],
+      "runtimeArgs": [
+        "-m",
+        "web.server",
+        "--no-browser",
+        "--port",
+        "8899"
+      ],
+      "port": 8899
+    },
+    {
+      "name": "dashboard-mac",
+      "runtimeExecutable": "/Users/akiko/Documents/projects/Personal Assistant/.venv/bin/python",
+      "runtimeArgs": [
+        "-m",
+        "web.server",
+        "--no-browser",
+        "--port",
+        "8899"
+      ],
       "port": 8899
     }
   ]

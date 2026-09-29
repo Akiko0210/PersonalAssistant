@@ -245,8 +245,6 @@ views.overview = async function () {
         <div class="t-note">${o.folder_counts.length} folders</div></div>
       <div class="tile"><div class="t-label">History window</div><div class="t-value">${o.history_messages}</div>
         <div class="t-note">messages persisted</div></div>
-      <div class="tile"><div class="t-label">Memory staged</div><div class="t-value">${o.memory_pending}</div>
-        <div class="t-note">awaiting consolidation</div></div>
       <div class="tile"><div class="t-label">Knowledge docs</div><div class="t-value">${o.knowledge_docs}</div>
         <div class="t-note">ingested sources</div></div>
       <div class="tile small"><div class="t-label">Talking to</div>
@@ -914,27 +912,6 @@ function awaitReply(before) {
     note.textContent = "Still no reply — the agent may be mid-note. Reload to check.";
   }, 40000);
 }
-
-/* ================= Memory ================= */
-views.memory = async function () {
-  main.innerHTML = header("Memory", "Long-term memory staging.");
-  let data;
-  try { data = await api("/api/memory"); }
-  catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
-
-  const batches = data.pending.map(p => `
-    <div class="card">
-      <h2>${esc(fmtDate(p.ts))}</h2>
-      <div class="card-sub">${(p.lines || []).length} line(s) staged · ${
-        p.agent ? `${esc(p.agent)}'s memory` : "shared (pre-isolation)"}</div>
-      <div class="mono-list">${(p.lines || []).map(l => `<div>${esc(l)}</div>`).join("")}</div>
-    </div>`).join("");
-
-  main.innerHTML = header("Memory",
-    "Messages that aged out of the live window, staged here until the next boot consolidates them " +
-    `into searchable summaries (needs ≥ ${data.min_messages} lines).`) +
-    (batches || '<div class="card empty">Nothing staged — everything has been consolidated.</div>');
-};
 
 /* ================= Knowledge ================= */
 views.knowledge = async function () {

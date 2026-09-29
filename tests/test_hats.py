@@ -3,15 +3,11 @@ change the model, the tool subset, the system prompt — and since the memory
 split, the history THREAD: each persona's conversation is its own, and
 nothing of another's leaks across a switch."""
 
-import tempfile
 import unittest
-from pathlib import Path
-from unittest import mock
 
 from brain import agents
-from brain.llm.main import Claude
 import config as cfg
-from tests.llm_fixtures import make_claude
+from tests.llm_fixtures import make_claude, system_text
 
 
 class TestHats(unittest.TestCase):
@@ -22,7 +18,7 @@ class TestHats(unittest.TestCase):
         self.assertEqual(call["model"], cfg.CONVO_MODELS["haiku"])
         names = {t["name"] for t in call["tools"]}
         self.assertEqual(names, set(agents.AGENTS["alice"]["tools"]))
-        self.assertIn("You are Alice", call["system"])
+        self.assertIn("You are Alice", system_text(call))
 
     def test_switch_to_tom_changes_model_tools_and_prompt(self):
         c = make_claude()
@@ -31,14 +27,14 @@ class TestHats(unittest.TestCase):
         call = c.client.messages.calls[0]
         self.assertEqual(call["model"], cfg.CONVO_MODELS["sonnet"])
         names = {t["name"] for t in call["tools"]}
-        self.assertIn("search_knowledge", names)
+        self.assertIn("recall", names)
         self.assertNotIn("search_notes", names)
         # The trading tools must actually reach the API call — they existed
         # on feat/trading but were missing from this allowlist, so voice
         # trading was silently unreachable.
         self.assertIn("build_strategy", names)
         self.assertIn("submit_order", names)
-        self.assertIn("You are Tom", call["system"])
+        self.assertIn("You are Tom", system_text(call))
 
     def test_threads_are_isolated_across_switching(self):
         # The strict-isolation core: Bob must not see a word of Alice's
@@ -109,45 +105,6 @@ class TestHats(unittest.TestCase):
         c._ctx.pending_switch = ("bob", "what's my last note?")
         self.assertEqual(c.take_pending_switch(), ("bob", "what's my last note?"))
         self.assertIsNone(c.take_pending_switch())
-
-
-class TestLegacyHistoryMigration(unittest.TestCase):
-    """The pre-isolation shared history.json is parked as .bak, once — its
-    turns reach per-agent memory via scripts/seed_agent_memory.py (the logs
-    carry the same turns WITH attribution), not via staging."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.legacy = Path(self.tmp.name) / "history.json"
-        p = mock.patch.object(cfg, "HISTORY_PATH", self.legacy)
-        p.start()
-        self.addCleanup(p.stop)
-
-    def test_legacy_file_is_parked_as_bak(self):
-        self.legacy.write_text('[{"role": "user", "content": "old"}]',
-                               encoding="utf-8")
-        Claude._migrate_legacy_history()
-        self.assertFalse(self.legacy.exists())
-        bak = self.legacy.with_suffix(".json.bak")
-        self.assertIn("old", bak.read_text(encoding="utf-8"))
-
-    def test_no_legacy_file_is_a_quiet_no_op(self):
-        Claude._migrate_legacy_history()  # must not raise
-        self.assertFalse(self.legacy.with_suffix(".json.bak").exists())
-
-    def test_an_existing_backup_is_never_overwritten(self):
-        # Path.replace clobbers its destination silently, and this machine
-        # had a hand-made history.json.bak from a month before the migration
-        # was written — parking over it would have destroyed the only copy.
-        bak = self.legacy.with_suffix(".json.bak")
-        bak.write_text("older hand-made backup", encoding="utf-8")
-        self.legacy.write_text("[]", encoding="utf-8")
-        Claude._migrate_legacy_history()
-        self.assertEqual(bak.read_text(encoding="utf-8"),
-                         "older hand-made backup")
-        self.assertEqual(self.legacy.with_suffix(".json.bak2")
-                         .read_text(encoding="utf-8"), "[]")
 
 
 if __name__ == "__main__":

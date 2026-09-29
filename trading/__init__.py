@@ -19,6 +19,9 @@ Module map:
     orders.py        dry-run/review -> submit -> cancel, with audit log
     pnl.py           realized (transactions, FIFO) + unrealized (marks)
     engine.py        lazy singleton wiring the above together
+    trade_log.py     SQLite log of thinkorswim/Schwab fills + fill-line parser
+    statement.py     Schwab account-statement CSV -> orders, with tie-out
+    trade_positions.py  minimal zero-net position grouping + P&L (pure)
     web_api.py       JSON adapters for the dashboard's trading routes
 
 Deliberately no imports at package level: importing `trading` must stay
