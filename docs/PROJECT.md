@@ -247,6 +247,30 @@ unit-tested without a microphone, speakers, or an API key.
   by voice and web. Design + API research: **TRADING_PLAN.md**,
   **TRADING_RESEARCH.md**.
 
+- **The trade log** (`trading/trade_log.py`, `statement.py`,
+  `trade_positions.py`; tools in `tools/trade_log_tools.py`) — Tom's SQLite
+  ledger of the user's thinkorswim/Schwab fills, where most of the user's
+  trading happens.
+  - **Storage:** one row per broker order, keyed `(account, ref)`, with its
+    legs in their own table.
+  - **Writers:**
+    - Email fill alerts, via `log_trade`. The alert text is parsed in code,
+      cash is exact, and fees stay pending.
+    - Account statements, via `import_statement`. They must tie out to their
+      TOTAL row. Split fills of one order are merged. Statements are
+      authoritative, so they replace the alert rows of the span they cover —
+      an alert's `#` is not the statement's REF # for the same fill.
+  - **Fill grammar:** thinkorswim's line format, proven on all 110 fills of
+    the 2026-09-20 statement. Anything else (iron condors, /ES futures
+    options) is refused, not guessed.
+  - **Positions follow the user's rule** — the minimal set of trades whose
+    legs net to zero — computed by `trade_positions.group_positions`: each
+    trade closes the smallest zero-sum subset of open trades that includes
+    it, with ties going FIFO.
+  - **Readers:** `query_trade_log` and `trade_log_positions`, for both Tom
+    and Linda. Both ask which account rather than guess when there are
+    several.
+
 ### Tests & scripts
 - **`tests/`** — `unittest` suite over the pure logic (history, barge-in,
   gestures, summary parsing, model + project tools). Run:
@@ -588,6 +612,7 @@ data/categories.json voice-created/renamed folders overlaid on the seed defaults
 data/history_<key>.json  each persona's transcript (sanitized on every save)
 data/gmail_client_secret.json  Google OAuth client (from the Cloud console)
 data/gmail_token.json          Gmail token, written by `python -m lib.gmail_auth`
+data/trading/trade_log.db      Tom's SQLite log of thinkorswim/Schwab fills
 knowledge/           reference PDFs/text/video you ingest + manifest.json
 logs/                dated session logs
 ```

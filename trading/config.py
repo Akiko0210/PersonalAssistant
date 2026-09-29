@@ -45,6 +45,25 @@ TRADING_DIR = app_config.DATA_DIR / "trading"
 TICKET_PATH = TRADING_DIR / "ticket.json"          # the shared working ticket
 ORDERS_LOG_PATH = TRADING_DIR / "orders_log.json"  # audit trail (append-only)
 
+# --- Trade log (thinkorswim/Schwab fills; see trading/trade_log.py) --------
+
+TRADE_LOG_PATH = TRADING_DIR / "trade_log.db"
+# Where "import my latest statement" looks when no path is given: the newest
+# *AccountStatement*.csv here. Voice can't dictate a Windows path.
+STATEMENTS_DIR = Path(os.getenv("TRADE_STATEMENTS_DIR")
+                      or Path.home() / "Dropbox" / "1eac notes" / "analysis")
+# An alert is stamped with its email's send time, seconds after the fill. A
+# statement whose last row is that fill must still supersede the alert's row,
+# or the fill counts twice (alert # and statement REF # are different series).
+STATEMENT_EMAIL_GRACE_MIN = 10
+# Position grouping tries every subset of the open trades touching a new trade
+# (2^n). The statement's worst tangle is 6; past this the trades stay grouped
+# as one unresolved position rather than stall the turn.
+POSITION_SEARCH_MAX_TRADES = 16
+# One tool result must fit the model's context with room to reason: ~130
+# chars a trade line, so 200 lines is ~7k tokens. Over it, the tool says so.
+TRADE_QUERY_MAX_ROWS = 200
+
 # --- Futures constants (ported from Tasty-Web lib/constants.ts) ----------
 
 FUTURES_PRODUCT_CODE = {"/ES": "ES", "/MES": "MES"}

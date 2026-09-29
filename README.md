@@ -454,6 +454,26 @@ invalidates the review. *"Cancel the order"*, *"what are my positions?"*, and
 research: [TRADING_PLAN.md](docs/TRADING_PLAN.md),
 [TRADING_RESEARCH.md](docs/TRADING_RESEARCH.md).
 
+## Trade log for thinkorswim (Tom)
+
+Tom keeps a log of your thinkorswim/Schwab fills in
+`data/trading/trade_log.db` (SQLite), and prices your positions from it.
+
+- **Fill alerts.** Ask *"Tom, log my latest thinkorswim fill."* He reads the
+  alert email and logs it. The cash is exact, but fees stay pending until a
+  statement arrives.
+- **Statements.** Export the account statement CSV from thinkorswim into your
+  statements folder (`~/Dropbox/1eac notes/analysis` by default, or set
+  `TRADE_STATEMENTS_DIR`), then say *"Tom, import my latest statement."* A
+  statement is the authoritative record: it adds exact fees and expirations,
+  and it replaces the alert-logged fills of the span it covers. It is refused
+  if its rows don't add up to its own TOTAL row.
+- **Positions.** A position is the minimal set of trades whose legs net to
+  zero. Ask *"what was my P&L on calendars in August?"* or *"list my open
+  positions on the IRA."* Every figure is summed from the log. If you have
+  several accounts and don't name one, Tom asks which. Linda can read the log
+  too, for post-trade reviews.
+
 ## Switching the model by voice
 
 Conversation defaults to **Haiku 4.5** for low latency. Ask for a different model

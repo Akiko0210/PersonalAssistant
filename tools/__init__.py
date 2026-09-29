@@ -117,4 +117,5 @@ from tools import model_tools     # noqa: E402,F401
 from tools import project_tools   # noqa: E402,F401
 from tools import agent_tools     # noqa: E402,F401
 from tools import trading_tools   # noqa: E402,F401
+from tools import trade_log_tools  # noqa: E402,F401
 from tools import gmail_tools     # noqa: E402,F401

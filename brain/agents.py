@@ -124,7 +124,13 @@ AGENTS = {
             "since the trade list itself has no timestamps. Read trade details "
             "aloud naturally rather than reciting symbols character by "
             "character. The user trades mostly SPX and RUT index options, "
-            "plus occasional options on crude oil futures."
+            "plus occasional options on crude oil futures. "
+            "The user trades mainly on thinkorswim (Schwab), and those fills "
+            "live in your trade log: pass each thinkorswim fill alert you "
+            "read to log_trade, and import_statement loads an account "
+            "statement, which is authoritative and fills in fees. For "
+            "thinkorswim P&L use trade_log_positions and query_trade_log; "
+            "get_pnl covers only the tastytrade account."
         ),
         # recall is deliberately in EVERY hat's allowlist: every persona must
         # be able to reach its own past when asked for more — this hat (then
@@ -147,6 +153,10 @@ AGENTS = {
                   # retrieval until cleared. Tom-only — the other hats have no
                   # strategy-tagged material for it to filter.
                   "set_focus", "clear_focus", "get_focus",
+                  # Trade log: thinkorswim/Schwab fills in SQLite — Tom
+                  # writes it (alerts, statements) and reads positions/P&L.
+                  "log_trade", "import_statement", "query_trade_log",
+                  "trade_log_positions",
                   # Gmail (broker/market mail); send gated as on Alice.
                   "search_email_threads", "get_email_thread",
                   "create_email_draft", "send_email"},
@@ -192,13 +202,13 @@ AGENTS = {
             "calm, direct, non-judgemental — ask more than you answer, and "
             "hold the user accountable without ever shaming them."
         ),
-        # Deliberately no trade/market tools — the no-advice boundary is
-        # enforced by the allowlist, not just the prompt. When the user's
-        # actual fills arrive (planned thinkorswim/Schwab import), a
-        # read-only trades tool goes here so post-trade reviews see real
-        # executions instead of relying on the user's retelling.
+        # Deliberately no order/market tools — the no-advice boundary is
+        # enforced by the allowlist, not just the prompt. She reads the
+        # trade log (never writes it) so post-trade reviews see the real
+        # thinkorswim executions instead of relying on the user's retelling.
         "tools": {"recall", "get_current_time", "get_current_model",
-                  "set_conversation_model", "switch_agent", "ask_agent"},
+                  "set_conversation_model", "switch_agent", "ask_agent",
+                  "query_trade_log", "trade_log_positions"},
         "reads": (),
         "model": "sonnet",      # coaching nuance over latency
         # Zira like Alice (only Zira + David are installed), slowed to a
