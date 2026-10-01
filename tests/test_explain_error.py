@@ -36,8 +36,20 @@ class TestApiErrors(unittest.TestCase):
             "Please go to Plans & Billing to upgrade or purchase credits.",
         )
         msg = explain_error(e)
-        self.assertIn("credit balance", msg)
+        self.assertIn("insufficient balance", msg)
+        self.assertIn("Anthropic", msg)
         self.assertIn("won't help", msg)
+
+    def test_deepseek_402_names_deepseek(self):
+        # The exact error from the 2026-09-29 15:50 log: untyped by the SDK,
+        # so it once fell through to the generic "hit an error".
+        request = httpx.Request("POST", "https://api.deepseek.com/anthropic/v1/messages")
+        e = anthropic.APIStatusError(
+            "Insufficient Balance", response=httpx.Response(402, request=request),
+            body={"error": {"message": "Insufficient Balance"}})
+        msg = explain_error(e)
+        self.assertIn("DeepSeek", msg)
+        self.assertIn("insufficient balance", msg)
 
     def test_bad_api_key(self):
         e = _status_error(anthropic.AuthenticationError, 401, "invalid x-api-key")

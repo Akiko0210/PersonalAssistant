@@ -148,6 +148,16 @@ def make_client(model_id):
             else anthropic_api.make_client())
 
 
+def is_balance_error(e) -> bool:
+    """True when an API error means the account is out of money. The two
+    providers say it differently — DeepSeek a 402 "Insufficient Balance",
+    Anthropic a 400 "credit balance is too low" — and the SDK types neither,
+    so the status/message is all there is to go on."""
+    return (isinstance(e, anthropic.APIStatusError)
+            and (e.status_code == 402
+                 or "credit balance is too low" in str(e).lower()))
+
+
 class _NullIdle:
     """No-op stand-in so Claude runs without an idle-sound controller (selftest)."""
 
@@ -313,6 +323,7 @@ class Claude:
         the rounds ran out or `stop` fired. The idle cue is the caller's:
         converse holds it across the whole loop, the folder dialogue per
         exchange."""
+        broke = set()  # providers found out of balance this turn
         for _ in range(max_rounds):
             model = ctx.convo_model or default_model()
             try:
@@ -335,6 +346,28 @@ class Claude:
                     ctx.convo_model = fallback
                     continue
                 raise
+            except anthropic.APIStatusError as e:
+                # Out of balance is not transient, but the other provider may
+                # be fine: move the conversation there and retry this very
+                # call. `broke` stops a ping-pong when both are empty.
+                if not is_balance_error(e):
+                    raise
+                broke.add(cfg.model_provider(model))
+                alt = next((m for p, m in cfg.FAILOVER_MODELS.items()
+                            if p not in broke), None)
+                try:
+                    if alt is None:
+                        raise e
+                    self.client_for(alt)  # a missing key surfaces here
+                except RuntimeError:
+                    raise e from None
+                log.warning("%s out of balance; switching to %s",
+                            cfg.provider_label(model), alt)
+                ctx.convo_model = alt
+                ctx.failover_notice = (
+                    f"{cfg.provider_label(model)} has insufficient balance, "
+                    f"so I've switched to {cfg.provider_label(alt)}.")
+                continue
             # The usage fields are the only ground truth that caching works;
             # every prompt-assembly change is checked against these lines.
             usage = getattr(resp, "usage", None)
@@ -700,7 +733,9 @@ class Claude:
                             "out", cfg.CONVO_MAX_TOOL_ROUNDS)
                 return ("I got stuck repeating tool calls and stopped myself. "
                         "Could you ask that again, maybe more specifically?")
-            return self._final_text(resp)
+            notice, self._ctx.failover_notice = self._ctx.failover_notice, None
+            text = self._final_text(resp)
+            return f"{notice} {text}" if notice else text
         finally:
             self.idle.stop()
             # Fold in anything a synchronous tool recorded this turn, then save.

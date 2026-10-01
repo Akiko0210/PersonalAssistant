@@ -344,6 +344,12 @@ CONVO_MODEL_LABELS = {
     "deepseek-v4-pro": "DeepSeek V4 Pro",
 }
 CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)
+# Which model takes over FOR a provider when the other one's balance runs out
+# (Claude._tool_loop). One entry per provider in model_provider's vocabulary;
+# the cheap, low-latency pick of each, since a failover mid-conversation should
+# not silently land on the priciest model.
+FAILOVER_MODELS = {"anthropic": CONVO_MODELS["haiku"],
+                   "deepseek": CONVO_MODELS["deepseek"]}
 SUMMARY_MODEL = "claude-sonnet-5-5"   # higher quality for note summaries
 
 def model_provider(model_id: str) -> str:

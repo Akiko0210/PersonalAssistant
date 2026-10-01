@@ -35,7 +35,7 @@ from speech.stt import Transcriber
 from speech.tts.main import Announcer, Speaker
 from stores.notes import NoteStore
 from stores.knowledge import KnowledgeStore
-from brain.llm.main import Claude
+from brain.llm.main import Claude, is_balance_error
 from speech.sound.main import IdleSound
 from lib.single_instance.main import SingleInstance, AlreadyRunning
 
@@ -58,9 +58,12 @@ def explain_error(e: Exception) -> str:
     if isinstance(e, anthropic.APIConnectionError):  # includes APITimeoutError
         return ("I couldn't reach the Anthropic API — this looks like a "
                 "network problem. Check the internet connection.")
-    if "credit balance is too low" in str(e).lower():
-        return ("My Anthropic credit balance is too low — please add API "
-                "credits. Retrying won't help until you do.")
+    if is_balance_error(e):
+        # Only reached when there was nowhere to fail over to (see
+        # Claude._tool_loop). The host says whose balance it was.
+        who = "DeepSeek" if "deepseek" in str(e.request.url) else "Anthropic"
+        return (f"{who} has insufficient balance — please add credits. "
+                "Retrying won't help until you do.")
     if isinstance(e, anthropic.AuthenticationError):
         return ("My API key was rejected — it may be missing, expired, or "
                 "revoked. Retrying won't help until the key is fixed.")

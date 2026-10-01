@@ -32,6 +32,9 @@ class ToolContext:
     # Active conversation model id; set by set_conversation_model and read by
     # Claude.converse each call, so the user can switch models by voice.
     convo_model: str = None
+    # Set by Claude._tool_loop when a provider's balance ran out and the turn
+    # moved to the other one; converse() speaks it ahead of the reply, once.
+    failover_notice: str = None
     # Key of the persona currently answering (see agents.py); read by
     # switch_agent so "switch to Bob" while already Bob can say so.
     active_agent: str = None

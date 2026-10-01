@@ -49,7 +49,10 @@ class ScriptedMessages:
         self.calls.append(kwargs)
         if self._responses is None:
             return text_reply()
-        return self._responses.pop(0)
+        r = self._responses.pop(0)
+        if isinstance(r, Exception):  # a scripted API failure
+            raise r
+        return r
 
 
 _UNSET = object()
