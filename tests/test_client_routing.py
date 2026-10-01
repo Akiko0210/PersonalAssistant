@@ -25,7 +25,7 @@ class _Shell:
 class TestClientFor(unittest.TestCase):
     def test_claude_ids_use_the_shared_client(self):
         shell = _Shell()
-        for mid in ("claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"):
+        for mid in ("claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"):
             self.assertIs(Claude.client_for(shell, mid), shell.client)
         self.assertIsNone(shell._deepseek)  # never built for Claude models
 

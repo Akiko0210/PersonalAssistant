@@ -485,8 +485,8 @@ Tom keeps a log of your thinkorswim/Schwab fills in
 Conversation defaults to **Haiku 4.5** for low latency. Ask for a different model
 mid-conversation and it switches from that reply onward:
 
-- "switch to Opus" / "use the smartest model" → **Opus 5** (most capable, slowest)
-- "use Sonnet" → **Sonnet 5** (stronger reasoning, a little slower)
+- "switch to Opus" / "use the smartest model" → **Opus 5.5** (most capable, slowest)
+- "use Sonnet" → **Sonnet 5.5** (stronger reasoning, a little slower)
 - "go back to the fast one" → **Haiku 4.5**
 - "use the cheap one" / "switch to DeepSeek" → **DeepSeek V4 Flash** (external, by far the cheapest)
 - "use DeepSeek pro" → **DeepSeek V4 Pro** (DeepSeek's strongest)

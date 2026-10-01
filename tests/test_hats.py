@@ -70,7 +70,7 @@ class TestHats(unittest.TestCase):
         c = make_claude()
         c.switch_to("tom")
         self.assertEqual(c.active_model, cfg.CONVO_MODELS["sonnet"])
-        self.assertEqual(c.active_model_label, "Sonnet 5")
+        self.assertEqual(c.active_model_label, "Sonnet 5.5")
         c._ctx.convo_model = cfg.CONVO_MODELS["deepseek pro"]
         self.assertEqual(c.active_model_label, "DeepSeek V4 Pro")
 

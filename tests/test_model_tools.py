@@ -181,7 +181,7 @@ class TestModelIdentityPrompt(unittest.TestCase):
 
 class TestModelProvider(unittest.TestCase):
     def test_claude_models_route_to_anthropic(self):
-        for mid in ("claude-haiku-4-5", "claude-sonnet-5", "claude-opus-5"):
+        for mid in ("claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"):
             self.assertEqual(cfg.model_provider(mid), "anthropic")
 
     def test_deepseek_models_route_to_deepseek(self):

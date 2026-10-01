@@ -420,7 +420,7 @@ central list or dispatch chain.
   the *end* of the context, where it outweighs old turns, and leaves an
   auditable `tool_use` line in the log.
 - **model** (`model_tools.py`): `set_conversation_model` — switch the
-  conversation model between Haiku 4.5, Sonnet 5, Opus 5, and (when
+  conversation model between Haiku 4.5, Sonnet 5.5, Opus 5.5, and (when
   `DEEPSEEK_API_KEY` is set) DeepSeek V4 Flash / Pro by voice. DeepSeek runs
   through its Anthropic-compatible endpoint via `Claude.client_for`, so every
   model shares one code path; `config.model_provider` is the routing *name*,

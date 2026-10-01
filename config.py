@@ -327,8 +327,8 @@ BACKCHANNEL_MAX_WORDS = 3     # "oh okay yeah" is a filler; a longer utterance i
 # on restart rather than silently leaving you on an expensive model.
 CONVO_MODELS = {
     "haiku": "claude-haiku-4-5",   # fastest, lowest latency — the default
-    "sonnet": "claude-sonnet-5",   # stronger reasoning, a bit slower
-    "opus": "claude-opus-5",       # most capable, slowest and priciest
+    "sonnet": "claude-sonnet-5-5", # stronger reasoning, a bit slower
+    "opus": "claude-opus-5-5",     # most capable, slowest and priciest
     # DeepSeek, served through their Anthropic-compatible endpoint (see
     # brain/llm/deepseek.py) — same Messages API, same tool_use/tool_result
     # blocks, so the whole tool loop and history machinery work unchanged.
@@ -338,13 +338,13 @@ CONVO_MODELS = {
 }
 CONVO_MODEL_LABELS = {
     "claude-haiku-4-5": "Haiku 4.5",
-    "claude-sonnet-5": "Sonnet 5",
-    "claude-opus-5": "Opus 5",
+    "claude-sonnet-5-5": "Sonnet 5.5",
+    "claude-opus-5-5": "Opus 5.5",
     "deepseek-v4-flash": "DeepSeek V4 Flash",
     "deepseek-v4-pro": "DeepSeek V4 Pro",
 }
 CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)
-SUMMARY_MODEL = "claude-sonnet-5"     # higher quality for note summaries
+SUMMARY_MODEL = "claude-sonnet-5-5"   # higher quality for note summaries
 
 def model_provider(model_id: str) -> str:
     """Which API serves a model id: 'anthropic' or 'deepseek'. The single
@@ -384,7 +384,10 @@ SUMMARY_EFFORT = "medium"
 # raised, and the turn looks successful — the same silent-failure shape as the
 # truncated-tool-call bug behind CONVO_MAX_TOKENS above, and fatal to an agent
 # whose ground rule is "if you did not call a tool, nothing happened".
+# Sonnet 5.5 and Opus 5.5 go further and reject thinking-disabled with a 400,
+# so leaving a 5.5 id out of this set would fail every turn on it.
 ADAPTIVE_THINKING_MODELS = frozenset({
+    "claude-sonnet-5-5", "claude-opus-5-5",
     "claude-sonnet-5", "claude-opus-5", "claude-fable-5",
     "claude-opus-4-8", "claude-opus-4-7", "claude-sonnet-4-6",
 })

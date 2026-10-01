@@ -58,7 +58,7 @@ class ValidatePayloadTests(unittest.TestCase):
             "CONVO_ENDPOINT_MS": 600,
             "TRIGGER_RATIO": 0.5,
             "BARGE_IN": False,
-            "CONVO_MODEL": "claude-sonnet-5",
+            "CONVO_MODEL": "claude-sonnet-5-5",
             "BACKCHANNEL_WORDS": ["yeah", "OK"],
         })
         self.assertEqual(errors, {})
