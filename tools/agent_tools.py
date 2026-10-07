@@ -79,9 +79,9 @@ def switch_agent(ctx, args):
         "Hand a task to another assistant to do IN THE BACKGROUND while the "
         "user stays in this conversation with you. They work out of earshot "
         "and speak up with the result at the next pause; the user never "
-        "leaves you. Use this whenever the user wants something done in "
-        "another specialty without going there themselves — e.g. 'have Bob "
-        "save this as a note' in the middle of a trading discussion. Write "
+        "leaves you. Use it ONLY when the user's current message asks for "
+        "that assistant by name — e.g. 'ask Bob to save this as a note' — "
+        "never on your own initiative; the call is refused otherwise. Write "
         "the task fully self-contained, including ALL content it needs (the "
         "complete note text, the exact question): the assistant cannot see "
         "this conversation. To actually hand the user over, use switch_agent "
@@ -117,6 +117,10 @@ def ask_agent(ctx, args):
     if key == ctx.active_agent:
         return (f"That's you — the user is talking to {name} right now. "
                 "Do the task yourself with your own tools.")
+    if not agents.named_in(ctx.user_text, key):
+        return (f"Not sent: the user didn't ask for {name}. Answer from your "
+                "own record and memory, or ask the user whether they want "
+                f"{name} to do it.")
     ctx.pending_delegations.append((key, task))
     return (f"Queued for {name}, who will work on it in the background and "
             f"speak up when done. Tell the user briefly that you've asked "

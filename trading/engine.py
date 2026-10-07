@@ -63,15 +63,17 @@ class TradingEngine:
         self._snapshot_fallback(api_symbol or underlying, streamer, group)
         return self.quotes.get(streamer)
 
-    def leg_quote_fn(self, chain):
+    def leg_quote_fn(self, chain, greeks=False):
         """get_quote(streamer)->Quote for ticket pricing: subscribes all of
-        the chain's currently relevant leg symbols on demand."""
+        the chain's currently relevant leg symbols on demand. greeks=True
+        also streams and waits for each leg's greeks (stream only: the REST
+        snapshot fallback carries none)."""
         def get_quote(streamer):
             if not streamer:
                 return None
             if self.quotes.start():
-                self.quotes.subscribe([streamer])
-                return self.quotes.get(streamer, wait_s=2.0)
+                self.quotes.subscribe([streamer], greeks=greeks)
+                return self.quotes.get(streamer, wait_s=2.0, greeks=greeks)
             return self.quotes.get(streamer)
         return get_quote
 

@@ -55,7 +55,7 @@ class FakeStore:
         self.summaries = {}
 
     def _match_category(self, name):
-        return None
+        return name if name == "ideas" else None
 
     def new_session(self):
         return "note_test"
@@ -73,7 +73,8 @@ class TestSavePendingNoteTranscript(unittest.TestCase):
         agent.log = logging.getLogger("test")
         agent.store = FakeStore()
         agent.audio = SimpleNamespace(flush=lambda: None)
-        agent.say = lambda text, **kw: False
+        agent.spoken = []
+        agent.say = lambda text, **kw: agent.spoken.append(text) or False
         agent._confirm_category = lambda suggested, title, summary: "general"
         agent.llm = SimpleNamespace(
             conversation_excerpt=lambda: excerpt,
@@ -104,6 +105,22 @@ class TestSavePendingNoteTranscript(unittest.TestCase):
         tx = agent.store.transcripts["note_test"]
         self.assertIn("save this as a note", tx)
         self.assertNotIn("unrelated talk", tx)
+
+    def test_a_background_save_with_a_known_folder_files_without_asking(self):
+        # The folder dialogue ate the user's next list item as a folder
+        # answer (session_2026-10-06.log, 14:56).
+        agent = self.make_agent("user: ask Bob to save the list")
+        agent._confirm_category = lambda *a: self.fail("asked about the folder")
+        note = {"title": "t", "content": "body", "category": "ideas"}
+        agent._save_pending_note(note, saver="Bob")
+        self.assertEqual(agent.store.summaries["note_test"][2], "ideas")
+        self.assertTrue(agent.spoken[-1].startswith("Saved to Ideas."))
+
+    def test_a_save_the_user_asked_for_directly_still_asks(self):
+        agent = self.make_agent("user: save that")
+        agent._save_pending_note({"title": "t", "content": "b",
+                                  "category": "ideas"})
+        self.assertEqual(agent.store.summaries["note_test"][2], "general")
 
     def test_empty_history_falls_back_to_content(self):
         agent = self.make_agent("")

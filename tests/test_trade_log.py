@@ -8,6 +8,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from brain import agents
+import config as cfg
+from stores import working_state
 from tools import ToolContext, dispatch
 from trading import config as tcfg
 from trading import statement as tstatement
@@ -189,6 +191,81 @@ class TestTools(LogBase):
         self.assertLessEqual(readers | writers, agents.AGENTS["tom"]["tools"])
         self.assertLessEqual(readers, agents.AGENTS["linda"]["tools"])
         self.assertFalse(writers & agents.AGENTS["linda"]["tools"])
+        self.assertIn("link_trades", agents.AGENTS["tom"]["tools"])
+        self.assertNotIn("link_trades", agents.AGENTS["linda"]["tools"])
+
+
+class TestCampaignLinks(LogBase):
+    """Tom's campaign records ↔ the trade log, linked by contract."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_ws = cfg.WORKING_STATE_PATH
+        cfg.WORKING_STATE_PATH = Path(self.tmp.name) / "working_state.db"
+        self.rid = working_state.create("tom", "SPX Campaign", kind="campaign")
+
+    def tearDown(self):
+        cfg.WORKING_STATE_PATH = self._saved_ws
+        super().tearDown()
+
+    def _alert_fill(self, ref, line, when, account="*****699SCHW"):
+        fill = trade_log.parse_fill(line)
+        trade_log.save([trade_log.order(
+            fill, account=account, ref=ref, executed_at=when,
+            amount=fill["amount"], fees=None, description="x", source="email")])
+
+    def test_a_link_survives_the_statement_replacing_the_alert_row(self):
+        self._alert_fill("1", "BOT +2 SPX 100 (Weeklys) 5 JUN 26 7500 CALL @2.90",
+                         "2026-06-05T09:21:00")
+        self.assertIn("Linked 1 fills to #", self.call(
+            "link_trades", record_id=self.rid, refs=["1"]))
+        self.call("import_statement", path=str(self.csv))
+        self.assertNotIn("1", [t["ref"] for t in trade_log.query()])
+        out = self.call("query_trade_log", record=self.rid)
+        self.assertIn("1006632596914", out)     # the statement's row, same contract
+        self.assertNotIn("BUTTERFLY", out.upper())  # the unlinked fly stays out
+        self.assertIn("1 trades: cash -1,160.00", out)
+
+    def test_a_roll_carries_the_campaign_onto_its_new_contracts(self):
+        self._alert_fill("10", "BOT +1 CALENDAR SPX 100 (Weeklys) 13 OCT 26/9 OCT 26 "
+                         "7750 CALL @8.70", "2026-09-30T11:06:00")
+        self.call("link_trades", record_id=self.rid, refs=["10"])
+        self._alert_fill("11", "BOT +1 CALENDAR SPX 100 (Weeklys) 16 OCT 26/13 OCT 26 "
+                         "7800 CALL @6.10", "2026-10-02T10:00:00")
+        self.assertIn("2 new contracts", self.call(
+            "link_trades", record_id=self.rid, refs=["11", "404"]))
+        out = self.call("query_trade_log", record=self.rid)
+        self.assertIn("10 2026-09-30", out)
+        self.assertIn("11 2026-10-02", out)
+
+    def test_log_trade_names_the_campaigns_a_fill_may_belong_to(self):
+        rut = working_state.create("tom", "RUT Campaign", kind="campaign")
+        working_state.link("tom", rut, {("*****868SCHW", "RUT", "2026-10-16", 2400.0, "P")})
+        reply = self.call("log_trade", alert=ALERT, email_date=ALERT_DATE)
+        self.assertIn(f"#{self.rid} 'SPX Campaign' (same underlying)", reply)
+        self.assertNotIn("RUT Campaign", reply)
+        working_state.link("tom", self.rid,
+                           {("*****868SCHW", "SPX", "2026-09-25", 7600.0, "P")})
+        with trade_log._db() as db:   # forget it, so the alert logs anew
+            db.execute("DELETE FROM trades")
+        reply = self.call("log_trade", alert=ALERT, email_date=ALERT_DATE)
+        self.assertIn("(touches its contracts)", reply)
+        self.assertIn("link_trades", reply)
+
+    def test_a_closed_campaign_gets_no_hint(self):
+        working_state.close("tom", self.rid, "done")
+        self.assertNotIn("campaign", self.call(
+            "log_trade", alert=ALERT, email_date=ALERT_DATE))
+
+    def test_another_persona_cannot_link_or_read_toms_campaign(self):
+        self._alert_fill("1", "BOT +2 SPX 100 (Weeklys) 5 JUN 26 7500 CALL @2.90",
+                         "2026-06-05T09:21:00")
+        linda = ToolContext(active_agent="linda")
+        self.assertIn("no record", dispatch(linda, "link_trades",
+                                            {"record_id": self.rid, "refs": ["1"]}))
+        self.call("link_trades", record_id=self.rid, refs=["1"])
+        self.assertIn("you can read", dispatch(linda, "query_trade_log",
+                                               {"record": self.rid}))
 
 
 def _t(ref, when, legs, amount):

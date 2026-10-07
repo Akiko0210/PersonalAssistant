@@ -37,15 +37,16 @@ class TestBalanceFailover(unittest.TestCase):
         self.assertIn("Anthropic has insufficient balance", reply)
         self.assertIn("switched to DeepSeek", reply)
         self.assertTrue(reply.endswith("It's three o'clock."))
-        self.assertEqual(c._ctx.convo_model, DEEPSEEK)   # sticky, not per-call
-        self.assertIsNone(c._ctx.failover_notice)         # said once
+        self.assertEqual(c.active_model, DEEPSEEK)   # for the cooldown, not per call
+        self.assertEqual(c._ctx.convo_model, HAIKU)  # the choice itself is kept
+        self.assertEqual(c._take_notices(), [])      # said once
 
     def test_deepseek_empty_moves_to_anthropic(self):
         c = claude_with([text_reply("Back on Claude.")], [broke()], DEEPSEEK)
         reply = c.converse("hello")
         self.assertIn("DeepSeek has insufficient balance", reply)
         self.assertIn("switched to Anthropic", reply)
-        self.assertEqual(c._ctx.convo_model, HAIKU)
+        self.assertEqual(c.active_model, HAIKU)
 
     def test_anthropic_credit_wording_also_counts(self):
         # Anthropic's own shape: a 400, not a 402.

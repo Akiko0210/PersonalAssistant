@@ -30,11 +30,12 @@ log = logging.getLogger("query")
 REWRITE_MAX_TOKENS = 400  # a JSON object with one sentence in it
 
 
-def rewriter(client):
-    """The rewrite's model call, bound to `client`: QUERY_MODEL, under the
-    timeout that keeps a slow answer from holding the turn."""
-    return lambda system, prompt: ask(client, cfg.QUERY_MODEL, system, prompt,
-                                      max_tokens=REWRITE_MAX_TOKENS,
+def rewriter(client, model=None):
+    """The rewrite's model call, bound to `client`: QUERY_MODEL (or the
+    failover's standby), under the timeout that keeps a slow answer from
+    holding the turn."""
+    return lambda system, prompt: ask(client, model or cfg.QUERY_MODEL, system,
+                                      prompt, max_tokens=REWRITE_MAX_TOKENS,
                                       timeout=cfg.QUERY_TIMEOUT_S)
 
 

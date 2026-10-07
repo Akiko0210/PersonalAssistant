@@ -271,6 +271,17 @@ persona's private collection — private material never shows up in another
 persona's searches. Tom additionally has **focus mode**: "focus on my double
 diagonals" narrows his retrieval to that strategy until you say to clear it.
 
+**Each persona also keeps a working record of what it's tracking for you** —
+Tom a journal of the campaigns you're running (the plan's rules, decisions
+and the reasons behind them), Linda her Coaches Notebook (your check-ins and
+the behaviour patterns she's tracking), Alice your to-do list (items stay
+open, and carry over to the next day, until you say they're done). Unlike the
+rest of memory, it isn't searched for: it's in front of the persona on every
+turn, so Tom knows what you're running without you naming it. They write it
+themselves as things happen and mention it in a few words ("noted in the
+journal"); "what's in your record?" reads it back, and "that's wrong, it's
+40 points" corrects it.
+
 Anything meant for every persona belongs in a note or the common knowledge
 base — those are shared on purpose.
 
@@ -280,11 +291,17 @@ note-taking mode: ask something ("what did we talk about trading?"), then say
 the usual folder dialogue to ask where to file it.
 
 If you're talking to a persona that doesn't own notes (say, Tom mid-trading
-discussion), the save is **delegated**: Tom hands the task to Bob, who works in
-the background while your conversation continues uninterrupted. When the note
-is ready, Bob speaks up in his own voice at the next pause — "Bob here — your
-note is ready to file" — and asks which folder. You never leave the
-conversation you were in.
+discussion), ask for Bob by name — "ask Bob to save this as a note" — and the
+save is **delegated**: Tom hands the task to Bob, who works in the background
+while your conversation continues uninterrupted. When the note is ready, Bob
+speaks up in his own voice at the next pause. If the request named a folder,
+he files it there and says so; otherwise he asks which folder. You never leave
+the conversation you were in.
+
+A persona contacts another one **only when you name them** in that message.
+Asked "do you remember…", it answers from its own working record and
+conversations; it may remember asking Bob for something, but it never goes to
+Bob to look it up on its own.
 
 ## Where things are saved
 
@@ -300,6 +317,7 @@ data/pending/        transient: live transcript while a session is recording
 data/chroma/         semantic search index (notes, knowledge, conversations,
                      plus per-persona private collections)
 data/index.json      ordered record of every note (title, date, category)
+data/working_state.db  each persona's working record (Tom's journal, Linda's notebook, Alice's list)
 knowledge/           reference PDFs/text/video you ingest + manifest.json (see below)
 logs/                dated session logs of everything that happened
 ```
@@ -479,6 +497,10 @@ Tom keeps a log of your thinkorswim/Schwab fills in
   positions on the IRA."* Every figure is summed from the log. If you have
   several accounts and don't name one, Tom asks which. Linda can read the log
   too, for post-trade reviews.
+- **Campaigns.** When Tom logs a fill that looks like part of a campaign in
+  his journal, he says so and asks; say yes and the fill is linked, rolls
+  included. *"How is the diagonal campaign doing?"* then sums exactly that
+  campaign's trades — and the links survive a statement import.
 
 ## Switching the model by voice
 
@@ -500,6 +522,14 @@ The choice lasts for the session and resets to the fast default on restart (so y
 never get silently left on an expensive model). Note summaries always use
 `SUMMARY_MODEL` regardless. The models are defined in `config.py` under
 `CONVO_MODELS`.
+
+**When a provider fails, the agent moves over and tells you.** If DeepSeek or
+Anthropic runs out of credit, or stops responding to the small background
+calls that power memory, that work moves to the other provider and you hear
+one sentence about it — *"DeepSeek isn't responding, so memory lookups
+switched to Anthropic."* Every two minutes the agent quietly tries the
+original again, and tells you when it's back. Your model choice itself never
+changes.
 
 **Each persona remembers its own model.** Leave Tom on DeepSeek V4 Pro, switch to
 Bob, and Bob answers on his own model; switch back and Tom is still on DeepSeek.

@@ -16,6 +16,13 @@ class Quote:
     ask: float = None
     last: float = None
     updated_at: float = 0.0  # time.time() of the newest tick
+    # Options only, from dxFeed's Greeks event: per share, theta per day,
+    # vega per vol point. None until one arrives.
+    iv: float = None
+    delta: float = None
+    gamma: float = None
+    theta: float = None
+    vega: float = None
 
     @property
     def mid(self):

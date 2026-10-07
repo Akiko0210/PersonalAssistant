@@ -87,10 +87,13 @@ def make_claude(responses=None, *, active=None, convo_model=_UNSET,
     c._jobs = None
     c._rewriter = lambda: (lambda system, prompt: "")
     c._extractor = lambda: (lambda system, prompt: '{"ops": []}')
+    c._record_block = lambda owner: ""  # no working record unless a test installs one
+    c._setup_failover()  # real failovers; a test wanting a clock calls it again
     c._ctx = ToolContext(
         active_agent=c.active,
         convo_model=(cfg.CONVO_MODELS["haiku"] if convo_model is _UNSET
-                     else convo_model))
+                     else convo_model),
+        failover=c._convo_failover)
     c.history = list(history or [])
     c.idle = SimpleNamespace(start=lambda: None, stop=lambda: None)
     c.saved = []    # snapshots of history at each persist

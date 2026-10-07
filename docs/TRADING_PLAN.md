@@ -166,6 +166,7 @@ state (draft ticket, order log) goes through `data/trading/*.json` via
 | `build_strategy` | Start a ticket: strategy + symbol (+ optional expiration/strikes); legs auto-placed from live chain ATM, spoken back |
 | `adjust_leg` | Change a leg's strike/expiration/size/side/type — revalidated against the chain, strike-lock groups respected |
 | `set_order_terms` | Limit price (or "mid"), quantity, time-in-force |
+| `price_order` | Quotes only: each leg's bid/ask/mid, IV and greeks, plus the ticket's net mid and net greeks; no broker call |
 | `review_order` | Dry-run: speaks net debit/credit, buying-power effect, fees, warnings; stamps the review hash |
 | `submit_order` | Places the reviewed ticket; requires user's verbal yes (`confirmed: true`); refuses if ticket changed since review |
 | `list_orders` | Working/filled orders today (or date range) |
