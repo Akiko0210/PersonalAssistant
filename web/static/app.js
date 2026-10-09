@@ -1653,6 +1653,7 @@ function trStatementDrop() {
       msg.textContent = e.message;
     }
   }
+  $("#tr-stmt-upload").onclick = () => picker.click();
   dz.onclick = () => picker.click();
   dz.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); picker.click(); } };
   picker.onchange = () => { send(picker.files[0]); picker.value = ""; };
@@ -1687,12 +1688,14 @@ views.trading = async function () {
     </div>
     <div class="card">
       <h2>Statement for Tom</h2>
+      <button class="btn-big" id="tr-stmt-upload">Upload statement</button>
       <div class="dropzone" id="tr-stmt-drop" tabindex="0" role="button"
            aria-label="Drop a thinkorswim statement here">
-        Drop a thinkorswim statement .csv here, or click to pick one
+        …or drag the file here
       </div>
       <input type="file" id="tr-stmt-file" accept=".csv" hidden>
       <div class="kb-status" id="tr-stmt-msg"></div>
+      <div class="kb-hint">The account statement .csv exported from thinkorswim.</div>
     </div>
     <div class="card">
       <h2>Strategy builder</h2>
