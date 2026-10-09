@@ -1633,6 +1633,39 @@ async function trLoadPnl() {
     </div>`;
 }
 
+/* The statement drop: one file straight into Tom's trade log. Statements are
+   small, so a plain fetch (no progress bar) and the import's own reply —
+   or the reason it refused — lands right under the box. */
+function trStatementDrop() {
+  const dz = $("#tr-stmt-drop"), picker = $("#tr-stmt-file"), msg = $("#tr-stmt-msg");
+  async function send(file) {
+    if (!file) return;
+    msg.className = "kb-status";
+    msg.textContent = `Importing ${file.name}…`;
+    try {
+      const r = await fetch("/api/trading/statement?name=" + encodeURIComponent(file.name),
+        { method: "POST", headers: { "Content-Type": "text/csv" }, body: file });
+      const body = await r.json().catch(() => ({}));
+      msg.className = "kb-status " + (r.ok && body.ok ? "ok" : "err");
+      msg.textContent = body.message || body.error || r.statusText;
+    } catch (e) {
+      msg.className = "kb-status err";
+      msg.textContent = e.message;
+    }
+  }
+  dz.onclick = () => picker.click();
+  dz.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); picker.click(); } };
+  picker.onchange = () => { send(picker.files[0]); picker.value = ""; };
+  // dragover must be cancelled or the browser navigates to the dropped file.
+  dz.ondragover = e => { e.preventDefault(); dz.classList.add("over"); };
+  dz.ondragleave = () => dz.classList.remove("over");
+  dz.ondrop = e => {
+    e.preventDefault();
+    dz.classList.remove("over");
+    send(e.dataTransfer?.files?.[0]);
+  };
+}
+
 views.trading = async function () {
   main.innerHTML = header("Trading", "Loading trading status…");
   let st;
@@ -1651,6 +1684,15 @@ views.trading = async function () {
           : `<span class="tr-problem">${esc(st.problem || "not configured")}</span>`}
         <span id="tr-stream-note" class="card-sub"></span>
       </div>
+    </div>
+    <div class="card">
+      <h2>Statement for Tom</h2>
+      <div class="dropzone" id="tr-stmt-drop" tabindex="0" role="button"
+           aria-label="Drop a thinkorswim statement here">
+        Drop a thinkorswim statement .csv here, or click to pick one
+      </div>
+      <input type="file" id="tr-stmt-file" accept=".csv" hidden>
+      <div class="kb-status" id="tr-stmt-msg"></div>
     </div>
     <div class="card">
       <h2>Strategy builder</h2>
@@ -1679,6 +1721,8 @@ views.trading = async function () {
       <div id="tr-pnl-out" class="card-sub">Pick a period and run the report.</div>
     </div>`;
 
+  // Tom's trade log is thinkorswim, not tastytrade: works unconfigured too.
+  trStatementDrop();
   if (!st.configured) {
     const note = '<div class="empty">Waiting for trading credentials (see status above).</div>';
     $("#tr-ticket").innerHTML = note;

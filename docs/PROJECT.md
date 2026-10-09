@@ -278,7 +278,12 @@ unit-tested without a microphone, speakers, or an API key.
     - Account statements, via `import_statement`. They must tie out to their
       TOTAL row. Split fills of one order are merged. Statements are
       authoritative, so they replace the alert rows of the span they cover —
-      an alert's `#` is not the statement's REF # for the same fill.
+      an alert's `#` is not the statement's REF # for the same fill. The
+      Trading page's drop zone (`POST /api/trading/statement`) runs the same
+      import (`import_statement_text`). It keeps a copy in `STATEMENTS_DIR`
+      only after a successful import, so the voice tool's "latest statement"
+      is never a refused file. That folder defaults to `data/` because a
+      personal path doesn't belong in the repo.
   - **Fill grammar:** thinkorswim's line format, proven on all 110 fills of
     the 2026-09-20 statement. Anything else (iron condors, /ES futures
     options) is refused, not guessed.

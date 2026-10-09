@@ -278,14 +278,22 @@ def import_statement(ctx, args):
     if path is None:
         return f"No *AccountStatement*.csv in {tcfg.STATEMENTS_DIR}."
     try:
-        st = tstatement.parse(path.read_text(encoding="utf-8-sig"))
+        text = path.read_text(encoding="utf-8-sig")
     except OSError as e:
         return f"Couldn't read {path}: {e}"
+    return import_statement_text(path.name, text)[1]
+
+
+def import_statement_text(name, text):
+    """(imported, reply) for one statement's text. Shared by the tool and the
+    dashboard's drop zone (web/server.py), which keeps a copy only when
+    `imported` — so a refused file never becomes "the latest statement"."""
+    st = tstatement.parse(text)
     if st["problems"]:
-        return (f"Nothing imported from {path.name}: "
-                + "; ".join(st["problems"]) + ".")
+        return False, (f"Nothing imported from {name}: "
+                       + "; ".join(st["problems"]) + ".")
     if not st["orders"]:
-        return f"{path.name} has no trades or expirations. Nothing imported."
+        return False, f"{name} has no trades or expirations. Nothing imported."
     grace = (datetime.fromisoformat(st["last"])
              + timedelta(minutes=tcfg.STATEMENT_EMAIL_GRACE_MIN))
     _, superseded = trade_log.save(
@@ -294,7 +302,7 @@ def import_statement(ctx, args):
                    grace.isoformat(timespec="seconds")))
     fills = [o for o in st["orders"] if o["strategy"] != "expiration"]
     merged = sum(o["fills"] - 1 for o in fills)
-    reply = (f"Imported {path.name} for {st['account']}, {st['since']} to "
+    reply = (f"Imported {name} for {st['account']}, {st['since']} to "
              f"{st['last'][:10]}: {len(fills)} orders ({merged} split fills "
              f"merged) and {len(st['orders']) - len(fills)} expirations. It "
              "ties out to the statement's TOTAL row. "
@@ -304,7 +312,7 @@ def import_statement(ctx, args):
                   "with the statement's rows.")
     if st["skipped"]:
         reply += f" Skipped {st['skipped']} non-trade cash rows."
-    return reply
+    return True, reply
 
 
 # --- Readers (Tom and Linda) ---------------------------------------------------

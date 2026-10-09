@@ -486,12 +486,16 @@ Tom keeps a log of your thinkorswim/Schwab fills in
 - **Fill alerts.** Ask *"Tom, log my latest thinkorswim fill."* He reads the
   alert email and logs it. The cash is exact, but fees stay pending until a
   statement arrives.
-- **Statements.** Export the account statement CSV from thinkorswim into your
-  statements folder (`~/Dropbox/1eac notes/analysis` by default, or set
-  `TRADE_STATEMENTS_DIR`), then say *"Tom, import my latest statement."* A
-  statement is the authoritative record: it adds exact fees and expirations,
-  and it replaces the alert-logged fills of the span it covers. It is refused
-  if its rows don't add up to its own TOTAL row.
+- **Statements.** Export the account statement CSV from thinkorswim and drop
+  it on the **Statement for Tom** box on the dashboard's Trading page. The
+  import result shows right under the box. A statement is the authoritative
+  record: it adds exact fees and expirations, and it replaces the alert-logged
+  fills of the span it covers. Nothing outside that span is touched, and
+  importing the same statement twice is harmless. It is refused if its rows
+  don't add up to its own TOTAL row. Imported files are kept in
+  `data/trading/statements/`. By voice, *"Tom, import my latest statement"*
+  imports the newest `*AccountStatement*.csv` there (or in
+  `TRADE_STATEMENTS_DIR`, if you set one in `.env`).
 - **Positions.** A position is the minimal set of trades whose legs net to
   zero. Ask *"what was my P&L on calendars in August?"* or *"list my open
   positions on the IRA."* Every figure is summed from the log. If you have

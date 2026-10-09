@@ -2,6 +2,7 @@
 tie-out, alert/statement reconciliation, minimal zero-net position grouping,
 and the tools' honest-failure paths (unparseable lines, which account?)."""
 
+import io
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -266,6 +267,47 @@ class TestCampaignLinks(LogBase):
         self.call("link_trades", record_id=self.rid, refs=["1"])
         self.assertIn("you can read", dispatch(linda, "query_trade_log",
                                                {"record": self.rid}))
+
+
+class TestStatementDrop(LogBase):
+    """The Trading page's drop zone: the same import, adding to the log."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_dir = tcfg.STATEMENTS_DIR
+        tcfg.STATEMENTS_DIR = Path(self.tmp.name) / "statements"
+
+    def tearDown(self):
+        tcfg.STATEMENTS_DIR = self._saved_dir
+        super().tearDown()
+
+    def drop(self, name, text):
+        from web import server
+        raw = text.encode("utf-8")
+        return server.import_statement_upload(name, io.BytesIO(raw), len(raw))
+
+    def test_a_drop_imports_keeps_a_copy_and_leaves_older_trades(self):
+        self.call("log_trade", alert=ALERT, email_date=ALERT_DATE)  # another account
+        status, body = self.drop("stmt.csv", STATEMENT)
+        self.assertEqual(status, 200)
+        self.assertIn("ties out", body["message"])
+        self.assertEqual(len(trade_log.query()), 6)     # 5 statement orders + alert
+        self.assertTrue((tcfg.STATEMENTS_DIR / "stmt.csv").is_file())
+        self.assertEqual(self.drop("stmt.csv", STATEMENT)[0], 200)  # repeatable
+        self.assertEqual(len(trade_log.query()), 6)
+
+    def test_a_refused_statement_writes_nothing(self):
+        status, body = self.drop("stmt.csv", STATEMENT.replace("($4.57)", "($4.00)"))
+        self.assertEqual(status, 400)
+        self.assertIn("Nothing imported", body["error"])
+        self.assertEqual(trade_log.query(), [])
+        self.assertFalse(tcfg.STATEMENTS_DIR.exists())
+
+    def test_names_outside_the_folder_or_not_csv_are_refused(self):
+        for name in ("../stmt.csv", "a\\stmt.csv", "stmt.pdf", ""):
+            with self.subTest(name=name):
+                self.assertEqual(self.drop(name, STATEMENT)[0], 400)
+        self.assertEqual(trade_log.query(), [])
 
 
 def _t(ref, when, legs, amount):
