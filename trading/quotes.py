@@ -4,7 +4,8 @@ A QuoteService runs one daemon thread speaking the DXLink protocol
 (handshake ported from Tasty-Web's option-chain-data/socket.js, checked
 against the official streaming guide): SETUP -> AUTH (api-quote-token,
 fetched fresh on every connect; it lasts 24 h) -> CHANNEL_REQUEST(FEED)
--> FEED_SETUP (COMPACT: Quote bid/ask, Trade last) -> FEED_SUBSCRIPTION.
+-> FEED_SETUP (COMPACT: Quote bid/ask, Trade last, Greeks for options)
+-> FEED_SUBSCRIPTION.
 KEEPALIVEs are echoed and sent every ~30 s. Any disconnect or auth loss
 reconnects after 3 s and resubscribes everything.
 
@@ -26,6 +27,10 @@ FEED_CHANNEL = 1
 
 QUOTE_FIELDS = ["eventSymbol", "bidPrice", "askPrice"]
 TRADE_FIELDS = ["eventSymbol", "price"]
+# dxFeed computes these per option contract; "volatility" is the implied vol.
+# GREEKS names the Quote attributes in the same order (Quote.iv = volatility).
+GREEKS_FIELDS = ["eventSymbol", "volatility", "delta", "gamma", "theta", "vega"]
+GREEKS = ("iv", "delta", "gamma", "theta", "vega")
 
 
 def _f(v):
@@ -43,6 +48,7 @@ class QuoteService:
         self._quotes = {}                        # streamer symbol -> Quote
         self._subs = set()                       # Quote subscriptions
         self._trade_subs = set()                 # Trade subscriptions (last)
+        self._greek_subs = set()                 # Greeks subscriptions
         self._lock = threading.Lock()
         self._ws = None
         self._ws_lock = threading.Lock()
@@ -69,32 +75,38 @@ class QuoteService:
         self._thread.start()
         return True
 
-    def subscribe(self, symbols, trade=False):
-        """Subscribe streamer symbols for Quote (and optionally Trade)
-        events. Safe before the feed is up — everything (re)subscribes on
-        CHANNEL_OPENED."""
+    def subscribe(self, symbols, trade=False, greeks=False):
+        """Subscribe streamer symbols for Quote (and optionally Trade and
+        Greeks) events. Safe before the feed is up — everything
+        (re)subscribes on CHANNEL_OPENED."""
         symbols = [s for s in symbols if s]
         with self._lock:
             new_q = [s for s in symbols if s not in self._subs]
             self._subs.update(new_q)
-            new_t = []
+            new_t = new_g = []
             if trade:
                 new_t = [s for s in symbols if s not in self._trade_subs]
                 self._trade_subs.update(new_t)
+            if greeks:
+                new_g = [s for s in symbols if s not in self._greek_subs]
+                self._greek_subs.update(new_g)
         add = ([{"type": "Quote", "symbol": s} for s in new_q] +
-               [{"type": "Trade", "symbol": s} for s in new_t])
+               [{"type": "Trade", "symbol": s} for s in new_t] +
+               [{"type": "Greeks", "symbol": s} for s in new_g])
         if add and self._feed_ready.is_set():
             self._send({"type": "FEED_SUBSCRIPTION", "channel": FEED_CHANNEL,
                         "add": add})
 
-    def get(self, symbol, wait_s=0.0):
+    def get(self, symbol, wait_s=0.0, greeks=False):
         """Latest Quote for a streamer symbol, or None. wait_s > 0 waits
-        for a first tick (after a fresh subscribe)."""
+        for a first tick (after a fresh subscribe) — with greeks=True, for
+        the first Greeks event too, which dxFeed sends separately."""
         deadline = time.time() + wait_s
         while True:
             with self._lock:
                 q = self._quotes.get(symbol)
-            if q and (q.bid is not None or q.last is not None):
+            if (q and (q.bid is not None or q.last is not None)
+                    and (not greeks or q.delta is not None)):
                 return q
             if time.time() >= deadline:
                 return q
@@ -218,10 +230,12 @@ class QuoteService:
                         "acceptAggregationPeriod": 0.1,
                         "acceptDataFormat": "COMPACT",
                         "acceptEventFields": {"Quote": QUOTE_FIELDS,
-                                              "Trade": TRADE_FIELDS}})
+                                              "Trade": TRADE_FIELDS,
+                                              "Greeks": GREEKS_FIELDS}})
             with self._lock:
                 add = ([{"type": "Quote", "symbol": s} for s in self._subs] +
-                       [{"type": "Trade", "symbol": s} for s in self._trade_subs])
+                       [{"type": "Trade", "symbol": s} for s in self._trade_subs] +
+                       [{"type": "Greeks", "symbol": s} for s in self._greek_subs])
             self._feed_ready.set()
             if add:
                 self._send({"type": "FEED_SUBSCRIPTION",
@@ -236,7 +250,8 @@ class QuoteService:
         now = time.time()
         for i in range(0, len(data) - 1, 2):
             etype, values = data[i], data[i + 1]
-            stride = 3 if etype == "Quote" else 2 if etype == "Trade" else 0
+            stride = {"Quote": len(QUOTE_FIELDS), "Trade": len(TRADE_FIELDS),
+                      "Greeks": len(GREEKS_FIELDS)}.get(etype)
             if not stride or not isinstance(values, list):
                 continue
             with self._lock:
@@ -246,7 +261,10 @@ class QuoteService:
                     if etype == "Quote":
                         q.bid = _f(values[j + 1])
                         q.ask = _f(values[j + 2])
-                    else:
+                    elif etype == "Trade":
                         q.last = _f(values[j + 1])
+                    else:
+                        for k, name in enumerate(GREEKS, start=1):
+                            setattr(q, name, _f(values[j + k]))
                     q.updated_at = now
                     self._quotes[sym] = q

@@ -98,8 +98,8 @@ def trading_status(ctx, args):
     "description": (
         "Real-time market quote (bid, ask, last) for an underlying symbol — "
         "SPX, /ES or 'the e-mini', /MES, or any stock ticker like AAPL. Use "
-        "whenever the user asks for a price, a quote, or where something is "
-        "trading."
+        "whenever the user asks where an underlying is trading. Options are "
+        "priced another way: build them as a ticket and call price_order."
     ),
     "input_schema": {
         "type": "object",
@@ -349,13 +349,68 @@ def set_order_terms(ctx, args):
 
 
 @tool({
+    "name": "price_order",
+    "description": (
+        "Price the current ticket from live market quotes: each leg's bid, "
+        "ask and mid, implied volatility and greeks (delta, gamma, theta, "
+        "vega), and the whole ticket's net mid and net greeks. Quotes only — "
+        "no broker check, so any size prices whatever the account's buying "
+        "power, and nothing is placed or changed. Use it whenever the user "
+        "asks what an option or spread is worth or for its greeks, including "
+        "a position held on thinkorswim: build it as a ticket, then price "
+        "it. review_order is the broker's dry run before submitting, not a "
+        "price check."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
+})
+def price_order(ctx, args):
+    eng, tk, chain, problem = _engine_and_ticket()
+    if problem:
+        return problem
+    problems = tk.validate(chain)
+    if problems:
+        return "The ticket can't be priced yet: " + " ".join(problems)
+    quotes = tk.leg_quotes(chain, eng.leg_quote_fn(chain, greeks=True))
+
+    def g(x, spec):
+        return format(x, spec) if x is not None else "n/a"
+    lines = []
+    for leg, q in quotes:
+        name = f"{leg.code} {leg.size} {leg.expiration} {leg.strike:g} {leg.cp}"
+        if q is None or q.mid is None:
+            lines.append(f"{name}: no live quote")
+            continue
+        greeks = ("greeks not available" if q.delta is None else
+                  f"IV {g(q.iv and q.iv * 100, '.1f')}%, delta {g(q.delta, '+.3f')}, "
+                  f"gamma {g(q.gamma, '.4f')}, theta {g(q.theta, '+.2f')}, "
+                  f"vega {g(q.vega, '.2f')}")
+        lines.append(f"{name}: bid {_fmt(q.bid)}, ask {_fmt(q.ask)}, "
+                     f"mid {_fmt(q.mid)}; {greeks}")
+    net = tk.net_of(quotes)
+    lines.append(f"Net mid {abs(net):.2f} {'credit' if net > 0 else 'debit'} "
+                 "for the ticket as built" if net is not None else
+                 "No net price: a leg has no live quote (the sandbox has no "
+                 "real-time option quotes)")
+    ng = tk.net_greeks(quotes)
+    lines.append("Net greeks per share (times the multiplier, 100 for SPX, "
+                 f"for dollars): delta {g(ng['delta'], '+.3f')}, gamma "
+                 f"{g(ng['gamma'], '+.4f')}, theta {g(ng['theta'], '+.2f')} a "
+                 f"day, vega {g(ng['vega'], '+.2f')}"
+                 if None not in ng.values() else
+                 "No net greeks: the stream sent none for at least one leg")
+    return ("Live pricing, quotes only (nothing placed, buying power not "
+            "checked). " + ". ".join(lines) + ".")
+
+
+@tool({
     "name": "review_order",
     "description": (
         "Review the current ticket before submitting: validates every leg "
-        "against the chain, runs the broker's dry run, and reports cost, "
+        "against the chain, runs the broker's dry run, and reports "
         "buying-power effect, fees, and any warnings. MUST be run (and "
         "heard by the user) before submit_order will work. Use for 'review "
-        "it', 'what would this cost', 'check the order'."
+        "it', 'check the order'. Not for prices or greeks — that is "
+        "price_order, which works even when this dry run is rejected."
     ),
     "input_schema": {"type": "object", "properties": {}},
 })
@@ -376,7 +431,12 @@ def review_order(ctx, args):
                     "quotes. Set a price first ('make it a 1.20 credit').")
     result = eng.orders.review(tk, chain)
     if not result.ok:
-        return "The broker rejected the dry run: " + " ".join(result.errors)
+        # Says nothing about price: on 2026-10-05 a buying-power rejection
+        # here led Tom to conclude he could not price option legs at all, a
+        # belief the user then spent a day correcting.
+        return ("The broker rejected the dry run (this account can't place "
+                "it; the price is unaffected — price_order gives it): " +
+                " ".join(result.errors))
     parts = [f"Reviewed: {tk.describe()}",
              f"Buying power effect {_fmt(result.buying_power_change)}",
              f"fees about {_fmt(result.total_fees)}"]

@@ -150,7 +150,7 @@ def get_email_thread(ctx, args):
             "to": h.get("to", "?"),
             "date": h.get("date", "?"),
             "subject": h.get("subject", ""),
-            "body": _plain_text(m.get("payload", {}))[:4000],
+            "body": _plain_text(m.get("payload", {})),
         })
     return json.dumps({"thread_id": thread_id, "messages": messages}, indent=2)
 

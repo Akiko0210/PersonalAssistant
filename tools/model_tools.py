@@ -27,6 +27,15 @@ import config as cfg
 from tools import tool
 
 
+def live_model(ctx):
+    """The model answering for `ctx` right now: the live override if one is
+    set, else the shared resolver converse() routes with, then the failover's
+    standby during an outage — the same expressions, so an identity answer or
+    a record's writer stamp can never disagree with the model that answered."""
+    chosen = ctx.convo_model or agents.registry_model(ctx.active_agent)
+    return ctx.failover.pick(chosen) if ctx.failover else chosen
+
+
 @tool({
     "name": "get_current_model",
     "description": (
@@ -42,10 +51,7 @@ from tools import tool
     "input_schema": {"type": "object", "properties": {}},
 })
 def get_current_model(ctx, args):
-    # The live override if one is set, else the shared resolver converse()
-    # routes with — one function, so this can never disagree with the model
-    # that actually answers.
-    model_id = ctx.convo_model or agents.registry_model(ctx.active_agent)
+    model_id = live_model(ctx)
     hat = agents.AGENTS.get(ctx.active_agent or "")
     who = hat["name"] if hat else "This assistant"
     return (f"{who} is answering on {cfg.convo_model_label(model_id)}, served "
@@ -97,6 +103,8 @@ def set_conversation_model(ctx, args):
             return ("I can't switch to DeepSeek: no DEEPSEEK_API_KEY is "
                     "configured. Add it to the .env file and restart, or pick "
                     "a Claude model.")
+    if ctx.failover:
+        ctx.failover.clear()  # a choice by hand gets a fresh try, outage or not
     if ctx.convo_model == model_id:
         return f"Already using {cfg.convo_model_label(model_id)}."
     ctx.convo_model = model_id

@@ -648,6 +648,8 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .ac-tools-note { margin-left: auto; font-style: italic; }
 
 /* ---------- Trading ---------- */
+.tr-stmt-pick { display: block; width: 100%; min-height: 54px; font-size: 18px; }
+.tr-stmt-upload { margin-top: 12px; }
 .tr-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; color: var(--ink-2); }
 .tr-env { background: var(--accent-soft); color: var(--ink); border: 1px solid var(--accent); font-weight: 700; }
 .tr-env.tr-live { background: #3a1420; color: #ff8fa3; border-color: #b03050; }

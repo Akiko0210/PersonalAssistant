@@ -619,7 +619,9 @@ class Agent:
             active = agents.AGENTS[self.llm.active]
             self._use_voice(hat)
             try:
-                self.say(f"{hat['name']} here — your note is ready to file.",
+                self.say(f"{hat['name']} here."
+                         if self._direct_folder(note, hat["name"])
+                         else f"{hat['name']} here — your note is ready to file.",
                          voice=False, commands=False)
                 self._save_pending_note(note, saver=hat["name"],
                                         excerpt=item.get("excerpt"))
@@ -944,7 +946,8 @@ class Agent:
                            excerpt: str = None):
         """Save a note the model prepared from the conversation (via the
         save_conversation_note tool): confirm the folder through the usual spoken
-        dialogue, then file it exactly like a recorded note. `saver` names the
+        dialogue (unless _direct_folder already has it), then file it exactly
+        like a recorded note. `saver` names the
         persona that prepared it when that wasn't the active one (a delegated
         background save), so the shared history records who actually did it;
         `excerpt` is that save's conversation snapshot, taken at the hand-off
@@ -967,7 +970,8 @@ class Agent:
             "(Saved from conversation — the recent exchange this note was "
             "drawn from)\n\n" + (excerpt or content),
         )
-        category = self._confirm_category(suggested, title, content[:300])
+        direct = self._direct_folder(pending, saver)
+        category = direct or self._confirm_category(suggested, title, content[:300])
         self.store.save_summary(note_id, title, content, category)
         self.log.info("saved conversation note '%s' -> %s", title, category)
         # The folder dialogue and this save both happen after converse() returned,
@@ -989,13 +993,22 @@ class Agent:
         # genuinely needs an id it has list_recent_notes.
         self.llm.record_tool_event(
             f"{actor} (save_conversation_note): "
-            f"after a spoken folder-choice dialogue it was filed into the {display} "
-            f"folder, titled '{title}'."
+            f"{'without asking' if direct else 'after a spoken folder-choice dialogue'}"
+            f" it was filed into the {display} folder, titled '{title}'."
         )
         self.llm.flush_tool_events(persist=True)
-        interrupted = self.say(f"Notes saved. {spoken}", save_resume=True)
+        interrupted = self.say(f"Saved to {display}. {spoken}" if direct
+                               else f"Notes saved. {spoken}", save_resume=True)
         if not interrupted:
             self.audio.flush()
+
+    def _direct_folder(self, pending: dict, saver: str = None):
+        """The folder a background save files into without the spoken folder
+        dialogue, or None. A delegated save carries the folder its task
+        named; asking again took the microphone for 90 seconds and ate the
+        user's next list item as a folder answer (session_2026-10-06.log,
+        14:56). A save the user asked for directly still asks."""
+        return self.store._match_category(pending.get("category")) if saver else None
 
     # --- categorisation (spoken conversation) --------------------------------
     def _confirm_category(self, suggested: str, title: str, summary: str) -> str:

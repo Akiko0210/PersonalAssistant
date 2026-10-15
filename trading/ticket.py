@@ -129,13 +129,32 @@ class Ticket:
     def net_mid(self, chain, get_quote):
         """Net mid across legs, per contract: positive = credit to you.
         None if any leg has no usable quote."""
+        return self.net_of(self.leg_quotes(chain, get_quote))
+
+    @staticmethod
+    def net_of(quotes):
+        """net_mid over leg_quotes() output already in hand."""
         total = 0.0
-        for leg, q in self.leg_quotes(chain, get_quote):
+        for leg, q in quotes:
             mid = q.mid if q else None
             if mid is None:
                 return None
             total += (mid if leg.side == "Short" else -mid) * leg.size
         return total
+
+    @staticmethod
+    def net_greeks(quotes):
+        """The whole ticket's greeks over leg_quotes() output: each leg's
+        per-share greek times its size, short legs negated (a long holder's
+        sign). A greek any leg lacks is None — a sum over the legs that
+        happened to arrive would be a wrong number said with confidence."""
+        out = {}
+        for name in ("delta", "gamma", "theta", "vega"):
+            vals = [getattr(q, name) if q else None for _, q in quotes]
+            out[name] = (None if None in vals else
+                         sum((v if leg.side == "Long" else -v) * leg.size
+                             for (leg, _), v in zip(quotes, vals)))
+        return out
 
     def apply_net_price(self, net):
         """Store a signed net price using the credit-positive convention."""

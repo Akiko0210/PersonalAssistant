@@ -212,7 +212,9 @@ def count_notes(ctx, args):
             },
             "category": {
                 "type": "string",
-                "description": "Optional: the folder slug that seems the best fit.",
+                "description": ("Optional: the folder slug that seems the best "
+                                "fit. In a background task, pass the folder the "
+                                "task names: it is filed there without asking."),
             },
         },
         "required": ["title", "content"],

@@ -301,7 +301,8 @@ class TestConverseSeams(unittest.TestCase):
     def test_a_missing_provider_key_costs_the_rewrite_not_the_turn(self):
         # QUERY_MODEL can be pointed at DeepSeek from the dashboard without
         # DEEPSEEK_API_KEY; client_for then raises, and the turn must still
-        # answer — on the raw words.
+        # answer — on the raw words here, since the standby fails too (this
+        # fake client can't take a timeout) — and say the lookups moved.
         c = make_claude([text_reply("fine")])
         c.memory = fake_memory()
 
@@ -312,7 +313,9 @@ class TestConverseSeams(unittest.TestCase):
         c.client_for = client_for
         del c._rewriter  # the fixture's stub; exercise the real one
         with mock.patch.object(cfg, "QUERY_MODEL", "deepseek-v4-flash"):
-            self.assertEqual(c.converse("hi"), "fine")
+            reply = c.converse("hi")
+        self.assertEqual(reply, "DeepSeek isn't available, so memory lookups "
+                                "switched to Anthropic. fine")
         self.assertEqual(c.memory.calls[0][0], "hi")
 
     def test_the_pull_is_scoped_to_the_active_persona(self):

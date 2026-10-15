@@ -66,11 +66,14 @@ EXTRACT_MAX_TOKENS = 16000
 EXTRACT_EFFORT = "medium"
 
 
-def extractor(client):
-    """The extractor's model call, bound to `client` (brain/llm/plain.ask)."""
-    return lambda system, prompt: ask(client, cfg.FACTS_MODEL, system, prompt,
-                                      max_tokens=EXTRACT_MAX_TOKENS,
-                                      effort=EXTRACT_EFFORT)
+def extractor(client, model=None):
+    """The extractor's model call, bound to `client` (brain/llm/plain.ask):
+    FACTS_MODEL or the failover's standby, under FACTS_TIMEOUT_S — the one
+    memory worker must not sit on a hung call."""
+    return lambda system, prompt: ask(client, model or cfg.FACTS_MODEL, system,
+                                      prompt, max_tokens=EXTRACT_MAX_TOKENS,
+                                      effort=EXTRACT_EFFORT,
+                                      timeout=cfg.FACTS_TIMEOUT_S)
 
 
 class FactStore(HybridStore):

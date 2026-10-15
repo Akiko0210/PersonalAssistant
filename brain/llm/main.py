@@ -20,6 +20,7 @@ import anthropic
 # so anthropic.NotFoundError (SDK) keeps resolving in this file.
 from brain.llm import anthropic as anthropic_api
 from brain.llm import deepseek
+from brain.llm.failover import Failover, is_balance_error, other_provider  # noqa: F401 - is_balance_error is voice_agent's
 from brain import agents
 from stores import categories
 import config as cfg
@@ -27,6 +28,7 @@ from brain import history as hist
 from lib.atomic_io import write_json_atomic
 from stores.discord_data import DiscordData
 from stores.knowledge import KnowledgeStore
+from stores import working_state
 from brain import context
 from brain import query as understanding
 from brain.facts import FactStore, catch_up, extractor, learn
@@ -125,17 +127,22 @@ def cached(history):
     return wire
 
 
-def system_blocks(static, background=""):
+def system_blocks(static, background="", record=""):
     """The system prompt as the API's block list: the static part carries a
     cache breakpoint (tools render before system, so the marker caches both),
-    and the per-turn Background follows it uncached. Frozen prefix first,
-    volatile tail after — the layout prompt caching is designed around, and
-    the one that lets the retrieved block change every turn without touching
-    the cached part. Haiku 4.5's 4096-token minimum means the static block
+    the persona's working record follows with its own breakpoint, and the
+    per-turn Background comes last, uncached. Ordered by how often each part
+    changes — never, on a record write (a few times a day), every turn — the
+    layout prompt caching is designed around: the retrieved block changes
+    every turn without touching the cached parts, and a record write re-caches
+    only the record. Haiku 4.5's 4096-token minimum means the static block
     alone does not cache there yet (tools + system are 2-3.5k tokens); Sonnet
     and Opus cache it from the second turn on. The per-call usage log line is
     the ground truth for what it buys on each model."""
     blocks = [{"type": "text", "text": static, "cache_control": _CACHE_CONTROL}]
+    if record:
+        blocks.append({"type": "text", "text": record,
+                       "cache_control": _CACHE_CONTROL})
     if background:
         blocks.append({"type": "text", "text": background})
     return blocks
@@ -146,16 +153,6 @@ def make_client(model_id):
     scripts use where the engine has Claude.client_for (which caches)."""
     return (deepseek.make_client() if cfg.model_provider(model_id) == "deepseek"
             else anthropic_api.make_client())
-
-
-def is_balance_error(e) -> bool:
-    """True when an API error means the account is out of money. The two
-    providers say it differently — DeepSeek a 402 "Insufficient Balance",
-    Anthropic a 400 "credit balance is too low" — and the SDK types neither,
-    so the status/message is all there is to go on."""
-    return (isinstance(e, anthropic.APIStatusError)
-            and (e.status_code == 402
-                 or "credit balance is too low" in str(e).lower()))
 
 
 class _NullIdle:
@@ -201,13 +198,15 @@ class Claude:
         # "make Tom smarter" survives switching away and back but never
         # bleeds into the other personas.
         self._model_overrides = {}
+        self._setup_failover()
         # Everything tool handlers may touch (see tools/); also carries the
         # pending conversation note and the active conversation model (which the
         # set_conversation_model tool can switch mid-session).
         self._ctx = ToolContext(store=self.store, discord=self.discord,
                                 kb=self.kb, memory=self.memory, facts=self.facts,
                                 convo_model=agents.registry_model(self.active),
-                                active_agent=self.active)
+                                active_agent=self.active,
+                                failover=self._convo_failover)
         self._active_since = datetime.now()
         self._write_agent_state()
         # Conversation memory: restore the active persona's own thread (trimmed)
@@ -229,14 +228,55 @@ class Claude:
             self._deepseek = deepseek.make_client()
         return self._deepseek
 
+    def _setup_failover(self, clock=time.monotonic):
+        """The three failovers (brain/llm/failover.py) and the queue their
+        notices wait in: the conversation's, shared with every delegation
+        through the ToolContext, and one each for the rewrite and the
+        extractor. Notices can be raised on any thread (extraction runs on
+        the memory worker), so they queue here and converse() speaks them
+        ahead of its next reply."""
+        self._notices = queue.SimpleQueue()
+        notify = self._notices.put
+        self._convo_failover = Failover("the conversation", other_provider,
+                                        notify, clock=clock)
+        self._query_failover = Failover("memory lookups",
+                                        lambda m: cfg.QUERY_FALLBACK_MODEL,
+                                        notify, clock=clock)
+        self._facts_failover = Failover("memory saving",
+                                        lambda m: cfg.FACTS_FALLBACK_MODEL,
+                                        notify, clock=clock)
+
     def _rewriter(self):
-        """The query rewrite's model call on the client serving QUERY_MODEL
+        """The query rewrite's model call, QUERY_MODEL with its failover
         (tests bind a string here)."""
-        return self._bound(understanding.rewriter, cfg.QUERY_MODEL)
+        return self._query_failover.wrap(
+            lambda m: self._bound(lambda c: understanding.rewriter(c, m), m),
+            cfg.QUERY_MODEL)
 
     def _extractor(self):
-        """The fact extractor's model call on the client serving FACTS_MODEL."""
-        return self._bound(extractor, cfg.FACTS_MODEL)
+        """The fact extractor's model call, FACTS_MODEL with its failover."""
+        return self._facts_failover.wrap(
+            lambda m: self._bound(lambda c: extractor(c, m), m),
+            cfg.FACTS_MODEL)
+
+    def _take_notices(self):
+        """Failover announcements raised since the last reply, oldest first."""
+        out = []
+        while True:
+            try:
+                out.append(self._notices.get_nowait())
+            except queue.Empty:
+                return out
+
+    def _record_block(self, owner):
+        """Persona `owner`'s working record for the prompt (tests stub this).
+        Like retrieval, it must never cost the turn: a failure is an empty
+        block and a warning."""
+        try:
+            return working_state.block(owner)
+        except Exception as e:  # noqa: BLE001 - a broken record must not end the turn
+            log.warning("working record for %s unavailable: %s", owner, e)
+            return ""
 
     def _bound(self, factory, model):
         """`factory` over the client serving `model`. A provider whose key is
@@ -323,9 +363,12 @@ class Claude:
         the rounds ran out or `stop` fired. The idle cue is the caller's:
         converse holds it across the whole loop, the folder dialogue per
         exchange."""
-        broke = set()  # providers found out of balance this turn
         for _ in range(max_rounds):
-            model = ctx.convo_model or default_model()
+            chosen = ctx.convo_model or default_model()
+            # The failover's standby while the chosen model's provider cools
+            # down; the choice itself is never overwritten, so the conversation
+            # returns to it on its own (it used to stick until restart).
+            model = ctx.failover.pick(chosen) if ctx.failover else chosen
             try:
                 resp = self.client_for(model).messages.create(
                     model=model,
@@ -348,26 +391,22 @@ class Claude:
                 raise
             except anthropic.APIStatusError as e:
                 # Out of balance is not transient, but the other provider may
-                # be fine: move the conversation there and retry this very
-                # call. `broke` stops a ping-pong when both are empty.
-                if not is_balance_error(e):
-                    raise
-                broke.add(cfg.model_provider(model))
-                alt = next((m for p, m in cfg.FAILOVER_MODELS.items()
-                            if p not in broke), None)
+                # be fine: retry this very call there. Only from the chosen
+                # model — a standby that fails too re-raises, so two empty
+                # balances can't ping-pong.
+                alt = (ctx.failover.standby(model)
+                       if ctx.failover and model == chosen and is_balance_error(e)
+                       else None)
                 try:
                     if alt is None:
                         raise e
                     self.client_for(alt)  # a missing key surfaces here
                 except RuntimeError:
                     raise e from None
-                log.warning("%s out of balance; switching to %s",
-                            cfg.provider_label(model), alt)
-                ctx.convo_model = alt
-                ctx.failover_notice = (
-                    f"{cfg.provider_label(model)} has insufficient balance, "
-                    f"so I've switched to {cfg.provider_label(alt)}.")
+                ctx.failover.failed(model, e)
                 continue
+            if ctx.failover:
+                ctx.failover.ok(model)
             # The usage fields are the only ground truth that caching works;
             # every prompt-assembly change is checked against these lines.
             usage = getattr(resp, "usage", None)
@@ -453,7 +492,10 @@ class Claude:
                               # Focus is session state, not persona state: a
                               # delegated lookup honours the same narrowing
                               # the foreground conversation is under.
-                              focus=self._ctx.focus)
+                              focus=self._ctx.focus,
+                              # So is a provider outage: one failover, whose
+                              # notice the next foreground reply speaks.
+                              failover=self._ctx.failover)
         # The delegate gets the same retrieved Background a foreground turn
         # would, pulled for the task text and scoped to ITS OWN memory — "ask
         # Alice what we discussed about X" reads Alice's exchanges without a
@@ -463,8 +505,8 @@ class Claude:
                                      focus=self._ctx.focus)
         system = system_blocks(
             DELEGATION_PROMPT.format(name=hat["name"], role=hat["role"])
-            + "\n\n" + hat["persona"] + focus_prompt_block(self._ctx.focus),
-            pull.block)
+            + "\n\n" + agents.instructions(key) + focus_prompt_block(self._ctx.focus),
+            pull.block, self._record_block(key))
         # No switching tools in the background: the worker has no user to hand
         # over or re-route, and a nested delegation could chain unboundedly.
         # No order mutation either — review-before-submit means the USER hears
@@ -497,10 +539,12 @@ class Claude:
         parked, else its registry default. The ONE resolver behind converse(),
         delegation, and the switch announcement — when these disagreed, a
         delegated Alice said "Haiku" seconds before the switch announcement
-        said "DeepSeek V4 Flash" (session_2026-08-10.log 18:22)."""
-        if key == self.active:
-            return self._ctx.convo_model or agents.registry_model(key)
-        return self._model_overrides.get(key) or agents.registry_model(key)
+        said "DeepSeek V4 Flash" (session_2026-08-10.log 18:22). During a
+        provider outage that is the failover's standby, not the choice."""
+        chosen = ((self._ctx.convo_model if key == self.active
+                   else self._model_overrides.get(key))
+                  or agents.registry_model(key))
+        return self._ctx.failover.pick(chosen) if self._ctx.failover else chosen
 
     @property
     def active_model(self):
@@ -553,11 +597,7 @@ class Claude:
         was going to DeepSeek. `since` tracks the last persona change, not
         this write, so a per-turn refresh doesn't keep resetting it."""
         try:
-            live = {}
-            for key in agents.AGENTS:
-                chosen = (self._ctx.convo_model if key == self.active
-                          else self._model_overrides.get(key))
-                live[key] = chosen or agents.registry_model(key)
+            live = {key: self.model_for(key) for key in agents.AGENTS}
             write_json_atomic(cfg.AGENT_STATE_PATH, {
                 "active": self.active,
                 "name": agents.AGENTS[self.active]["name"],
@@ -692,6 +732,7 @@ class Claude:
         # outgoing text, and this turn's message must carry one before the call.
         self.history.append({"role": "user", "content": user_text,
                              "ts": hist.now_iso()})
+        self._ctx.user_text = user_text
         # If the previous turn was abandoned right after its user message (leaving
         # history ending on a user turn), this new message would be a second
         # consecutive user turn — which the API also rejects. Fold them together.
@@ -704,6 +745,11 @@ class Claude:
             # loop only appends, so the whole turn stays inside the slice.
             wire_from = hist.tail_start(self.history, cfg.CONTEXT_RECENT_EXCHANGES)
             pull = self._pull_context(user_text, wire_from)
+            # Read once per turn, not per round: a write mid-turn would
+            # otherwise change bytes ahead of the history and cost the later
+            # rounds their history cache. The write's own tool result already
+            # tells the model what changed.
+            record = self._record_block(self.active)
             # The hat is stable for the whole turn (switch_agent defers to a
             # pending slot); the MODEL is not — set_conversation_model mid-loop
             # applies to the next round, which is why the system prompt is a
@@ -713,14 +759,14 @@ class Claude:
                 self.history, ctx=self._ctx,
                 tools=api_tools(include=hat["tools"]),
                 system_for=lambda model: system_blocks(
-                    cfg.CONVO_SYSTEM_BASE + "\n\n" + hat["persona"]
+                    cfg.CONVO_SYSTEM_BASE + "\n\n" + agents.instructions(self.active)
                     + agents.roster_block(self.active)
                     + cfg.model_identity_block(cfg.convo_model_label(model))
                     # Focus lives in the cached prefix, so set/clear costs one
                     # prompt-cache miss — rare and user-initiated; the model
                     # KNOWING its retrieval is narrowed is worth more.
                     + focus_prompt_block(self._ctx.focus),
-                    pull.block),
+                    pull.block, record),
                 default_model=lambda: agents.registry_model(self.active),
                 max_rounds=cfg.CONVO_MAX_TOOL_ROUNDS,
                 wire_from=wire_from,
@@ -733,9 +779,9 @@ class Claude:
                             "out", cfg.CONVO_MAX_TOOL_ROUNDS)
                 return ("I got stuck repeating tool calls and stopped myself. "
                         "Could you ask that again, maybe more specifically?")
-            notice, self._ctx.failover_notice = self._ctx.failover_notice, None
-            text = self._final_text(resp)
-            return f"{notice} {text}" if notice else text
+            # Failover news first — this turn's, a delegation's, or the memory
+            # worker's since the last reply — then the answer.
+            return " ".join([*self._take_notices(), self._final_text(resp)])
         finally:
             self.idle.stop()
             # Fold in anything a synchronous tool recorded this turn, then save.
@@ -919,10 +965,12 @@ class Claude:
         # second pending note mid-dialogue would be circular); so are
         # set_conversation_model, switch_agent, and ask_agent — switching
         # models or personas, or spawning background work, is out of scope for
-        # the focused "where does this go" exchange.
+        # the focused "where does this go" exchange — and the working-record
+        # tools, which would write under whichever persona is active.
         tools = api_tools(exclude={"save_conversation_note",
                                    "set_conversation_model",
-                                   "switch_agent", "ask_agent"}) + [choose_tool]
+                                   "switch_agent", "ask_agent",
+                                   *agents.RECORD_TOOLS, "link_trades"}) + [choose_tool]
         history = [{"role": "user",
                     "content": "I just finished recording a note. Where should it go?"}]
         chosen = None

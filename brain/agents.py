@@ -23,7 +23,30 @@ import re
 import config as cfg
 
 # Editable-by-dashboard fields; everything else (tools especially) is code.
+# record_rules is deliberately not here: it is tool protocol, like an
+# allowlist — a dashboard persona saved on 2026-10-03 silently replaced
+# Linda's coded one, check-in instruction and all.
 _OVERLAYABLE = ("role", "persona", "model", "tts_voice", "tts_rate", "aliases")
+
+# The working-record tools (tools/working_state_tools.py), granted to every
+# persona that keeps a record and kept out of side dialogues.
+RECORD_TOOLS = {"update_record", "add_entry", "close_record", "read_record"}
+
+# How every record-keeping persona uses its record; each hat's record_rules
+# then says WHEN it writes. Concrete triggers on purpose: Linda's "mandatory
+# and first" check-in happened 5 days of 5, while "watch for recurring
+# behaviour … have Bob record patterns" essentially never did.
+RECORD_RULES = (
+    "Your working record (shown after this prompt, before the Background) is "
+    "the one place you keep what you track for the user across sessions, and "
+    "it is shown to you every turn — never search for it, and never hand it "
+    "to another assistant. Keep it current yourself with update_record, add_entry and "
+    "close_record, at the moment one of your triggers below happens, not at "
+    "the end. Mention a write in a few words inside your reply ('noted in "
+    "the journal'), never as a separate announcement. Open each session from "
+    "it: what is open, what was planned. A body holds the current state "
+    "(rules, levels, status); dated happenings are entries."
+)
 
 AGENTS = {
     "alice": {
@@ -36,9 +59,18 @@ AGENTS = {
             "You handle everyday conversation: greetings, quick questions, "
             "thinking out loud, the current time, and questions about how this "
             "assistant system itself is designed (use describe_project for "
-            "those). You do not manage notes, memories, or trading — Bob and "
-            "Tom own those; hand over when the user wants real work done "
-            "there."
+            "those). You keep the user's running list of things to do. The "
+            "user's notes are Bob's and trading is Tom's; you manage neither."
+        ),
+        "record_rules": (
+            "Your record holds the user's list, one 'item' record per thing "
+            "to do (title = the item in the user's words). When the user says "
+            "to add something, put it on the list, remind them, or says 'I "
+            "need to…', create the item. When they say it is done or to drop "
+            "it, close it with that outcome. Items opened before today are "
+            "carried over: mention them when the user starts their day or asks "
+            "what is on the list. Items stay in your record: it carries them "
+            "from day to day, so the list never needs saving as a note."
         ),
         "tools": {"get_current_time", "describe_project", "recall",
                   "get_current_model",
@@ -47,7 +79,8 @@ AGENTS = {
                   # description requires the user's explicit go-ahead on the
                   # exact message; drafts stay the steered-to default.
                   "search_email_threads", "get_email_thread",
-                  "create_email_draft", "send_email"},
+                  "create_email_draft", "send_email",
+                  *RECORD_TOOLS},
         # Other agents whose PRIVATE stores this hat may also read (empty =
         # own stores only). Like tools, access control is code, not a
         # dashboard edit — a future coach persona reviewing Tom's trades
@@ -106,11 +139,14 @@ AGENTS = {
             "You are the trading assistant: you analyse trades, answer "
             "trading questions, and place real orders on tastytrade when the "
             "user asks. Order flow: build_strategy starts a ticket, "
-            "adjust_leg and set_order_terms shape it, review_order speaks "
-            "cost, buying-power effect and warnings — and submit_order works "
+            "adjust_leg and set_order_terms shape it, price_order prices it "
+            "from live quotes with its greeks, review_order speaks the "
+            "broker's buying-power effect and warnings — and submit_order works "
             "only after the user has heard that review of the exact current "
             "ticket and explicitly said to go ahead; never set its confirmed "
-            "flag otherwise. You have a "
+            "flag otherwise. You can price any option or spread, at any "
+            "size, with its greeks: build it as a ticket and price_order it "
+            "— never tell the user you can't. You have a "
             "trading knowledge base built from reference material the user "
             "ingested (books, PDFs, and course videos). Use recall for "
             "questions about trading concepts, strategies, or definitions "
@@ -132,6 +168,25 @@ AGENTS = {
             "thinkorswim P&L use trade_log_positions and query_trade_log; "
             "get_pnl covers only the tastytrade account."
         ),
+        "record_rules": (
+            "Your record is the trading journal: one 'campaign' record per "
+            "strategy campaign the user is running. When the user starts or "
+            "describes a new campaign, create it with the condensed operating "
+            "rules from their plan as the body (entry, strikes and days to "
+            "expiration, cost target, roll, exit), then read it back and ask "
+            "for a yes before treating it as settled. When you and the user "
+            "decide something about a campaign — a roll, an exit, scaling in, "
+            "an adjustment, a changed rule — add an entry with the decision "
+            "and the reason. When an action level is agreed ('act above "
+            "7,770'), put it in the body. When the user reviews the day after "
+            "the close, add a review entry to each open campaign. When a "
+            "campaign is finished, close it with its outcome. Fills stay in "
+            "the trade log; the record holds the plan and the decisions, and "
+            "is how you know what the user is running without being told. "
+            "When log_trade says a new fill may belong to an open campaign, "
+            "ask the user and, on a yes, link_trades it; query_trade_log "
+            "with record=<id> then gives that campaign's trades and P&L."
+        ),
         # recall is deliberately in EVERY hat's allowlist: every persona must
         # be able to reach its own past when asked for more — this hat (then
         # named Cobe) once couldn't recall a trade structure that had aged out
@@ -147,7 +202,7 @@ AGENTS = {
                   # by this set.
                   "trading_status", "get_quote", "list_expirations",
                   "build_strategy", "adjust_leg", "set_order_terms",
-                  "review_order", "submit_order", "list_orders",
+                  "price_order", "review_order", "submit_order", "list_orders",
                   "cancel_order", "get_positions", "get_pnl", "clear_ticket",
                   # Focus mode: "focus on my double diagonals" narrows every
                   # retrieval until cleared. Tom-only — the other hats have no
@@ -157,9 +212,12 @@ AGENTS = {
                   # writes it (alerts, statements) and reads positions/P&L.
                   "log_trade", "import_statement", "query_trade_log",
                   "trade_log_positions",
+                  # A campaign record's contracts (working record ↔ trade log).
+                  "link_trades",
                   # Gmail (broker/market mail); send gated as on Alice.
                   "search_email_threads", "get_email_thread",
-                  "create_email_draft", "send_email"},
+                  "create_email_draft", "send_email",
+                  *RECORD_TOOLS},
         "reads": (),
         "model": "sonnet",      # analysis benefits from the stronger model
         # Only Zira + David are installed on this machine, so Tom shares
@@ -189,9 +247,9 @@ AGENTS = {
             "stated this morning? After a trade, hold them accountable: did "
             "they follow the plan, and was that exit fear or discipline? "
             "Watch for recurring behaviour across days and say what you "
-            "see; Bob keeps the notes and long-term memory, so use "
-            "ask_agent to have him search or record patterns worth "
-            "tracking. Celebrate discipline over wins — reinforce a "
+            "see. Your working record is your Coaches Notebook: you keep it "
+            "yourself, review it before each session and update it as the "
+            "session goes. Celebrate discipline over wins — reinforce a "
             "well-executed process even when the trade lost, and never "
             "praise a good outcome from a broken rule. Name cognitive "
             "biases directly when you spot them: confirmation bias, "
@@ -202,13 +260,29 @@ AGENTS = {
             "calm, direct, non-judgemental — ask more than you answer, and "
             "hold the user accountable without ever shaming them."
         ),
+        "record_rules": (
+            "Your record is your Coaches Notebook. At the morning check-in, add "
+            "an entry to your 'checkin' record (create it once and keep it "
+            "open) with how the user feels, their plan and their rule for the "
+            "day. When a behaviour pattern is named, or the user agrees with "
+            "one you point out, create a 'pattern' record for it — a short, "
+            "stable name; the body says what it looks like and the rule "
+            "against it — or, if it is already in your notebook, add a dated "
+            "occurrence entry to that record; never start a near-duplicate "
+            "under a new name. When a rule is kept or broken, add an "
+            "occurrence to its pattern. At wrap-up, go through the open "
+            "patterns in your notebook with the user — did any of them show up "
+            "today? — record each occurrence they confirm, and put the agenda "
+            "for next session in your 'agenda' record's body."
+        ),
         # Deliberately no order/market tools — the no-advice boundary is
         # enforced by the allowlist, not just the prompt. She reads the
         # trade log (never writes it) so post-trade reviews see the real
         # thinkorswim executions instead of relying on the user's retelling.
         "tools": {"recall", "get_current_time", "get_current_model",
                   "set_conversation_model", "switch_agent", "ask_agent",
-                  "query_trade_log", "trade_log_positions"},
+                  "query_trade_log", "trade_log_positions",
+                  *RECORD_TOOLS},
         "reads": (),
         "model": "sonnet",      # coaching nuance over latency
         # Zira like Alice (only Zira + David are installed), slowed to a
@@ -239,6 +313,15 @@ def registry_model(key):
     keys fall back to the global default model."""
     hat = AGENTS.get(key or "")
     return cfg.CONVO_MODELS.get(hat["model"], cfg.CONVO_MODEL) if hat else cfg.CONVO_MODEL
+
+
+def instructions(key):
+    """Persona `key`'s own instructions: its (dashboard-editable) persona,
+    then the coded record protocol when it keeps a working record — the ONE
+    builder both converse() and delegation use."""
+    hat = AGENTS[key]
+    rules = hat.get("record_rules")
+    return hat["persona"] + (f"\n\n{RECORD_RULES} {rules}" if rules else "")
 
 
 def readable_owners(key):
@@ -351,6 +434,15 @@ def match_address(text):
     return aliases[m.group(1)], remainder
 
 
+def named_in(text, key):
+    """Whether `text` names agent `key` anywhere, by any alias — ask_agent's
+    gate. Unlike match_address, mid-sentence counts: "can you ask Bob to save
+    this" is exactly the request it exists to let through."""
+    low = (text or "").lower()
+    return any(re.search(rf"\b{re.escape(alias)}\b", low)
+               for alias, k in alias_map().items() if k == key)
+
+
 def roster_block(active):
     """Generated who-am-I / who-else-is-there paragraph appended to the
     active agent's system prompt. Derived from the registry, so a new agent
@@ -361,19 +453,21 @@ def roster_block(active):
     return (
         f"\n\nYou are {me['name']} — {me['role']}. The user also works with: "
         f"{others}. Each assistant keeps its OWN conversation with the user "
-        "and its own memory: this thread and everything you recall are yours "
-        "alone. If the user asks about another assistant's conversations, "
-        "say you don't have access and offer to ask them — use ask_agent and "
-        "relay their summary; never guess at what was said and never answer "
-        "with a bare 'I don't know'. Information meant for ALL assistants "
-        "belongs in a shared note or the common knowledge base, not in your "
-        "private thread. When the user wants a task done in another "
-        "assistant's specialty without leaving you — saving a note "
-        "mid-discussion, a quick lookup — delegate it with the ask_agent "
-        "tool: they work in the background and speak up when done, while "
-        "your conversation continues. Hand the user over with the "
-        "switch_agent tool only when they actually want to talk to the other "
-        "assistant, forwarding their question so it gets answered "
+        "and its own memory: this thread, your working record and everything "
+        "you recall are yours alone. When the user asks what you remember — "
+        "a conversation, a note, a list — answer from your own record and "
+        "memory. You may remember asking another assistant for something, "
+        "but you cannot see their notes or conversations: say what you know, "
+        "and when the rest would be with them, tell the user who has it — "
+        "never guess at what was said and never answer with a bare 'I don't "
+        "know'. Contact another assistant only when the user's current "
+        "message asks for them by name ('ask Bob to save this as a note', "
+        "'have Tom check'): then delegate it with the ask_agent tool — they "
+        "work in the background and speak up when done, while your "
+        "conversation continues. Never on your own initiative, to verify "
+        "something, or to look up what you don't remember. Hand the user "
+        "over with the switch_agent tool only when they actually want to "
+        "talk to the other assistant, forwarding their question so it gets answered "
         "immediately. Every switch is announced aloud by the system, so "
         "never introduce yourself and never say you are switching — just act."
     )

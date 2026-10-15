@@ -55,7 +55,7 @@ from urllib.parse import parse_qs, urlparse
 from brain import agents as agents_registry
 from stores import categories
 import config as cfg
-from lib.atomic_io import read_json, write_json_atomic
+from lib.atomic_io import read_json, write_json_atomic, write_text_atomic
 from lib.frontmatter import parse_frontmatter
 from lib.single_instance.main import AlreadyRunning, SingleInstance
 
@@ -72,6 +72,8 @@ DOC_EXTS = (".pdf", ".txt", ".md")
 UPLOAD_EXTS = frozenset(DOC_EXTS + tuple(cfg.KB_MEDIA_EXTS))
 UPLOAD_BLOCK = 1 << 20        # 1 MiB; uploads stream, never buffer whole
 MAX_UPLOAD_BYTES = 4 << 30    # 4 GiB — a sanity bound, not a real-world limit
+# A year of thinkorswim statement is well under 1 MiB; this one is read whole.
+MAX_STATEMENT_BYTES = 20 << 20
 
 # --- Tunables metadata --------------------------------------------------------
 # The UI is generated from this table: one entry per adjustable config value,
@@ -839,13 +841,21 @@ def start_ingest(target=cfg.COMMON_COLLECTION):
     return {"ok": True}
 
 
+def _plain_name(name):
+    """The stripped filename, or "" if it could reach outside its folder —
+    every upload route writes or deletes by a client-supplied name."""
+    name = (name or "").strip()
+    bad = not name or "/" in name or "\\" in name or ".." in name
+    return "" if bad else name
+
+
 def save_upload(name, reader, length):
     """Stream an uploaded file into knowledge/. Returns (status, body).
 
     Written to a `.part` file and renamed only once every byte has arrived, so a
     cancelled upload can never be picked up by an ingest as a truncated video."""
-    name = (name or "").strip()
-    if not name or "/" in name or "\\" in name or ".." in name:
+    name = _plain_name(name)
+    if not name:
         return 400, {"ok": False, "error": "bad filename"}
     suffix = Path(name).suffix.lower()
     if suffix not in UPLOAD_EXTS:
@@ -887,8 +897,8 @@ def remove_pending(name):
     live in Chroma, so deleting just the file would leave the agent quoting a
     book that no longer exists — those come out via the store's `forget`, not
     here."""
-    name = (name or "").strip()
-    if not name or "/" in name or "\\" in name or ".." in name:
+    name = _plain_name(name)
+    if not name:
         return 400, {"ok": False, "error": "bad filename"}
     if Path(name).suffix.lower() not in UPLOAD_EXTS:
         # Keeps manifest.json (and anything else living in the folder) safe.
@@ -906,6 +916,41 @@ def remove_pending(name):
     except OSError as e:
         return 500, {"ok": False, "error": f"could not delete: {e}"}
     return 200, {"ok": True, "name": name}
+
+
+# --- Tom's statement drop -----------------------------------------------------
+
+def import_statement_upload(name, reader, length):
+    """Import a thinkorswim statement CSV dropped on the Trading page into
+    Tom's trade log. Returns (status, body). Same import as the voice tool:
+    it adds rows and corrects its own span, never clears the log. A copy is
+    kept in STATEMENTS_DIR only once it imported, so voice's "import my
+    latest statement" never lands on a refused file."""
+    name = _plain_name(name)
+    if not name or not name.lower().endswith(".csv"):
+        return 400, {"ok": False, "error": "Drop the statement .csv from thinkorswim."}
+    if not 0 < length <= MAX_STATEMENT_BYTES:
+        return 400, {"ok": False, "error": "That file is empty or too large to be a statement."}
+    raw = reader.read(length)
+    if len(raw) < length:
+        return 400, {"ok": False, "error": "upload ended early"}
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return 400, {"ok": False, "error": f"{name} isn't a text CSV."}
+    # Lazy: the trade-log tools pull in the tool registry, and the standalone
+    # dashboard's instant start can't afford it for a page that may never drop.
+    from tools import trade_log_tools
+    from trading import config as tcfg
+    imported, message = trade_log_tools.import_statement_text(name, text)
+    if not imported:
+        return 400, {"ok": False, "error": message}
+    try:
+        tcfg.STATEMENTS_DIR.mkdir(parents=True, exist_ok=True)
+        write_text_atomic(tcfg.STATEMENTS_DIR / name, text)
+    except OSError as e:  # the log already has it; a 500 would say it didn't
+        message += f" (Couldn't keep a copy of the file: {e})"
+    return 200, {"ok": True, "message": message}
 
 
 def _tail_lines(path, n):
@@ -1060,11 +1105,13 @@ class Handler(BaseHTTPRequestHandler):
         url = urlparse(self.path)
         # Uploads carry raw file bytes, not JSON, and are streamed to disk —
         # so they're handled before the read-the-whole-body routes below.
-        if url.path == "/api/knowledge/upload":
+        uploads = {"/api/knowledge/upload": save_upload,
+                   "/api/trading/statement": import_statement_upload}
+        if url.path in uploads:
             try:
                 name = parse_qs(url.query).get("name", [""])[0]
                 length = int(self.headers.get("Content-Length", "0"))
-                status, body = save_upload(name, self.rfile, length)
+                status, body = uploads[url.path](name, self.rfile, length)
                 return self._send(status, body)
             except ValueError as e:
                 return self._send(400, {"ok": False, "error": f"bad request: {e}"})

@@ -1633,6 +1633,54 @@ async function trLoadPnl() {
     </div>`;
 }
 
+/* Tom's statement card: select, then upload — two buttons on purpose. Picking
+   or dropping a file only names it; nothing reaches the trade log until the
+   user reads the name and presses Upload. Statements are small, so a plain
+   fetch, and the import's reply (or why it refused) lands under the button. */
+function trStatementDrop() {
+  const dz = $("#tr-stmt-drop"), picker = $("#tr-stmt-file");
+  const chosen = $("#tr-stmt-chosen"), btn = $("#tr-stmt-upload"), msg = $("#tr-stmt-msg");
+  let file = null;
+  function select(f) {
+    file = f || null;
+    chosen.textContent = file ? `Selected: ${file.name} (${fmtBytes(file.size)})`
+                              : "No file selected.";
+    btn.disabled = !file;
+    msg.textContent = "";
+  }
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = "Uploading…";
+    msg.className = "kb-status";
+    msg.textContent = "";
+    try {
+      const r = await fetch("/api/trading/statement?name=" + encodeURIComponent(file.name),
+        { method: "POST", headers: { "Content-Type": "text/csv" }, body: file });
+      const body = await r.json().catch(() => ({}));
+      select(null);
+      msg.className = "kb-status " + (r.ok && body.ok ? "ok" : "err");
+      msg.textContent = body.message || body.error || r.statusText;
+    } catch (e) {
+      btn.disabled = false;   // the file is still selected; let them retry
+      msg.className = "kb-status err";
+      msg.textContent = e.message;
+    }
+    btn.textContent = "Upload";
+  };
+  $("#tr-stmt-pick").onclick = () => picker.click();
+  dz.onclick = () => picker.click();
+  dz.onkeydown = e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); picker.click(); } };
+  picker.onchange = () => { select(picker.files[0]); picker.value = ""; };
+  // dragover must be cancelled or the browser navigates to the dropped file.
+  dz.ondragover = e => { e.preventDefault(); dz.classList.add("over"); };
+  dz.ondragleave = () => dz.classList.remove("over");
+  dz.ondrop = e => {
+    e.preventDefault();
+    dz.classList.remove("over");
+    select(e.dataTransfer?.files?.[0]);
+  };
+}
+
 views.trading = async function () {
   main.innerHTML = header("Trading", "Loading trading status…");
   let st;
@@ -1651,6 +1699,19 @@ views.trading = async function () {
           : `<span class="tr-problem">${esc(st.problem || "not configured")}</span>`}
         <span id="tr-stream-note" class="card-sub"></span>
       </div>
+    </div>
+    <div class="card">
+      <h2>Statement for Tom</h2>
+      <button class="btn-ghost-lg tr-stmt-pick" id="tr-stmt-pick">Select file</button>
+      <div class="dropzone" id="tr-stmt-drop" tabindex="0" role="button"
+           aria-label="Drop a thinkorswim statement here">
+        …or drag the file here
+      </div>
+      <input type="file" id="tr-stmt-file" accept=".csv" hidden>
+      <div class="kb-status" id="tr-stmt-chosen">No file selected.</div>
+      <button class="btn-big tr-stmt-upload" id="tr-stmt-upload" disabled>Upload</button>
+      <div class="kb-status" id="tr-stmt-msg"></div>
+      <div class="kb-hint">The account statement .csv exported from thinkorswim.</div>
     </div>
     <div class="card">
       <h2>Strategy builder</h2>
@@ -1679,6 +1740,8 @@ views.trading = async function () {
       <div id="tr-pnl-out" class="card-sub">Pick a period and run the report.</div>
     </div>`;
 
+  // Tom's trade log is thinkorswim, not tastytrade: works unconfigured too.
+  trStatementDrop();
   if (!st.configured) {
     const note = '<div class="empty">Waiting for trading credentials (see status above).</div>';
     $("#tr-ticket").innerHTML = note;

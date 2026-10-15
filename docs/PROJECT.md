@@ -127,6 +127,19 @@ unit-tested without a microphone, speakers, or an API key.
   `ToolContext` and reads the active conversation model from it each call. Provider machinery is isolated in the variant files:
   `anthropic.py` and `deepseek.py` own their client construction, endpoint,
   and quirks — the engine itself never knows more than one provider exists.
+- **`brain/llm/failover.py`** — `Failover`: one per provider-bound call site
+  (the conversation, the query rewrite, fact extraction). A failure moves
+  the call to a standby on the other provider (`FAILOVER_MODELS`,
+  `QUERY_FALLBACK_MODEL`, `FACTS_FALLBACK_MODEL`) and retries it; for
+  `FAILOVER_COOLDOWN_S` the default is skipped, then the next real call
+  probes it and a success moves back. Only the switch and the return are
+  announced — queued on `Claude._notices` from any thread and spoken ahead
+  of the next reply. The conversation fails over on an empty balance only
+  (other errors are `explain_error`'s); the rewrite and the extractor on any
+  failure, the extractor now under `FACTS_TIMEOUT_S` (a hung call once held
+  the single memory worker for 901 s). The user's model choice is never
+  overwritten — `model_for` reports the standby during an outage, and
+  `set_conversation_model` clears it.
 - **`brain/history.py`** — pure functions over the message list: `sanitize` (drop any
   tool_use whose tool_result never arrived, and merge adjacent same-role turns),
   `trim` (rolling window that starts on a clean user message), `load`/`save`
@@ -167,6 +180,12 @@ unit-tested without a microphone, speakers, or an API key.
   released before the agent asks for it. Encrypted PDFs need `cryptography`
   (in requirements.txt); without it pypdf fails with "AES algorithm" and the
   scan reports the file as failed.
+- **`stores/working_state.py`** — each persona's *working record*: what it is in
+  the middle of for the user (Tom's campaigns, Linda's Coaches Notebook, Alice's
+  list). SQLite (`data/working_state.db`, the trade log's connection-per-call
+  shape): records with an open/closed lifecycle and a current-state body, plus
+  dated entries. Writes take the writer's key only; `block(owner)` packs the
+  open records into the always-shown prompt block (§7).
 - **`stores/discord_data.py`** — `DiscordData`: read-only view over a sibling "Discord
   Notifier" project's captured messages and trade alerts.
 - **`stores/categories.py`** — the note-folder registry: seed folders, the
@@ -259,7 +278,12 @@ unit-tested without a microphone, speakers, or an API key.
     - Account statements, via `import_statement`. They must tie out to their
       TOTAL row. Split fills of one order are merged. Statements are
       authoritative, so they replace the alert rows of the span they cover —
-      an alert's `#` is not the statement's REF # for the same fill.
+      an alert's `#` is not the statement's REF # for the same fill. The
+      Trading page's drop zone (`POST /api/trading/statement`) runs the same
+      import (`import_statement_text`). It keeps a copy in `STATEMENTS_DIR`
+      only after a successful import, so the voice tool's "latest statement"
+      is never a refused file. That folder defaults to `data/` because a
+      personal path doesn't belong in the repo.
   - **Fill grammar:** thinkorswim's line format, proven on all 110 fills of
     the 2026-09-20 statement. Anything else (iron condors, /ES futures
     options) is refused, not guessed.
@@ -327,7 +351,7 @@ conversation with the user (`brain/agents.py`, one history file per persona)
 and their own private memory. Switching personas swaps the whole thread
 (`Claude.switch_to`): what one persona was told, another cannot see, and
 context crosses over only as an `ask_agent` summary — ask Tom what you told
-Alice and he says he doesn't have access, then offers to ask her. Isolation
+Alice and he says he doesn't have access and that Alice has it. Isolation
 is structural (which files and Chroma collections get read), never a prompt
 rule; the registry's `reads` grants are the one deliberate exception (a
 future reviewer persona may be granted read access to a specialist's private
@@ -340,7 +364,14 @@ of the design:
 - **`switch_agent` — the user moves.** They talk to the other persona from now
   on. Announced aloud with the persona's model ("Bob here, running on Haiku
   4.5") because the model is the one part of a switch you can't hear.
-- **`ask_agent` — a task moves.** The other persona runs it in the background
+- **`ask_agent` — a task moves, and only on request.** The call goes through
+  only when the user's current message names that persona
+  (`agents.named_in`, any alias; `ToolContext.user_text`). Left to their own
+  initiative, personas sent Bob "confirm it" and "check your log" jobs nobody
+  asked for (2026-10-06); since the working record, a persona answers "do you
+  remember…" from its own record and memory instead. A delegated save that
+  names its folder files straight there (`Agent._direct_folder`); only a
+  save without one runs the spoken folder dialogue. The other persona runs it in the background
   (`Claude.run_delegated_task`: an isolated mini tool-loop on its own thread,
   its own message list and `ToolContext` scoped to the delegate — so a
   delegated Alice searches ALICE's memory, which is what makes "ask Alice
@@ -400,6 +431,12 @@ central list or dispatch chain.
   labelled; never another persona's) by topic, by time window, or by exchange
   id (a fact's `from`), plus the reference material the caller may read
   (common + private), cited. §7.
+- **working record** (`working_state_tools.py`, Tom/Linda/Alice):
+  `update_record` (create, or replace title/body/kind; returns the record for
+  read-back), `add_entry`, `close_record` (outcome required), `read_record`
+  (full history, or the open + recently closed list). Owner is always
+  `ctx.active_agent`; when each persona writes is its `record_rules` in
+  `agents.py`. Excluded from the folder dialogue. §7.
 - **focus** (`focus_tools.py`, Tom only): `set_focus`, `clear_focus`,
   `get_focus` — narrow retrieval to a strategy/underlying until cleared.
   A hard metadata filter on private collections, soft (fall back to
@@ -441,16 +478,26 @@ central list or dispatch chain.
   (deferred via `pending_delegations`; result spoken as an interjection — §4).
 - **trading** (`trading_tools.py`): `trading_status`, `get_quote`,
   `list_expirations`, `build_strategy`, `adjust_leg`, `set_order_terms`,
-  `review_order`, `submit_order` (requires review + explicit confirmation),
+  `price_order` (live quotes + dxFeed greeks per leg and net; no broker
+  call, so buying power can't block it — a rejected dry run once hid the
+  price and Tom decided he couldn't price options, 2026-10-05),
+  `review_order` (the dry run only), `submit_order` (requires review + explicit confirmation),
   `list_orders`, `cancel_order`, `get_positions`, `get_pnl`, `clear_ticket` —
   real trading via the tastytrade API (see the trading package above).
 - **trade log** (`trade_log_tools.py`): `log_trade` (an email fill alert →
   one logged order), `import_statement` (a thinkorswim statement CSV →
   authoritative rows with fees; refused unless it ties out to its TOTAL row),
   `query_trade_log` (trades + exact totals + open legs, filtered by period,
-  account, symbol, strategy or refs), `trade_log_positions` (positions under
-  the user's zero-net rule, with exact P&L). Writers are Tom's; the two
-  readers are Linda's too. Details under the trading package above.
+  account, symbol, strategy, refs, or `record` — a campaign's linked
+  contracts), `trade_log_positions` (positions under the user's zero-net
+  rule, with exact P&L), `link_trades` (fills → a campaign record's
+  contracts). Campaigns link by CONTRACT (account, symbol, expiration,
+  strike, type), not by ref: a statement import replaces alert-logged rows
+  under different REF #s, but their legs are the same contracts. `log_trade`
+  names the open campaigns a new fill may belong to (touching a linked
+  contract, or the same underlying); linking stays the user's call. Writers
+  are Tom's; the two readers are Linda's too. Details under the trading
+  package above.
 
 ---
 
@@ -584,6 +631,29 @@ prompt-caching layout).
    collection. Notes and common knowledge are the SHARED write paths:
    information meant for every persona belongs there, not in a private
    thread.
+6. **Working record** (`stores/working_state.py`) — the one layer that is NOT
+   chosen by relevance. Everything above has to win a ranking every turn, and
+   what loses might as well not exist: the 9/30 campaign plan lost to course
+   transcripts, and Tom used the "red" account nickname in 8 of 8 turns where
+   the fact reached him and 0 of 16 where it didn't
+   (`docs/analysis/2026-10-01-tracking-failures.md`). So what a persona is in
+   the middle of — Tom's campaigns, Linda's Coaches Notebook, Alice's list —
+   is written by the persona itself (`update_record` / `add_entry` /
+   `close_record`, on concrete triggers in its `record_rules`) and shown every
+   turn in full. Its prompt block sits between the static system prompt and
+   the Background with its own cache breakpoint, so it is re-cached only when
+   a write changes it; it is built once per turn (a mid-turn rebuild would
+   cost later rounds the history cache), packed to `WORKING_RECORD_CHARS` by a
+   fixed order — headers by recency (title-only past the budget), each
+   record's last `WORKING_RECENT_ENTRIES` entries, then the newest of the
+   rest — and declared authoritative over the Background. Bodies over
+   `WORKING_BODY_CHARS` are refused, not truncated, so no rule is silently
+   cut. Overlap with facts is by design for now: facts are learned
+   automatically about everything, the record holds what is in progress, and
+   the record wins when they disagree. `record_rules` is code, not an
+   overlayable field — a dashboard persona once replaced Linda's coded one,
+   check-in instruction included. Every write logs one `records` line, which
+   `scripts/audit_sessions.py` counts per persona per day.
 
 Every turn logs the rewrite (`query` logger), one `context pull` line and,
 with `CONTEXT_DEBUG_LOG`, the per-candidate table and the block itself
@@ -620,6 +690,7 @@ data/history_<key>.json  each persona's transcript (sanitized on every save)
 data/gmail_client_secret.json  Google OAuth client (from the Cloud console)
 data/gmail_token.json          Gmail token, written by `python -m lib.gmail_auth`
 data/trading/trade_log.db      Tom's SQLite log of thinkorswim/Schwab fills
+data/working_state.db          each persona's working record (campaigns, notebook, list)
 knowledge/           reference PDFs/text/video you ingest + manifest.json
 logs/                dated session logs
 ```

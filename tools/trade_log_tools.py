@@ -9,12 +9,14 @@ Every number a reader returns is summed here, from the log. The model
 interprets positions; it never adds the cash up itself.
 """
 
+import logging
 import re
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from lib.dates import PERIODS, period_range
+from stores import working_state
 from tools import tool
 from trading import config as tcfg
 from trading import statement as tstatement
@@ -28,6 +30,8 @@ from trading import trade_positions as tpos
 _ALERT_RE = re.compile(
     r"#(?P<ref>\d+)\s+(?P<line>(?:BOT|SOLD)\s.*?),\s*ACCOUNT\s+(?P<account>\S+)",
     re.S)
+
+log = logging.getLogger("trading")
 
 _FILTERS = {
     "account": {"type": "string", "description": (
@@ -105,6 +109,37 @@ def _range(args):
     return args.get("start_date"), args.get("end_date")
 
 
+# --- Campaigns (Tom's working record) ------------------------------------------
+
+def _contracts(t):
+    """The option contracts a trade touches, keyed as the record links them."""
+    return {(t["account"], t["symbol"], e, k, cp) for e, k, cp, _ in t["legs"]}
+
+
+def _campaign_hint(owner, trades):
+    """One line naming the open campaigns these new fills may belong to, or
+    "". A fill on a linked contract is almost certainly that campaign's (a
+    roll, an adjustment); one on the same underlying might be. The hint never
+    links: which campaign a trade serves is the user's call."""
+    try:
+        camps = working_state.open_links(owner, "campaign")
+    except Exception as e:  # noqa: BLE001 - the fill is logged; a hint is optional
+        log.warning("campaign hint unavailable: %s", e)
+        return ""
+    touched = set().union(*map(_contracts, trades))
+    symbols = {t["symbol"] for t in trades}
+    named = []
+    for rid, title, linked in camps:
+        if linked & touched:
+            named.append(f"#{rid} '{title}' (touches its contracts)")
+        elif not linked or symbols & {c[1] for c in linked}:
+            named.append(f"#{rid} '{title}' (same underlying)")
+    if not named:
+        return ""
+    return ("Open campaigns this may belong to: " + "; ".join(named)
+            + ". If it does, link_trades with its ref")
+
+
 # --- Writers (Tom) -------------------------------------------------------------
 
 @tool({
@@ -142,7 +177,7 @@ def log_trade(ctx, args):
     if not found:
         return ("No fill alert ('#number BOT/SOLD ..., ACCOUNT ...') in that "
                 "text. Nothing logged.")
-    out, new = [], 0
+    out, logged = [], []
     for m in found:
         line = " ".join(m["line"].split())
         fill = trade_log.parse_fill(line)
@@ -157,12 +192,62 @@ def log_trade(ctx, args):
             amount=fill["amount"], fees=None, description=fill["text"],
             source="email")
         written, _ = trade_log.save([trade])
-        new += written
+        if written:
+            logged.append(trade)
         verb = "Logged" if written else "Already in the log"
         out.append(f"{verb} on {m['account']}: {_trade_line(trade)}")
-    if new:
+    if logged:
         out.append("Fees stay pending until the next statement import")
+        hint = _campaign_hint(ctx.active_agent, logged)
+        if hint:
+            out.append(hint)
     return ". ".join(out) + "."
+
+
+@tool({
+    "name": "link_trades",
+    "description": (
+        "Attach trade-log fills to one of your campaign records, so the "
+        "campaign knows its option contracts: pass the record's id and the "
+        "fills' refs as log_trade or query_trade_log printed them. Link the "
+        "opening fills and every roll or adjustment — a roll's new legs carry "
+        "the campaign onto its new contracts. Links survive a statement import "
+        "replacing alert-logged fills. query_trade_log with record=id then "
+        "shows the campaign's trades and P&L."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "record_id": {"type": "integer",
+                          "description": "The campaign record's id."},
+            "refs": {"type": "array", "items": {"type": "string"},
+                     "description": "Refs of the fills to link."},
+        },
+        "required": ["record_id", "refs"],
+    },
+})
+def link_trades(ctx, args):
+    refs = [str(r).strip() for r in args.get("refs") or [] if str(r).strip()]
+    if not refs:
+        return "Which fills? Pass their refs."
+    trades = trade_log.query(refs=refs)
+    if not trades:
+        return "None of those refs is in the trade log."
+    linked = set().union(*map(_contracts, trades))
+    try:
+        rid = int(args.get("record_id"))
+    except (TypeError, ValueError):
+        return "Which campaign? Pass its record id."
+    try:
+        added = working_state.link(ctx.active_agent, rid, linked)
+    except ValueError as e:  # not this persona's record, or closed
+        return str(e)
+    reply = (f"Linked {len(trades)} fills to #{rid}: {added} new contracts "
+             f"({len(linked)} in these fills).")
+    missing = sorted(set(refs) - {t["ref"] for t in trades})
+    if missing:
+        reply += " Not in the log: " + ", ".join(missing) + "."
+    return reply
 
 
 def _newest_statement():
@@ -193,14 +278,22 @@ def import_statement(ctx, args):
     if path is None:
         return f"No *AccountStatement*.csv in {tcfg.STATEMENTS_DIR}."
     try:
-        st = tstatement.parse(path.read_text(encoding="utf-8-sig"))
+        text = path.read_text(encoding="utf-8-sig")
     except OSError as e:
         return f"Couldn't read {path}: {e}"
+    return import_statement_text(path.name, text)[1]
+
+
+def import_statement_text(name, text):
+    """(imported, reply) for one statement's text. Shared by the tool and the
+    dashboard's drop zone (web/server.py), which keeps a copy only when
+    `imported` — so a refused file never becomes "the latest statement"."""
+    st = tstatement.parse(text)
     if st["problems"]:
-        return (f"Nothing imported from {path.name}: "
-                + "; ".join(st["problems"]) + ".")
+        return False, (f"Nothing imported from {name}: "
+                       + "; ".join(st["problems"]) + ".")
     if not st["orders"]:
-        return f"{path.name} has no trades or expirations. Nothing imported."
+        return False, f"{name} has no trades or expirations. Nothing imported."
     grace = (datetime.fromisoformat(st["last"])
              + timedelta(minutes=tcfg.STATEMENT_EMAIL_GRACE_MIN))
     _, superseded = trade_log.save(
@@ -209,7 +302,7 @@ def import_statement(ctx, args):
                    grace.isoformat(timespec="seconds")))
     fills = [o for o in st["orders"] if o["strategy"] != "expiration"]
     merged = sum(o["fills"] - 1 for o in fills)
-    reply = (f"Imported {path.name} for {st['account']}, {st['since']} to "
+    reply = (f"Imported {name} for {st['account']}, {st['since']} to "
              f"{st['last'][:10]}: {len(fills)} orders ({merged} split fills "
              f"merged) and {len(st['orders']) - len(fills)} expirations. It "
              "ties out to the statement's TOTAL row. "
@@ -219,7 +312,7 @@ def import_statement(ctx, args):
                   "with the statement's rows.")
     if st["skipped"]:
         reply += f" Skipped {st['skipped']} non-trade cash rows."
-    return reply
+    return True, reply
 
 
 # --- Readers (Tom and Linda) ---------------------------------------------------
@@ -232,19 +325,31 @@ def import_statement(ctx, args):
         "exact totals and the legs the selection leaves open. Filter by "
         "period or dates, account, symbol, strategy, or a list of refs. Pass "
         "refs to check any grouping of trades: no open legs means they form "
-        "a closed set, and its net is the exact P&L. Quote these totals "
-        "rather than adding numbers yourself. tastytrade trades aren't here "
-        "(get_pnl)."
+        "a closed set, and its net is the exact P&L. Pass record=<campaign "
+        "id> for every trade on that campaign's linked contracts (its "
+        "accounts included). Quote these totals rather than adding numbers "
+        "yourself. tastytrade trades aren't here (get_pnl)."
     ),
     "input_schema": {
         "type": "object",
         "properties": {**_FILTERS,
                        "refs": {"type": "array", "items": {"type": "string"},
-                                "description": "Refs of the trades to select."}},
+                                "description": "Refs of the trades to select."},
+                       "record": {"type": "integer",
+                                  "description": "A campaign record's id."}},
     },
 })
 def query_trade_log(ctx, args):
-    account, ask = _account(args.get("account"))
+    linked = None
+    if args.get("record") is not None:
+        linked = working_state.contracts(ctx.active_agent, int(args["record"]))
+        if not linked:
+            return (f"Record #{args['record']} has no linked trades"
+                    + ("" if linked is not None else " you can read")
+                    + " — link_trades attaches fills to a campaign.")
+    # A campaign names its own accounts; otherwise ask rather than guess.
+    account, ask = ((None, None) if linked and not args.get("account")
+                    else _account(args.get("account")))
     if ask:
         return ask
     start, end = _range(args)
@@ -252,6 +357,8 @@ def query_trade_log(ctx, args):
                              symbol=args.get("symbol"),
                              strategy=args.get("strategy"),
                              refs=args.get("refs"))
+    if linked:
+        trades = [t for t in trades if _contracts(t) & linked]
     if not trades:
         return "No trades in the log match that."
     shown = trades[-tcfg.TRADE_QUERY_MAX_ROWS:]

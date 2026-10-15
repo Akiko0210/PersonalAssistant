@@ -203,10 +203,25 @@ CONTEXT_DEBUG_LOG = True          # candidate table + full block at DEBUG on the
 QUERY_MODEL = "deepseek-v4-flash"    # on the turn's critical path; DeepSeek Flash by the user's choice (2026-09-22) — needs DEEPSEEK_API_KEY, else the turn falls back to the raw words
 QUERY_RECENT_EXCHANGES = 4           # exchanges the rewrite reads for pronouns and topic
 QUERY_TIMEOUT_S = 8.0                # past this the turn retrieves on the raw utterance
+QUERY_FALLBACK_MODEL = "claude-haiku-4-5"   # takes over while QUERY_MODEL's provider fails: the rewrite is on the turn's critical path, so the fast one
 FACTS_MODEL = "deepseek-v4-flash"    # async; DeepSeek Flash by the user's choice (2026-09-22). Sonnet 5 was the measured baseline (harness, 7/7); re-measure after any change
+FACTS_FALLBACK_MODEL = "claude-sonnet-5-5"  # takes over while FACTS_MODEL's provider fails: off the speaking path, so the careful one (Sonnet was the 7/7 baseline)
+FACTS_TIMEOUT_S = 60.0               # one extraction; there was none, and a hung call held the single memory worker for 901 s (2026-10-01) — the 99th percentile is 8 s
 FACTS_CANDIDATES = 12                # current facts the extractor sees by hybrid search on the exchange, so an addition becomes an update, not a duplicate
 FACTS_RECENT = 8                     # ...plus the most recently established ones: the list being built now is what the next item updates, however unlike its words
 FACTS_KNOWN_ENTITIES = 80            # entity keys shown so the rewrite can name them and the extractor reuses them instead of inventing
+
+# --- Working record -------------------------------------------------------------
+# What each persona is in the middle of — Tom's campaigns, Linda's Coaches
+# Notebook, Alice's list — written by the persona itself and shown every turn
+# outside the retrieval ranking (stores/working_state.py). Anything that has to
+# win the ranking can lose it: the 9/30 campaign plan did, and so did the "red"
+# account nickname in 16 of 24 turns (docs/analysis/2026-10-01-tracking-failures.md).
+WORKING_STATE_PATH = DATA_DIR / "working_state.db"
+WORKING_RECORD_CHARS = 8000   # ~2k tokens shown per turn, prompt-cached between writes; a campaign's rules plus ~10 journal entries fit (the plan note itself is 4,300)
+WORKING_BODY_CHARS = 2000     # a record's current state; refused above, so two campaigns' rules can never fill the block on their own — the full plan stays a note
+WORKING_ENTRY_CHARS = 500     # one dated happening; stops a single entry from eating the block
+WORKING_RECENT_ENTRIES = 2    # each open record's newest entries shown before the rest compete by date, so a busy campaign can't push a quiet one out
 
 # --- Text-to-speech (local: SAPI / NSSpeechSynthesizer / Piper) ---------------
 TTS_RATE = 175                # words per minute
@@ -350,6 +365,11 @@ CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)
 # not silently land on the priciest model.
 FAILOVER_MODELS = {"anthropic": CONVO_MODELS["haiku"],
                    "deepseek": CONVO_MODELS["deepseek"]}
+# How long a failed provider is skipped before the next real call probes it
+# again (brain/llm/failover.py). A probe of a provider that is still out of
+# money costs nothing (the 402 is instant); of a hung one, one timeout — 8 s
+# on the turn for the rewrite, at most every two minutes.
+FAILOVER_COOLDOWN_S = 120
 SUMMARY_MODEL = "claude-sonnet-5-5"   # higher quality for note summaries
 
 def model_provider(model_id: str) -> str:
@@ -567,6 +587,8 @@ OVERRIDABLE = {
     # query understanding / fact extraction
     "QUERY_MODEL": str, "QUERY_RECENT_EXCHANGES": int, "QUERY_TIMEOUT_S": float,
     "FACTS_MODEL": str, "FACTS_CANDIDATES": int, "FACTS_RECENT": int,
+    "QUERY_FALLBACK_MODEL": str, "FACTS_FALLBACK_MODEL": str,
+    "FACTS_TIMEOUT_S": float, "FAILOVER_COOLDOWN_S": int,
     # headset button
     "MEDIA_KEEPALIVE": bool, "MEDIA_CLICK_DEDUPE_S": float,
     # microphone

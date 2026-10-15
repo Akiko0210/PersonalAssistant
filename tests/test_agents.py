@@ -51,11 +51,13 @@ class TestRegistryIntegrity(unittest.TestCase):
         self.assertIn("Bob", block)
         self.assertIn("Tom", block)
         # The memory model inverted (2026-08): each persona's thread is its
-        # own, and the referral path — offer to ask, never guess, never bare
-        # silence — is the incident-shaped guardrail (agents.py 2026-07-20).
+        # own; never guess, never bare silence (agents.py 2026-07-20). Since
+        # 2026-10-06 another assistant is contacted only when the user names
+        # them — the persona answers from its own record and memory.
         self.assertIn("OWN conversation", block)
         self.assertIn("ask_agent", block)
-        self.assertIn("offer to ask", block)
+        self.assertIn("asks for them by name", block)
+        self.assertIn("bare 'I don't", block)
 
     def test_resolve_tolerates_aliases_and_case(self):
         self.assertEqual(agents.resolve("Thom"), "tom")

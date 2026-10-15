@@ -49,9 +49,12 @@ ORDERS_LOG_PATH = TRADING_DIR / "orders_log.json"  # audit trail (append-only)
 
 TRADE_LOG_PATH = TRADING_DIR / "trade_log.db"
 # Where "import my latest statement" looks when no path is given: the newest
-# *AccountStatement*.csv here. Voice can't dictate a Windows path.
+# *AccountStatement*.csv here. Voice can't dictate a Windows path. Statements
+# dropped on the dashboard's Trading page are kept here once imported. Under
+# data/ (gitignored) by default — a personal folder path doesn't belong in the
+# repo; point TRADE_STATEMENTS_DIR at one in .env instead.
 STATEMENTS_DIR = Path(os.getenv("TRADE_STATEMENTS_DIR")
-                      or Path.home() / "Dropbox" / "1eac notes" / "analysis")
+                      or TRADING_DIR / "statements")
 # An alert is stamped with its email's send time, seconds after the fill. A
 # statement whose last row is that fill must still supersede the alert's row,
 # or the fill counts twice (alert # and statement REF # are different series).

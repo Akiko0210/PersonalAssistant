@@ -41,7 +41,8 @@ class TestSwitchAgent(unittest.TestCase):
 
 class TestAskAgent(unittest.TestCase):
     def setUp(self):
-        self.ctx = ToolContext(active_agent="tom")
+        self.ctx = ToolContext(active_agent="tom",
+                               user_text="Have Bob and Alice do it.")
 
     def test_registered(self):
         self.assertIn("ask_agent", _REGISTRY)
@@ -78,6 +79,23 @@ class TestAskAgent(unittest.TestCase):
         out = dispatch(self.ctx, "ask_agent", {"agent": "bob"})
         self.assertEqual(self.ctx.pending_delegations, [])
         self.assertIn("task", out.lower())
+
+    def test_refused_unless_the_user_named_that_assistant(self):
+        # Alice's own-initiative "ask Bob to confirm" jobs, 2026-10-06 14:58.
+        self.ctx.user_text = "No."
+        out = dispatch(self.ctx, "ask_agent", {"agent": "bob", "task": "t"})
+        self.assertEqual(self.ctx.pending_delegations, [])
+        self.assertIn("didn't ask for Bob", out)
+        # A delegated task's context has no user message at all.
+        out = dispatch(ToolContext(active_agent="bob"), "ask_agent",
+                       {"agent": "tom", "task": "t"})
+        self.assertIn("didn't ask for Tom", out)
+
+    def test_a_name_anywhere_in_the_message_counts_but_not_inside_a_word(self):
+        self.assertTrue(agents.named_in("can you ask bobby to save this", "bob"))
+        self.assertTrue(agents.named_in("Then have Linda look.", "linda"))
+        self.assertFalse(agents.named_in("I'll do it tomorrow", "tom"))
+        self.assertFalse(agents.named_in("ask Bob", "alice"))
 
     def test_every_hat_can_delegate(self):
         for key, agent in agents.AGENTS.items():

@@ -193,6 +193,9 @@ class _Shell:
     def _save_pending_note(self, pending, saver=None, excerpt=None):
         self.saved.append((pending, saver, excerpt))
 
+    def _direct_folder(self, pending, saver=None):
+        return pending.get("category") if saver else None
+
     def _start_delegation(self, key, task):
         self.delegated.append((key, task))
 
@@ -268,6 +271,13 @@ class TestInterjectionDelivery(unittest.TestCase):
         self.assertIn("ready to file", shell.spoken[0][0])
         # The hand-off snapshot travels with the note into the save.
         self.assertEqual(shell.saved, [(note, "Bob", "user: save it")])
+
+    def test_a_note_with_its_folder_is_announced_without_the_folder_question(self):
+        shell = _Shell()
+        note = {"title": "T", "content": "b", "category": "daily-list"}
+        shell.interjections.put({"agent": "bob", "text": "ready", "note": note})
+        Agent._deliver_interjections(shell)
+        self.assertEqual(shell.spoken[0][0], "Bob here.")
 
     def test_deferred_while_muted(self):
         shell = _Shell()

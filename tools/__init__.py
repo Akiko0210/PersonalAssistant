@@ -32,9 +32,10 @@ class ToolContext:
     # Active conversation model id; set by set_conversation_model and read by
     # Claude.converse each call, so the user can switch models by voice.
     convo_model: str = None
-    # Set by Claude._tool_loop when a provider's balance ran out and the turn
-    # moved to the other one; converse() speaks it ahead of the reply, once.
-    failover_notice: str = None
+    # The conversation's provider failover (brain/llm/failover.py), shared
+    # with every delegation: which model actually answers while a provider is
+    # down. None runs without one.
+    failover: object = None
     # Key of the persona currently answering (see agents.py); read by
     # switch_agent so "switch to Bob" while already Bob can say so.
     active_agent: str = None
@@ -47,6 +48,12 @@ class ToolContext:
     # background thread as that persona (Claude.run_delegated_task) and the
     # result comes back as a spoken interjection between utterances.
     pending_delegations: list = field(default_factory=list)
+    # The user's message this turn, set by Claude.converse. ask_agent goes
+    # through only when it names the other assistant: delegating on its own
+    # initiative, Alice sent Bob two "confirm it" / "check your log" jobs the
+    # user never asked for (session_2026-10-06.log, 14:58 and 15:00). A
+    # delegated task's fresh ToolContext leaves it empty.
+    user_text: str = ""
     # Per-session retrieval narrowing (set_focus): folded into store where=
     # filters, e.g. {"strategy": "double_diagonal", "underlying": "SPX"}.
     # Session state, deliberately never persisted — a stale focus outliving
@@ -116,6 +123,7 @@ from tools import discord_tools   # noqa: E402,F401
 from tools import time_tools      # noqa: E402,F401
 from tools import memory_tools    # noqa: E402,F401
 from tools import focus_tools     # noqa: E402,F401
+from tools import working_state_tools  # noqa: E402,F401
 from tools import model_tools     # noqa: E402,F401
 from tools import project_tools   # noqa: E402,F401
 from tools import agent_tools     # noqa: E402,F401
