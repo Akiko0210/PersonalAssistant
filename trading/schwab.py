@@ -24,6 +24,7 @@ can correct them in one place.
 """
 
 import base64
+import logging
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -39,6 +40,8 @@ from trading.models import (BrokerError, ChainData, DryRunResult, OptionInfo,
 
 KEY = "schwab"
 LABEL = "Charles Schwab"
+
+log = logging.getLogger("trading")
 
 SIGN_IN_HINT = ("Schwab needs you to sign in again — open the dashboard's "
                 "Trading page and press Sign in to Schwab.")
@@ -132,8 +135,27 @@ class Client:
                      "Content-Type": "application/x-www-form-urlencoded"},
             timeout=15)
         if resp.status_code != 200:
-            raise BrokerError(f"Schwab token request failed ({resp.status_code}). "
-                              + SIGN_IN_HINT, status=resp.status_code, code="auth")
+            # Schwab's own reason, logged and shown: a bare "failed (400)" left
+            # the user's first failed sign-in (2026-10-15) undiagnosable.
+            try:
+                body = resp.json() or {}
+                reason = str(body.get("error_description") or body.get("error") or body)
+            except ValueError:
+                reason = ""
+            reason = reason[:200] or f"HTTP {resp.status_code}"
+            log.warning("Schwab token request (%s) refused: %s",
+                        form.get("grant_type"), reason)
+            if form.get("grant_type") == "authorization_code":
+                # The code in the landing address is short-lived (reportedly
+                # about 30 seconds; Schwab's docs don't say) and single-use, so
+                # a slow paste or a second try with the same address fails here.
+                msg = (f"Schwab refused the sign-in code ({reason}). The code in "
+                       "that address expires within about 30 seconds and works "
+                       "once — press Sign in to Schwab again and paste the new "
+                       "address straight away.")
+            else:
+                msg = f"Schwab refused the token refresh ({reason}). " + SIGN_IN_HINT
+            raise BrokerError(msg, status=resp.status_code, code="auth")
         return resp.json()
 
     def _save_tokens(self, body):

@@ -62,6 +62,35 @@ class TestSignIn(SchwabBase):
         # Survives a restart: the next client reads the file.
         self.assertTrue(self.client().auth_state()["signed_in"])
 
+    def test_an_expired_code_says_why_and_how_to_retry(self):
+        # The user's first sign-in failed with only "failed (400)" to go on.
+        self.http.script["POST /v1/oauth/token"] = FakeResponse(400, {
+            "error": "invalid_grant",
+            "error_description": "Bad authorization code: AuthorizationCode has expired"})
+        c = self.client()
+        with self.assertLogs("trading", "WARNING") as logs, \
+                self.assertRaises(BrokerError) as cm:
+            c.exchange_code("https://127.0.0.1/?code=C%40old&session=s")
+        msg = str(cm.exception)
+        self.assertIn("AuthorizationCode has expired", msg)   # Schwab's own words
+        self.assertIn("30 seconds", msg)
+        self.assertIn("Sign in to Schwab again", msg)
+        self.assertEqual(cm.exception.code, "auth")
+        self.assertIn("AuthorizationCode has expired", logs.output[0])
+        self.assertFalse(c.auth_state()["signed_in"])        # nothing half-saved
+
+    def test_a_refused_refresh_points_to_sign_in_not_the_code(self):
+        self.http.script["POST /v1/oauth/token"] = [token_body(), FakeResponse(
+            401, {"error": "invalid_client", "error_description": "refresh token revoked"})]
+        c = self.client()
+        c.exchange_code("c")
+        self.now += DAY
+        with self.assertLogs("trading", "WARNING"), self.assertRaises(BrokerError) as cm:
+            c._token()
+        self.assertIn("refresh token revoked", str(cm.exception))
+        self.assertNotIn("30 seconds", str(cm.exception))
+        self.assertIn("sign in again", str(cm.exception))
+
     def test_access_refresh_keeps_the_seven_day_clock(self):
         self.http.script["POST /v1/oauth/token"] = [token_body("A1"), token_body("A2")]
         c = self.client()

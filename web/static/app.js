@@ -1731,7 +1731,8 @@ async function trSchwabAuth() {
     ${state}
     <a class="btn-big tr-stmt-upload" href="${esc(a.url)}" target="_blank" rel="noopener">Sign in to Schwab</a>
     <div class="kb-hint">Schwab then sends you to <code>${esc(a.callback)}</code>, which shows an
-      error page — that is expected. Copy that page's whole address and paste it here.</div>
+      error page — that is expected. Copy that page's whole address and paste it here
+      <strong>straight away</strong>: the code in it expires within about 30 seconds and works once.</div>
     <input id="tr-auth-url" class="f-text" placeholder="https://127.0.0.1/?code=…&session=…">
     <button id="tr-auth-finish" class="btn-big tr-stmt-upload">Finish sign-in</button>
     <div class="kb-status" id="tr-auth-msg"></div>`;
