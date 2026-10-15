@@ -270,6 +270,20 @@ unit-tested without a microphone, speakers, or an API key.
     `brain/agents.py` gives each hat a `brokers` tuple (Tom `schwab`, Bonny
     `tastytrade`, Linda both, read-only) and the tools resolve it from
     `ctx.active_agent`. Asking Tom for tastytrade is refused by name.
+  - **Which account, one level down** (`trading/accounts.py`): a login can
+    reach several accounts (the user's Schwab login shares two). They are
+    discovered from the broker, never configured; the user's nicknames
+    ("IRA") and each persona's chosen account live in
+    `data/trading/<broker>/accounts.json`, set by voice with `set_account` or
+    the Trading page's account buttons — the same choice. The choice is
+    persisted on purpose (an account is a standing choice; retrieval focus
+    isn't). Every answer names its account; `account` reaches another one or
+    `"all"` (one block each, then a combined line added up in the sentence)
+    without moving the choice. Orders act on one account: the ticket carries
+    it, the review fingerprint includes it, so switching accounts after a
+    review forces a new one. `SCHWAB_ACCOUNT_ID` / `TASTY_ACCOUNT_ID` are
+    only defaults now. On 2026-10-15 two accounts stopped Tom cold and he
+    told the user to edit a config file — that path is gone.
   - **tastytrade**: OAuth refresh token from `.env` (`TASTY_*`, or
     `TASTY_ENV_FILE`); sandbox unless `TASTY_ENV=live`; DXLink stream.
   - **Schwab**: three-legged OAuth2 whose refresh token dies after 7 days
@@ -514,10 +528,13 @@ central list or dispatch chain.
   call, so buying power can't block it — a rejected dry run once hid the
   price and Tom decided he couldn't price options, 2026-10-05),
   `review_order` (the dry run only), `submit_order` (requires review + explicit confirmation),
-  `list_orders`, `cancel_order`, `get_positions`, `get_pnl`, `clear_ticket` —
-  real trading on the persona's broker (Tom → Schwab, Bonny → tastytrade; see
-  the trading package above). The read tools take an optional `broker` for
-  Linda, who covers both accounts separately and sums only in the sentence.
+  `list_orders`, `cancel_order`, `get_positions`, `get_pnl`, `get_balance`
+  (net liquidating value, cash, buying power), `set_account` (choose or name
+  an account), `clear_ticket` — real trading on the persona's broker (Tom →
+  Schwab, Bonny → tastytrade; see the trading package above). The read tools
+  take an optional `account` (nickname, last digits, or `all`) and `broker`
+  (for Linda, who covers both brokers); totals across accounts or brokers are
+  only ever summed in the sentence.
 - **trade log** (`trade_log_tools.py`): `log_trade` (an email fill alert →
   one logged order), `import_statement` (a thinkorswim statement CSV →
   authoritative rows with fees; refused unless it ties out to its TOTAL row),
@@ -723,7 +740,8 @@ data/history_<key>.json  each persona's transcript (sanitized on every save)
 data/gmail_client_secret.json  Google OAuth client (from the Cloud console)
 data/gmail_token.json          Gmail token, written by `python -m lib.gmail_auth`
 data/trading/trade_log.db      Tom's SQLite log of thinkorswim/Schwab fills
-data/trading/<broker>/         per broker: ticket.json, orders_log.json, and
+data/trading/<broker>/         per broker: ticket.json, orders_log.json,
+                               accounts.json (nicknames + chosen account), and
                                Schwab's tokens.json (the 7-day sign-in)
 data/working_state.db          each persona's working record (campaigns, notebook, list)
 knowledge/           reference PDFs/text/video you ingest + manifest.json

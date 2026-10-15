@@ -10,14 +10,14 @@ Recognised keys (Tasty-Web's names accepted as aliases):
     TASTY_ENV             "sandbox" (default) or "live"  — the safety gate
     TASTY_CLIENT_SECRET   or CLIENT_SECRET
     TASTY_REFRESH_TOKEN   or REFRESH_TOKEN
-    TASTY_ACCOUNT_ID      or TASTYWORKS_ACCOUNT_ID
+    TASTY_ACCOUNT_ID      or TASTYWORKS_ACCOUNT_ID (optional: the account to start on)
     TASTY_BASE_URL        optional explicit base URL override
     TASTY_ENV_FILE        optional path to another .env to fall back on
 
     SCHWAB_CLIENT_ID      the Dev Portal app's App Key
     SCHWAB_CLIENT_SECRET  its Secret
     SCHWAB_CALLBACK_URL   the app's registered callback (default https://127.0.0.1)
-    SCHWAB_ACCOUNT_ID     optional: which linked account, when there are several
+    SCHWAB_ACCOUNT_ID     optional: the account to start on (the user can switch by voice)
 
 The environment gate is deliberate: unset or anything other than exactly
 "live" means the sandbox base URL (api.cert.tastyworks.com). Real-money
@@ -196,8 +196,7 @@ def credentials_problem():
     missing = [label for label, val in [
         ("client secret (TASTY_CLIENT_SECRET)", client_secret()),
         ("refresh token (TASTY_REFRESH_TOKEN)", refresh_token()),
-        ("account id (TASTY_ACCOUNT_ID)", account_id()),
-    ] if not val]
+    ] if not val]   # TASTY_ACCOUNT_ID is optional: accounts are listed from the login
     if not missing:
         return None
     return ("tastytrade is not configured: missing " + ", ".join(missing) +

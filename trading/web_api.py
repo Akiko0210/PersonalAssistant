@@ -18,6 +18,7 @@ the page polls /api/trading/quotes for the REST snapshots instead.
 
 from datetime import date
 
+from trading import accounts as taccounts
 from trading import config as tcfg
 from trading import main as tmain
 from trading import strategies as tstrat
@@ -60,19 +61,53 @@ def _ticket_dict(tk, chain=None):
     return d
 
 
+def _trader(broker):
+    """(key, name) of the persona that trades `broker` alone, or (None, None).
+    The page works on THAT persona's chosen account, so the dashboard and
+    "Tom, move to my IRA" are one choice, not two."""
+    from brain import agents
+    return next(((k, a["name"]) for k, a in agents.AGENTS.items()
+                 if tuple(a.get("brokers", ())) == (broker,)), (None, None))
+
+
+def _account(eng):
+    """(account, None) or (None, error) — the account every per-account
+    route acts on: the broker's trading persona's chosen one."""
+    try:
+        acct = eng.default_account(_trader(eng.key)[0])
+    except Exception as e:
+        return None, str(e)
+    if not acct:
+        return None, "Several accounts — pick one at the top of the page."
+    return acct, None
+
+
 def brokers():
     """The broker chooser: every broker, configured or not, with who trades
     it by voice."""
-    from brain import agents
     out = []
     for key in tmain.keys():
         mod = tmain.module(key)
-        persona = next((a["name"] for a in agents.AGENTS.values()
-                        if tuple(a.get("brokers", ())) == (key,)), None)
         problem = mod.credentials_problem()
-        out.append({"key": key, "label": tmain.label(key), "persona": persona,
+        out.append({"key": key, "label": tmain.label(key), "persona": _trader(key)[1],
                     "configured": problem is None, "problem": problem})
     return {"brokers": out}
+
+
+def account_post(body):
+    """Choose the account the page (and that broker's persona) works on."""
+    broker = body.get("broker", "")
+    eng, err = _engine(broker)
+    if err:
+        return _err(err)
+    try:
+        number, problem = taccounts.resolve(broker, body.get("account", ""), eng.accounts())
+    except Exception as e:
+        return _err(e)
+    if problem:
+        return _err(problem)
+    taccounts.set_focus(broker, _trader(broker)[0], number)
+    return {"ok": True, "account": number, "label": eng.label(number)}
 
 
 def status(broker):
@@ -91,6 +126,11 @@ def status(broker):
     if err:
         return {**base, "configured": False, "problem": err}
     base.update(eng.status())
+    if base.get("accounts"):
+        chosen, _ = _account(eng)
+        base["accounts"] = [{"number": a, "label": eng.label(a), "chosen": a == chosen}
+                            for a in base["accounts"]]
+        base["account"] = eng.label(chosen) if chosen else None
     tk = tticket.load(broker)
     base["ticket"] = tk.to_dict() if tk else None
     return base
@@ -248,6 +288,13 @@ def dry_run(body):
                         "pricing — set a price.")
         tk.apply_net_price(net)
         tticket.save(tk, broker)
+    acct, err = _account(eng)
+    if err:
+        return _err(err)
+    if tk.account != acct:
+        tk.account = acct        # the fingerprint changes: an old review is void
+        tk.touch()
+        tticket.save(tk, broker)
     r = eng.orders.review(tk, ch)
     return {"ok": r.ok, "errors": r.errors, "warnings": r.warnings,
             "buying_power_change": r.buying_power_change,
@@ -272,6 +319,12 @@ def submit(body):
     if body.get("fingerprint") and body["fingerprint"] != tk.fingerprint():
         return _err("The ticket changed since this dialog was opened — "
                     "review again.")
+    acct, err = _account(eng)
+    if err:
+        return _err(err)
+    if tk.account != acct:
+        return _err(f"This ticket was reviewed for {eng.label(tk.account)}, but the "
+                    f"page is on {eng.label(acct)} — review it again.")
     try:
         ch = eng.chain(tk.underlying)
     except Exception as e:
@@ -290,7 +343,10 @@ def cancel(body):
     order_id = str(body.get("order_id") or "").strip()
     if not order_id:
         return _err("No order id.")
-    order, reason = eng.orders.cancel(order_id)
+    acct, err = _account(eng)
+    if err:
+        return _err(err)
+    order, reason = eng.orders.cancel(acct, order_id)
     if reason:
         return _err(reason)
     return {"order": {"id": order.id, "status": order.status}}
@@ -300,11 +356,14 @@ def orders_list(broker, start_date=None):
     eng, err = _engine(broker)
     if err:
         return _err(err)
+    acct, err = _account(eng)
+    if err:
+        return _err(err)
     try:
         # Not today: a still-working order placed yesterday must not drop off
         # the page (tcfg.ORDERS_LOOKBACK_DAYS).
         orders = eng.orders.list_orders(
-            start_date=start_date or tcfg.default_orders_start())
+            acct, start_date=start_date or tcfg.default_orders_start())
     except Exception as e:
         return _err(e)
     return {"orders": [{
@@ -319,8 +378,11 @@ def positions(broker):
     eng, err = _engine(broker)
     if err:
         return _err(err)
+    acct, err = _account(eng)
+    if err:
+        return _err(err)
     try:
-        pos = eng.positions()
+        pos = eng.positions(acct)
     except Exception as e:
         return _err(e)
     rows, total, unmarked = [], 0.0, 0
@@ -345,8 +407,11 @@ def pnl(broker, start, end, underlying=None):
     eng, err = _engine(broker)
     if err:
         return _err(err)
+    acct, err = _account(eng)
+    if err:
+        return _err(err)
     try:
-        rep = eng.pnl_report(start or date.today().isoformat(),
+        rep = eng.pnl_report(acct, start or date.today().isoformat(),
                              end or date.today().isoformat(),
                              underlying=underlying or None)
     except Exception as e:

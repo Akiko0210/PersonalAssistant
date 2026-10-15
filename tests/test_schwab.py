@@ -122,24 +122,21 @@ class TestAccountsAndOrders(SchwabBase):
         c.exchange_code("c")
         return c
 
-    def test_two_accounts_need_a_choice(self):
+    def test_every_shared_account_is_listed_and_reached_by_its_hash(self):
+        # Two accounts used to be a hard stop ("set SCHWAB_ACCOUNT_ID");
+        # now both are listed and each call names the one it means.
         self.http.script["GET /accounts/accountNumbers"] = FakeResponse(200, [
             {"accountNumber": "11112222", "hashValue": "H1"},
             {"accountNumber": "33334444", "hashValue": "H2"}])
-        with self.assertRaises(BrokerError) as cm:
-            self.signed_in().account_hash()
-        self.assertIn("…2222", str(cm.exception))
-        self.assertIn("SCHWAB_ACCOUNT_ID", str(cm.exception))
-
-    def test_chosen_account_resolves_to_its_hash(self):
-        self.http.script["GET /accounts/accountNumbers"] = FakeResponse(200, [
-            {"accountNumber": "11112222", "hashValue": "H1"},
-            {"accountNumber": "33334444", "hashValue": "H2"}])
-        self.http.script["POST /v1/oauth/token"] = token_body()
-        c = self.client(account_id="33334444")
-        c.exchange_code("c")
-        self.assertEqual(c.account_hash(), "H2")
-        self.assertEqual(c.account_number(), "33334444")
+        self.http.script["GET /accounts/H2"] = FakeResponse(200, {"securitiesAccount": {
+            "currentBalances": {"liquidationValue": 5000.0, "cashBalance": 1200.0,
+                                "cashAvailableForTrading": 1100.0}}})
+        c = self.signed_in()
+        self.assertEqual(c.account_numbers(), ["11112222", "33334444"])
+        b = schwab.parse_balance(c.balances("33334444"))
+        self.assertEqual((b.net_liq, b.cash, b.buying_power), (5000.0, 1200.0, 1100.0))
+        with self.assertRaises(BrokerError):
+            c.positions("99999999")             # not shared: said, not guessed
 
     def test_place_order_reads_the_id_from_location(self):
         self.http.script["GET /accounts/accountNumbers"] = FakeResponse(
@@ -152,7 +149,7 @@ class TestAccountsAndOrders(SchwabBase):
                   "orderLegCollection": [{"instruction": "SELL_TO_OPEN", "quantity": 1,
                                           "instrument": {"symbol": "SPXW  260724P06345000",
                                                          "underlyingSymbol": "$SPX"}}]})
-        order = schwab.parse_order(self.signed_in().place_order({}))
+        order = schwab.parse_order(self.signed_in().place_order("1", {}))
         self.assertEqual((order.id, order.status, order.underlying), ("987", "Working", "SPX"))
         self.assertTrue(order.is_working)
         self.assertEqual(order.price_effect, "Credit")
@@ -247,10 +244,10 @@ class TestParsers(unittest.TestCase):
                  "amount": 0.65, "feeType": "COMMISSION"}]}
 
         class C:
-            def transactions_all(self, start, end):
+            def transactions_all(self, account, start, end):
                 return [trade("2026-07-20T15:00:00+0000", -1, 150.0, 149.35, "OPENING"),
                         trade("2026-07-22T15:00:00+0000", 1, -50.0, -50.65, "CLOSING")]
-        txs = schwab.transactions(C(), "2026-07-01", "2026-07-31")
+        txs = schwab.transactions(C(), "1", "2026-07-01", "2026-07-31")
         self.assertEqual([t["action"] for t in txs], ["Sell to Open", "Buy to Close"])
         self.assertEqual(txs[0]["underlying-symbol"], "SPX")
         rep = tpnl.report(txs, "2026-07-01", "2026-07-31")
@@ -261,10 +258,10 @@ class TestParsers(unittest.TestCase):
         seen = {}
 
         class C:
-            def transactions_all(self, start, end):
+            def transactions_all(self, account, start, end):
                 seen.update(start=start, end=end)
                 return []
-        schwab.transactions(C(), "2020-01-01", "2026-07-31")
+        schwab.transactions(C(), "1", "2020-01-01", "2026-07-31")
         self.assertEqual(seen["start"], "2025-07-31")
 
 

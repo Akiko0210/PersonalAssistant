@@ -22,8 +22,8 @@ class FakeClient:
         self.reject_dry_run = None
         self.account_id = "5WT00001"
 
-    def dry_run_order(self, payload):
-        self.dry_runs.append(payload)
+    def dry_run_order(self, account, payload):
+        self.dry_runs.append((account, payload))
         if self.reject_dry_run:
             raise BrokerError("preflight", status=422,
                              errors=[{"message": self.reject_dry_run}])
@@ -41,8 +41,9 @@ class FakeClient:
                                 "total-fees-effect": "Debit"},
         }
 
-    def place_order(self, payload):
+    def place_order(self, account, payload):
         self.placed.append(payload)
+        self.placed_on = account
         return {"order": {"id": "123", "status": "Routed",
                           "underlying-symbol": "SPX", "price": "1.50",
                           "price-effect": "Credit", "time-in-force": "Day",
@@ -50,15 +51,15 @@ class FakeClient:
                           "legs": [{"symbol": "S", "action": "Sell to Open",
                                     "quantity": 1}]}}
 
-    def get_order(self, order_id):
+    def get_order(self, account, order_id):
         return {"id": order_id, "status": "Live", "underlying-symbol": "SPX"}
 
-    def list_orders(self, **kw):
+    def list_orders(self, account, **kw):
         return {"items": [
             {"id": "123", "status": "Live", "underlying-symbol": "SPX"},
             {"id": "99", "status": "Filled", "underlying-symbol": "SPX"}]}
 
-    def cancel_order(self, order_id):
+    def cancel_order(self, account, order_id):
         self.cancelled.append(order_id)
         return {"id": order_id, "status": "Cancel Requested",
                 "underlying-symbol": "SPX"}
@@ -80,7 +81,7 @@ class OrdersBase(unittest.TestCase):
     def ticket(self):
         tk = Ticket(underlying="SPX", strategy="Bull Put Spread", legs=[
             Leg(6345.0, "Put", "2026-07-24", "Short"),
-            Leg(6340.0, "Put", "2026-07-24", "Long")])
+            Leg(6340.0, "Put", "2026-07-24", "Long")], account="5WT00001")
         tk.limit_price, tk.price_effect = 1.50, "Credit"
         return tk
 
@@ -155,6 +156,7 @@ class TestSubmitGate(OrdersBase):
         # One review authorizes one submit.
         self.assertIsNone(tk.review)
         payload = self.client.placed[0]
+        self.assertEqual(self.client.placed_on, "5WT00001")   # the ticket's account
         self.assertEqual(payload["price"], "1.50")
         self.assertEqual(payload["source"], "voice-agent")
 
@@ -168,13 +170,13 @@ class TestSubmitGate(OrdersBase):
 
 class TestCancelAndList(OrdersBase):
     def test_cancel(self):
-        order, reason = self.mgr.cancel("123")
+        order, reason = self.mgr.cancel("5WT00001", "123")
         self.assertIsNone(reason)
         self.assertEqual(order.status, "Cancel Requested")
         self.assertEqual(self.client.cancelled, ["123"])
 
     def test_working_orders_filter(self):
-        working = self.mgr.working_orders()
+        working = self.mgr.working_orders("5WT00001")
         self.assertEqual([o.id for o in working], ["123"])
 
 

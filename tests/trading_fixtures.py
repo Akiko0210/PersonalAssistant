@@ -100,22 +100,42 @@ class FakeHTTP:
 # --- a stand-in engine for persona->broker routing tests --------------------
 
 class FakeEngine:
-    """Just enough TradingEngine for the read tools: canned positions and a
-    P&L report, keyed by broker so a test can tell which account answered."""
+    """Just enough TradingEngine for the read tools, over real
+    trading/accounts.py choices: `accounts` maps account number -> realized
+    P&L (also its net liquidating value), and every call records which
+    account it reached."""
 
-    def __init__(self, key, realized=0.0):
+    def __init__(self, key, realized=0.0, accounts=None):
+        from trading import accounts as taccounts
         self.key = key
-        self.realized = realized
+        self._acc = taccounts
+        self.by_account = accounts or {f"{key}-1": realized}
         self.calls = []
 
-    def status(self):
-        return {"env": "live", "account": f"{self.key}-acct", "stream": "ok"}
+    def accounts(self):
+        return list(self.by_account)
 
-    def positions(self, underlying=None):
-        self.calls.append(("positions", underlying))
+    def default_account(self, persona):
+        return self._acc.default(self.key, persona, self.accounts())
+
+    def label(self, account):
+        return self._acc.label(self.key, account)
+
+    def status(self):
+        return {"env": "live", "accounts": self.accounts(), "stream": "ok"}
+
+    def positions(self, account, underlying=None):
+        self.calls.append(("positions", account, underlying))
         return []
 
-    def pnl_report(self, start, end, underlying=None):
+    def balance(self, account):
+        from trading.models import Balance
+        self.calls.append(("balance", account))
+        v = self.by_account[account]
+        return Balance(net_liq=v, cash=v / 2, buying_power=v / 4)
+
+    def pnl_report(self, account, start, end, underlying=None):
         from trading.models import PnLReport
-        self.calls.append(("pnl", start, end, underlying))
-        return PnLReport(start=start or "", end=end or "", realized=self.realized)
+        self.calls.append(("pnl", account, start, end, underlying))
+        return PnLReport(start=start or "", end=end or "",
+                         realized=self.by_account[account])

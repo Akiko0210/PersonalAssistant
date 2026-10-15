@@ -39,6 +39,7 @@ class Ticket:
     price_effect: str = None      # "Credit" | "Debit"
     updated_at: float = 0.0
     review: dict = None           # stamped by orders.review(); see fingerprint
+    account: str = None           # the account it is for; set at build/review
 
     # --- integrity -------------------------------------------------------
 
@@ -46,6 +47,9 @@ class Ticket:
         """Hash of everything that defines the order. Any change after a
         review invalidates the review (orders.py compares)."""
         content = {
+            # The account is in the hash: a ticket reviewed on the IRA and
+            # then moved to another account must be reviewed again there.
+            "account": self.account,
             "underlying": self.underlying, "tif": self.tif,
             "price": self.limit_price, "effect": self.price_effect,
             "legs": [[l.strike, l.cp, l.expiration, l.side, l.size,
@@ -212,7 +216,7 @@ class Ticket:
                    limit_price=d.get("limit_price"),
                    price_effect=d.get("price_effect"),
                    updated_at=d.get("updated_at", 0.0),
-                   review=d.get("review"))
+                   review=d.get("review"), account=d.get("account"))
 
 
 def save(ticket, broker):

@@ -499,6 +499,15 @@ sandbox — every token is a live one — and its API cannot trade futures, so
 stream (Schwab allows one stream per user, which the agent and the dashboard
 would fight over), and option quotes carry the greeks directly.
 
+**Several accounts.** If your login shares more than one account, name them
+once (*"Tom, call 699 my IRA"*) and pick one (*"move to my IRA"*). Tom keeps
+using it — across sessions — until you switch, and every answer says which
+account it read (*"IRA (…699): net liquidating value …"*). Ask about another
+one (*"how's red doing?"*) or all of them (*"positions across all my
+accounts"*) without changing the choice; the Trading page's account buttons
+are the same choice. *"Check my balance"* gives net liquidating value, cash
+and buying power. Bonny works the same way on tastytrade.
+
 ### tastytrade (Bonny)
 
 Add your tastytrade OAuth credentials to `.env`:

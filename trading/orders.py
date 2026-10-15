@@ -43,7 +43,7 @@ class OrderManager:
         except ValueError as e:
             return DryRunResult(ok=False, errors=[str(e)])
         try:
-            data = self._client.dry_run_order(payload)
+            data = self._client.dry_run_order(tk.account, payload)
         except BrokerError as e:
             self._log("dry-run-rejected", ticket=tk.describe(),
                       errors=e.details())
@@ -68,6 +68,9 @@ class OrderManager:
     def submit_blockers(self, tk):
         """Why this ticket may not be submitted right now (empty = go)."""
         problems = []
+        if not tk.account:
+            problems.append("The ticket has no account — review it first.")
+            return problems
         if not tk.review:
             problems.append("The order has not been reviewed — run a "
                             "review (dry run) first.")
@@ -91,39 +94,40 @@ class OrderManager:
             return None, " ".join(blockers)
         try:
             payload = self._broker.order_payload(tk, chain)
-            data = self._client.place_order(payload)
+            data = self._client.place_order(tk.account, payload)
         except (ValueError, BrokerError) as e:
             reason = e.details() if isinstance(e, BrokerError) else str(e)
             self._log("submit-rejected", ticket=tk.describe(), error=reason)
             return None, f"Order rejected: {reason}"
         order = self._broker.parse_order(data)
         self._log("submitted", order_id=order.id, status=order.status,
-                  ticket=tk.describe())
+                  account=tk.account, ticket=tk.describe())
         tk.review = None       # a review authorizes exactly one submit
         tticket.save(tk, self._broker.KEY)
         return order, None
 
     # --- status / cancel -------------------------------------------------
 
-    def get(self, order_id):
-        return self._broker.parse_order(self._client.get_order(order_id))
+    def get(self, account, order_id):
+        return self._broker.parse_order(self._client.get_order(account, order_id))
 
-    def list_orders(self, start_date=None):
+    def list_orders(self, account, start_date=None):
         return self._broker.parse_order_list(
-            self._client.list_orders(start_date=start_date))
+            self._client.list_orders(account, start_date=start_date))
 
-    def working_orders(self, start_date=None):
-        return [o for o in self.list_orders(start_date) if o.is_working]
+    def working_orders(self, account, start_date=None):
+        return [o for o in self.list_orders(account, start_date) if o.is_working]
 
-    def cancel(self, order_id):
+    def cancel(self, account, order_id):
         """Returns (PlacedOrder, None) or (None, reason)."""
         try:
-            data = self._client.cancel_order(order_id)
+            data = self._client.cancel_order(account, order_id)
         except BrokerError as e:
-            self._log("cancel-failed", order_id=order_id, error=e.details())
+            self._log("cancel-failed", order_id=order_id, account=account,
+                      error=e.details())
             return None, e.details()
         order = self._broker.parse_order(data)
-        self._log("cancelled", order_id=order.id, status=order.status)
+        self._log("cancelled", order_id=order.id, account=account, status=order.status)
         return order, None
 
     # --- audit log -------------------------------------------------------

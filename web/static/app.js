@@ -1779,13 +1779,21 @@ views.trading = async function () {
       ${chooser}
       <div class="tr-status">${envBadge}
         ${st.configured
-          ? `account <code>${esc(st.account || "?")}</code> · quotes: ${esc(st.stream || "n/a")}`
+          ? `account <code>${esc(st.account || "none chosen")}</code> · quotes: ${esc(st.stream || "n/a")}`
           : `<span class="tr-problem">${esc(st.problem || "not configured")}</span>`}
         <span id="tr-stream-note" class="card-sub"></span>
       </div>
       ${st.configured && st.problem ? `<div class="tr-problem">${esc(st.problem)}</div>` : ""}
       ${st.warning ? `<div class="tr-problem">⚠ ${esc(st.warning)}</div>` : ""}
     </div>
+    ${(st.accounts || []).length > 1 ? `<div class="card">
+      <h2>Account</h2>
+      ${st.accounts.map(a => `
+        <button class="btn-big tr-broker tr-acct ${a.chosen ? "tr-broker-on" : ""}" data-account="${esc(a.number)}">
+          ${esc(a.label)}</button>`).join("")}
+      <div class="kb-hint">The same choice as telling ${esc((list.find(b => b.key === TR.broker) || {}).persona || "the agent")}
+        "move to my …" by voice.</div>
+    </div>` : ""}
     ${TR.broker === "schwab" ? '<div class="card"><h2>Schwab sign-in</h2><div id="tr-auth"></div></div>' : ""}
     <div class="card" ${TR.broker === "schwab" ? "" : "hidden"}>
       <h2>Statement for Tom</h2>
@@ -1827,7 +1835,13 @@ views.trading = async function () {
       <div id="tr-pnl-out" class="card-sub">Pick a period and run the report.</div>
     </div>`;
 
-  main.querySelectorAll(".tr-broker").forEach(b => b.onclick = () => {
+  main.querySelectorAll(".tr-acct").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { await trPost("/api/trading/account", { account: b.dataset.account }); }
+    catch (e) { window.alert(e.message); }
+    views.trading();
+  });
+  main.querySelectorAll(".tr-broker:not(.tr-acct)").forEach(b => b.onclick = () => {
     TR.broker = b.dataset.broker;
     try { localStorage.setItem("trBroker", TR.broker); } catch {}
     views.trading();

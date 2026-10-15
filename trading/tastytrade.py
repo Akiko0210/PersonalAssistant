@@ -9,7 +9,12 @@ broker-neutral dataclasses in models.py and this module's uniform surface:
     KEY, LABEL, credentials_problem(), Client(), make_quotes(client),
     fetch_chain(client, underlying), order_payload(ticket, chain),
     parse_dry_run(data), parse_order(data), parse_positions(items),
-    transactions(client, start, end, underlying), env_label(), status(client)
+    parse_balance(raw), transactions(client, account, start, end, underlying),
+    env_label(), status(client)
+
+and a Client whose account calls take the account number first
+(positions(account), balances(account), dry_run_order(account, payload), ...),
+plus account_numbers() and default_account.
 
 Port of Tasty-Web's api/*.ts (see TRADING_RESEARCH.md §1-2). Auth: the
 never-expiring personal-grant refresh token mints 15-minute access tokens at
@@ -24,8 +29,8 @@ import requests
 
 from trading import config as tcfg
 from trading import symbols as tsym
-from trading.models import (BrokerError, ChainData, DryRunResult, OptionInfo,
-                            PlacedOrder, Position)
+from trading.models import (Balance, BrokerError, ChainData, DryRunResult,
+                            OptionInfo, PlacedOrder, Position)
 from trading.quotes import QuoteService
 
 KEY = "tastytrade"
@@ -50,8 +55,12 @@ def env_label():
 
 
 def status(client):
-    return {"env": env_label(), "base_url": client.base_url,
-            "account": client.account_id}
+    s = {"env": env_label(), "base_url": client.base_url, "accounts": []}
+    try:
+        s["accounts"] = client.account_numbers()
+    except BrokerError as e:
+        s["problem"] = str(e)
+    return s
 
 
 class Client:
@@ -67,6 +76,7 @@ class Client:
         self._access_token = None
         self._token_expiry = 0.0
         self._token_lock = threading.Lock()
+        self._numbers = None
 
     # --- auth ------------------------------------------------------------
 
@@ -145,19 +155,41 @@ class Client:
 
     # --- account ---------------------------------------------------------
 
-    def _acct(self, tail):
-        if not self.account_id:
-            raise BrokerError("No account id configured (TASTY_ACCOUNT_ID).")
-        return f"/accounts/{self.account_id}{tail}"
+    def account_numbers(self):
+        """Every account on the login (/customers/me/accounts). An account
+        set in .env stays usable if the listing is refused (sandbox)."""
+        if self._numbers is None:
+            try:
+                data = self._get("/customers/me/accounts")
+                found = [str(i["account"]["account-number"])
+                         for i in data.get("items", [])
+                         if (i.get("account") or {}).get("account-number")]
+            except BrokerError:
+                found = []
+            if not found and self.account_id:
+                found = [str(self.account_id)]
+            if not found:
+                raise BrokerError("tastytrade listed no accounts for this login.")
+            self._numbers = found
+        return list(self._numbers)
 
-    def balances(self):
-        return self._get(self._acct("/balances"))
+    @property
+    def default_account(self):
+        return self.account_id
 
-    def positions(self):
-        data = self._get(self._acct("/positions"))
+    def _acct(self, account, tail):
+        if not account:
+            raise BrokerError("No tastytrade account chosen.")
+        return f"/accounts/{account}{tail}"
+
+    def balances(self, account):
+        return self._get(self._acct(account, "/balances"))
+
+    def positions(self, account):
+        data = self._get(self._acct(account, "/positions"))
         return data.get("items", [])
 
-    def transactions_page(self, page_offset=0, **filters):
+    def transactions_page(self, account, page_offset=0, **filters):
         """One page of /transactions (250 max per page). Filters use the
         API's dasherized names: types=[...], underlying_symbol=...,
         start_date=..., end_date=..."""
@@ -166,14 +198,14 @@ class Client:
             if v is None:
                 continue
             params[k.replace("_", "-") + ("[]" if isinstance(v, (list, tuple)) else "")] = v
-        return self._request("GET", self._acct("/transactions"), params=params)
+        return self._request("GET", self._acct(account, "/transactions"), params=params)
 
-    def transactions_all(self, max_pages=40, **filters):
+    def transactions_all(self, account, max_pages=40, **filters):
         """Every transaction matching the filters, following pagination.
         max_pages bounds a runaway fetch (40 pages = 10k transactions)."""
         items, offset = [], 0
         for _ in range(max_pages):
-            page = self.transactions_page(page_offset=offset, **filters)
+            page = self.transactions_page(account, page_offset=offset, **filters)
             batch = page.get("items", []) if isinstance(page, dict) else []
             items.extend(batch)
             if len(batch) < 250:
@@ -183,25 +215,22 @@ class Client:
 
     # --- orders ----------------------------------------------------------
 
-    def dry_run_order(self, payload):
-        return self._request("POST", self._acct("/orders/dry-run"), json_body=payload)
+    def dry_run_order(self, account, payload):
+        return self._request("POST", self._acct(account, "/orders/dry-run"), json_body=payload)
 
-    def place_order(self, payload):
-        return self._request("POST", self._acct("/orders"), json_body=payload)
+    def place_order(self, account, payload):
+        return self._request("POST", self._acct(account, "/orders"), json_body=payload)
 
-    def get_order(self, order_id):
-        return self._get(self._acct(f"/orders/{order_id}"))
+    def get_order(self, account, order_id):
+        return self._get(self._acct(account, f"/orders/{order_id}"))
 
-    def list_orders(self, start_date=None, end_date=None, status=None):
-        return self._get(self._acct("/orders"),
+    def list_orders(self, account, start_date=None, end_date=None, status=None):
+        return self._get(self._acct(account, "/orders"),
                          **{"start-date": start_date, "end-date": end_date,
                             "status[]": status})
 
-    def cancel_order(self, order_id):
-        return self._request("DELETE", self._acct(f"/orders/{order_id}"))
-
-    def replace_order(self, order_id, payload):
-        return self._request("PUT", self._acct(f"/orders/{order_id}"), json_body=payload)
+    def cancel_order(self, account, order_id):
+        return self._request("DELETE", self._acct(account, f"/orders/{order_id}"))
 
 
 TastyClient = Client
@@ -460,10 +489,18 @@ def parse_positions(items):
     return out
 
 
-def transactions(client, start, end, underlying=None):
+def parse_balance(raw):
+    return Balance(net_liq=_f(raw.get("net-liquidating-value"), None),
+                   cash=_f(raw.get("cash-balance"), None),
+                   buying_power=_f(raw.get("derivative-buying-power"),
+                                   _f(raw.get("equity-buying-power"), None)),
+                   raw=raw)
+
+
+def transactions(client, account, start, end, underlying=None):
     """Transactions in pnl.py's (tastytrade-native) shape."""
     filters = {"start_date": start, "end_date": end,
                "types": ["Trade", "Receive Deliver", "Money Movement"]}
     if underlying:
         filters["underlying_symbol"] = underlying
-    return client.transactions_all(**filters)
+    return client.transactions_all(account, **filters)

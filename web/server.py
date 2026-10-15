@@ -1096,6 +1096,7 @@ class Handler(BaseHTTPRequestHandler):
         }
         post_routes = {
             "/api/trading/schwab/auth": lambda: tw.schwab_auth_post(body),
+            "/api/trading/account": lambda: tw.account_post(body),
             "/api/trading/ticket": lambda: tw.ticket_post(body),
             "/api/trading/dry-run": lambda: tw.dry_run(body),
             "/api/trading/submit": lambda: tw.submit(body),

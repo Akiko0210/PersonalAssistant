@@ -14,6 +14,7 @@ own ticket file, audit log, chain cache key and quote cache.
 import threading
 from datetime import date, timedelta
 
+from trading import accounts as taccounts
 from trading import chains as tchains
 from trading import config as tcfg
 from trading import main as tmain
@@ -70,10 +71,28 @@ class TradingEngine:
             get_quote.prefetch = prefetch   # Ticket.leg_quotes batches on it
         return get_quote
 
+    # --- accounts ----------------------------------------------------------
+
+    def accounts(self):
+        """Every account number this login reaches (discovered, cached)."""
+        return self.client.account_numbers()
+
+    def default_account(self, persona):
+        """The account `persona` works on when the user didn't say one, or
+        None when that is ambiguous (several accounts, no focus)."""
+        return taccounts.default(self.key, persona, self.accounts(),
+                                 self.client.default_account)
+
+    def label(self, account):
+        return taccounts.label(self.key, account)
+
+    def balance(self, account):
+        return self.broker.parse_balance(self.client.balances(account))
+
     # --- positions & P&L -------------------------------------------------
 
-    def positions(self, underlying=None):
-        pos = self.broker.parse_positions(self.client.positions())
+    def positions(self, account, underlying=None):
+        pos = self.broker.parse_positions(self.client.positions(account))
         if underlying:
             u = tsym.normalize_underlying(underlying)
             pos = [p for p in pos if p.underlying == u]
@@ -108,7 +127,7 @@ class TradingEngine:
                 return q.mid
         return position.close_price
 
-    def pnl_report(self, start, end, underlying=None):
+    def pnl_report(self, account, start, end, underlying=None):
         """PnLReport for [start, end] (ISO dates), optionally one
         underlying. Fetches transactions with the open-matching lookback."""
         fetch_start = None
@@ -116,8 +135,8 @@ class TradingEngine:
             fetch_start = (date.fromisoformat(start) -
                            timedelta(days=tcfg.PNL_OPEN_LOOKBACK_DAYS)).isoformat()
         u = tsym.normalize_underlying(underlying) if underlying else None
-        txs = self.broker.transactions(self.client, fetch_start, end, u)
-        positions = self.positions(underlying)
+        txs = self.broker.transactions(self.client, account, fetch_start, end, u)
+        positions = self.positions(account, underlying)
         return tpnl.report(txs, start, end, positions=positions,
                            mark_fn=self.mark)
 

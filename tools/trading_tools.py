@@ -18,6 +18,11 @@ Design rules:
 - The working ticket is persisted per broker (data/trading/<broker>/
   ticket.json), so a draft built by voice is the same draft shown in the
   dashboard's Trading page, and a Schwab draft can never reach tastytrade.
+- Accounts work like brokers, one level down: a login may reach several
+  (the IRA and "red"), the persona works on the one the user chose with
+  set_account (trading/accounts.py, persisted), every answer names its
+  account, and `account` reaches another one — or "all" — without moving
+  the choice. Orders act on exactly one account, named in the review.
 """
 
 from datetime import date, timedelta
@@ -25,6 +30,7 @@ from datetime import date, timedelta
 from brain import agents
 from lib.dates import PERIODS, period_range
 from tools import tool
+from trading import accounts as taccounts
 from trading import config as tcfg
 from trading import main as tmain
 from trading import strategies as tstrat
@@ -34,6 +40,12 @@ from trading import ticket as tticket
 BROKER_ARG = {"type": "string", "enum": tmain.keys(),
               "description": "Only when the user names a broker; otherwise "
                              "your own broker (or, for a reader of both, each)."}
+ACCOUNT_ARG = {"type": "string",
+               "description": "Only when the user names an account for this "
+                              "question: its nickname ('IRA', 'red'), last "
+                              "digits ('699'), or 'all'. Omit to use the account "
+                              "chosen with set_account."}
+_ALL = {"all", "all accounts", "every account", "both", "both accounts"}
 
 
 def _fmt(x, none="unknown"):
@@ -141,16 +153,62 @@ def _engine_and_ticket(ctx, args=None):
     return eng, tk, chain, None
 
 
-def _per_broker(ctx, args, one):
-    """Run one(broker, engine) -> sentence for each broker a read covers,
-    prefixing the broker's name when there is more than one."""
+def _accounts(ctx, eng, args):
+    """([account, ...], None) or (None, spoken-problem): the accounts one
+    question covers — the one named, all of them, or the persona's chosen
+    one. With several accounts and no choice yet it asks, once."""
+    try:
+        numbers = eng.accounts()
+    except Exception as e:
+        return None, f"Couldn't list the {tmain.label(eng.key)} accounts: {e}"
+    said = (args.get("account") or "").strip()
+    if said.lower() in _ALL:
+        return numbers, None
+    if said:
+        n, problem = taccounts.resolve(eng.key, said, numbers)
+        return ([n], None) if n else (None, problem)
+    n = eng.default_account(ctx.active_agent)
+    if n:
+        return [n], None
+    listing = ", ".join(eng.label(x) for x in numbers)
+    return None, (f"Which {tmain.label(eng.key)} account — {listing}? Say which "
+                  "to work on ('move to my IRA') or ask about all of them.")
+
+
+def _one_account(ctx, eng, args=None):
+    """(account, None) or (None, problem) for a call that acts on exactly
+    one account: an order, a cancel."""
+    if ((args or {}).get("account") or "").strip().lower() in _ALL:
+        return None, "Orders go to one account at a time — which one?"
+    found, problem = _accounts(ctx, eng, args or {})
+    return (found[0], None) if found else (None, problem)
+
+
+def _per_account(ctx, args, one, total=None):
+    """Run one(engine, account) -> (sentence, number-or-None) for every
+    account a read covers, across the persona's brokers. Each sentence is
+    prefixed with its account (and broker, when there are two); with more
+    than one account, total(numbers) adds a combined line — added up in the
+    sentence only, never in storage."""
     engs, problem = _engines(ctx, args)
     if problem:
         return problem
-    parts = []
+    parts, values = [], []
     for broker, eng, err in engs:
-        text = err if err else one(broker, eng)
-        parts.append(f"{tmain.label(broker)}: {text}" if len(engs) > 1 else text)
+        where = f"{tmain.label(broker)}, " if len(engs) > 1 else ""
+        if err:
+            parts.append(f"{tmain.label(broker)}: {err}")
+            continue
+        accts, problem = _accounts(ctx, eng, args)
+        if problem:
+            parts.append(where + problem)
+            continue
+        for account in accts:
+            text, value = one(eng, account)
+            parts.append(f"{where}{eng.label(account)}: {text}")
+            values.append(value)
+    if total and len(values) > 1 and None not in values:
+        parts.append(total(values))
     return " ".join(parts)
 
 
@@ -166,22 +224,107 @@ def _per_broker(ctx, args, one):
     "input_schema": {"type": "object", "properties": {"broker": BROKER_ARG}},
 })
 def trading_status(ctx, args):
-    def one(broker, eng):
-        s = eng.status()
-        tk = _load_ticket(broker)
-        parts = [f"Trading is in {s['env']} mode on account {s.get('account') or 'unknown'}.",
-                 f"Quotes: {s['stream']}."]
-        if s.get("problem"):
-            parts.append(s["problem"])
-        if s.get("warning"):
-            parts.append(s["warning"])
-        parts.append(f"Current ticket: {tk.describe()}" if tk
-                     else "No order ticket is open.")
-        if s["env"] == "sandbox":
-            parts.append("Orders go to the tastytrade sandbox, not real money; "
-                         "set TASTY_ENV=live to trade for real.")
-        return " ".join(parts)
-    return _per_broker(ctx, args, one)
+    engs, problem = _engines(ctx, args)
+    if problem:
+        return problem
+    out = []
+    for broker, eng, err in engs:
+        text = err if err else _status_line(ctx, broker, eng)
+        out.append(f"{tmain.label(broker)}: {text}" if len(engs) > 1 else text)
+    return " ".join(out)
+
+
+def _status_line(ctx, broker, eng):
+    s = eng.status()
+    accts = s.get("accounts") or []
+    chosen = eng.default_account(ctx.active_agent) if accts else None
+    parts = [f"Trading is in {s['env']} mode."]
+    if accts:
+        parts.append("Accounts: " + ", ".join(eng.label(a) for a in accts) + ".")
+        parts.append(f"Working on {eng.label(chosen)}." if chosen else
+                     "No account chosen yet — the user picks one ('move to my IRA').")
+    parts.append(f"Quotes: {s['stream']}.")
+    if s.get("problem"):
+        parts.append(s["problem"])
+    if s.get("warning"):
+        parts.append(s["warning"])
+    tk = _load_ticket(broker)
+    parts.append(f"Current ticket: {tk.describe()}" if tk
+                 else "No order ticket is open.")
+    if s["env"] == "sandbox":
+        parts.append("Orders go to the tastytrade sandbox, not real money; "
+                     "set TASTY_ENV=live to trade for real.")
+    return " ".join(parts)
+
+
+@tool({
+    "name": "set_account",
+    "description": (
+        "Choose which account you work on, or name an account. Without "
+        "nickname: switch to that account ('move to my IRA', 'use red', "
+        "'switch to 868') — every later balance, position, P&L, order and "
+        "review question goes to it, in this and later sessions, until the "
+        "user switches again. With nickname: remember the user's name for an "
+        "account ('call 868 red', 'the 699 one is my IRA') without switching."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "account": {"type": "string",
+                        "description": "Nickname or last digits of the account."},
+            "nickname": {"type": "string",
+                         "description": "Only to name the account, e.g. 'IRA'."},
+            "broker": BROKER_ARG,
+        },
+        "required": ["account"],
+    },
+})
+def set_account(ctx, args):
+    eng, err = _engine(ctx, args)
+    if err:
+        return err
+    try:
+        numbers = eng.accounts()
+    except Exception as e:
+        return f"Couldn't list the {tmain.label(eng.key)} accounts: {e}"
+    said = (args.get("account") or "").strip()
+    number, problem = taccounts.resolve(eng.key, said, numbers)
+    if problem:
+        return problem
+    if args.get("nickname"):
+        digits = "".join(c for c in said if c.isdigit()) or number[-3:]
+        taccounts.set_name(eng.key, digits, args["nickname"])
+        return f"Got it: account …{number[-3:]} is {args['nickname']}."
+    taccounts.set_focus(eng.key, ctx.active_agent, number)
+    reply = (f"Now working on {eng.label(number)}. Balance, positions, P&L "
+             "and orders go to it until you switch.")
+    tk = _load_ticket(eng.key)
+    if tk and tk.account and tk.account != number:
+        reply += (f" The open ticket was for {eng.label(tk.account)}; it will "
+                  "be reviewed again on this account before it can be placed.")
+    return reply
+
+
+@tool({
+    "name": "get_balance",
+    "description": (
+        "Account balance: net liquidating value, cash, and buying power. Use "
+        "for 'check my balance', 'how much cash do I have', 'what's my "
+        "buying power', 'what's the account worth'."
+    ),
+    "input_schema": {"type": "object",
+                     "properties": {"account": ACCOUNT_ARG, "broker": BROKER_ARG}},
+})
+def get_balance(ctx, args):
+    def one(eng, account):
+        try:
+            b = eng.balance(account)
+        except Exception as e:
+            return f"couldn't fetch the balance: {e}.", None
+        return (f"net liquidating value {_fmt(b.net_liq)}, cash {_fmt(b.cash)}, "
+                f"buying power {_fmt(b.buying_power)}."), b.net_liq
+    return _per_account(ctx, args, one, total=lambda v: (
+        f"All of them together, added here only: net liquidating value {_fmt(sum(v))}."))
 
 
 @tool({
@@ -315,12 +458,15 @@ def build_strategy(ctx, args):
                              size=size)
     if not legs:
         return f"Couldn't build a {strategy} on {symbol} from the chain."
-    tk = tticket.Ticket(underlying=symbol, strategy=strategy, legs=legs)
+    account = eng.default_account(ctx.active_agent)
+    tk = tticket.Ticket(underlying=symbol, strategy=strategy, legs=legs,
+                        account=account)
     tk.touch()
     tticket.save(tk, eng.key)
     at = f" (underlying at {_fmt(price)})" if price is not None else \
          " (no live underlying price — strikes centred on the chain)"
-    return (f"Built on {tmain.label(eng.key)}{at}: {tk.describe()} "
+    where = f" for {eng.label(account)}" if account else ""
+    return (f"Built on {tmain.label(eng.key)}{where}{at}: {tk.describe()} "
             "Say adjustments, or ask me to review it.")
 
 
@@ -525,6 +671,13 @@ def review_order(ctx, args):
         else:
             return ("No limit price set, and mid pricing has no live "
                     "quotes. Set a price first ('make it a 1.20 credit').")
+    account, problem = _one_account(ctx, eng)
+    if problem:
+        return problem
+    if tk.account != account:
+        tk.account = account     # the fingerprint changes: any old review is void
+        tk.touch()
+        tticket.save(tk, eng.key)
     result = eng.orders.review(tk, chain)
     if not result.ok:
         # Says nothing about price: on 2026-10-05 a buying-power rejection
@@ -533,7 +686,8 @@ def review_order(ctx, args):
         return ("The broker rejected the dry run (this account can't place "
                 "it; the price is unaffected — price_order gives it): " +
                 " ".join(result.errors))
-    parts = [f"Reviewed on {tmain.label(eng.key)}: {tk.describe()}"]
+    parts = [f"Reviewed for {eng.label(account)} on {tmain.label(eng.key)}: "
+             f"{tk.describe()}"]
     if result.buying_power_change is not None:
         parts.append(f"Buying power effect {_fmt(result.buying_power_change)}")
     elif result.new_buying_power is not None:   # Schwab reports the projection
@@ -541,9 +695,8 @@ def review_order(ctx, args):
     parts.append(f"fees about {_fmt(result.total_fees)}")
     if result.warnings:
         parts.append("Warnings: " + "; ".join(result.warnings))
-    env = eng.status()["env"]
-    parts.append(f"This is the {env} environment. Say 'submit it' to place "
-                 "the order.")
+    parts.append(f"This is the {eng.broker.env_label()} environment. Say "
+                 "'submit it' to place the order.")
     return ". ".join(parts)
 
 
@@ -572,16 +725,24 @@ def submit_order(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
         return problem
+    account, problem = _one_account(ctx, eng)
+    if problem:
+        return problem
+    if tk.account and tk.account != account:
+        return (f"Not placed: this order was reviewed for {eng.label(tk.account)}, "
+                f"but you're now working on {eng.label(account)}. Review it "
+                "again for this account first.")
     order, reason = eng.orders.submit(tk, chain,
                                       confirmed=bool(args.get("confirmed")))
     if reason:
         return reason
-    ctx.record_event(f"Order {order.id} submitted on {tmain.label(eng.key)}: "
-                     f"{tk.describe()}")
-    env = eng.status()["env"]
-    return (f"Order {order.id} submitted on {tmain.label(eng.key)} ({env}): "
-            f"status {order.status}. Ask me for the order status any time, "
-            "or say cancel to pull it.")
+    where = eng.label(tk.account)
+    ctx.record_event(f"Order {order.id} submitted on {tmain.label(eng.key)}, "
+                     f"{where}: {tk.describe()}")
+    env = eng.broker.env_label()
+    return (f"Order {order.id} submitted for {where} on {tmain.label(eng.key)} "
+            f"({env}): status {order.status}. Ask me for the order status any "
+            "time, or say cancel to pull it.")
 
 
 @tool({
@@ -600,6 +761,7 @@ def submit_order(ctx, args):
                                            "covers orders still working from "
                                            "earlier days.")},
             "working_only": {"type": "boolean"},
+            "account": ACCOUNT_ARG,
             "broker": BROKER_ARG,
         },
     },
@@ -609,15 +771,15 @@ def list_orders(ctx, args):
     # were live at the broker — they were simply older than midnight.
     start = args.get("start_date") or tcfg.default_orders_start()
 
-    def one(broker, eng):
+    def one(eng, account):
         try:
-            orders = eng.orders.list_orders(start_date=start)
+            orders = eng.orders.list_orders(account, start_date=start)
         except Exception as e:
-            return f"Couldn't fetch orders: {e}"
+            return f"couldn't fetch orders: {e}.", None
         if args.get("working_only"):
             orders = [o for o in orders if o.is_working]
         if not orders:
-            return f"No orders since {start}."
+            return f"no orders since {start}.", None
         lines = []
         for o in orders[:10]:
             legs = "; ".join(f"{l['action']} {l['quantity']} {l['symbol']}"
@@ -625,8 +787,8 @@ def list_orders(ctx, args):
             price = f" at {o.price:g} {o.price_effect}" if o.price else ""
             lines.append(f"Order {o.id} on {o.underlying}: {o.status}{price} — {legs}")
         more = f" (+{len(orders) - 10} more)" if len(orders) > 10 else ""
-        return ". ".join(lines) + more + "."
-    return _per_broker(ctx, args, one)
+        return ". ".join(lines) + more + ".", None
+    return _per_account(ctx, args, one)
 
 
 @tool({
@@ -641,6 +803,7 @@ def list_orders(ctx, args):
         "type": "object",
         "properties": {
             "order_id": {"type": "string"},
+            "account": ACCOUNT_ARG,
             "broker": BROKER_ARG,
         },
     },
@@ -649,24 +812,27 @@ def cancel_order(ctx, args):
     eng, err = _engine(ctx, args)
     if err:
         return err
+    account, problem = _one_account(ctx, eng, args)
+    if problem:
+        return problem
     order_id = (args.get("order_id") or "").strip()
     if not order_id:
         try:
             working = eng.orders.working_orders(
-                start_date=(date.today() - timedelta(days=30)).isoformat())
+                account, start_date=(date.today() - timedelta(days=30)).isoformat())
         except Exception as e:
             return f"Couldn't fetch working orders: {e}"
         if not working:
-            return "There are no working orders to cancel."
+            return f"There are no working orders to cancel in {eng.label(account)}."
         if len(working) > 1:
             names = "; ".join(f"{o.id} ({o.underlying}, {o.status})"
                               for o in working)
             return f"There are {len(working)} working orders: {names}. Which one?"
         order_id = working[0].id
-    order, reason = eng.orders.cancel(order_id)
+    order, reason = eng.orders.cancel(account, order_id)
     if reason:
-        return f"Couldn't cancel {order_id}: {reason}"
-    return f"Order {order.id} on {order.underlying}: {order.status}."
+        return f"Couldn't cancel {order_id} in {eng.label(account)}: {reason}"
+    return f"{eng.label(account)}: order {order.id} on {order.underlying}: {order.status}."
 
 
 @tool({
@@ -680,20 +846,21 @@ def cancel_order(ctx, args):
         "type": "object",
         "properties": {
             "underlying": {"type": "string"},
+            "account": ACCOUNT_ARG,
             "broker": BROKER_ARG,
         },
     },
 })
 def get_positions(ctx, args):
-    def one(broker, eng):
+    def one(eng, account):
         try:
-            positions = eng.positions(args.get("underlying"))
+            positions = eng.positions(account, args.get("underlying"))
         except Exception as e:
-            return f"Couldn't fetch positions: {e}"
+            return f"couldn't fetch positions: {e}.", None
         if not positions:
             scope = f" in {tsym.normalize_underlying(args['underlying'])}" \
                 if args.get("underlying") else ""
-            return f"No open positions{scope}."
+            return f"no open positions{scope}.", 0.0
         lines, total, unmarked = [], 0.0, 0
         for p in positions[:12]:
             mark = eng.mark(p)
@@ -709,8 +876,9 @@ def get_positions(ctx, args):
         summary = f"Total unrealized {_fmt(total)}"
         if unmarked:
             summary += f" ({unmarked} position(s) unmarked)"
-        return ". ".join(lines) + f". {summary}."
-    return _per_broker(ctx, args, one)
+        return ". ".join(lines) + f". {summary}.", total
+    return _per_account(ctx, args, one, total=lambda v: (
+        f"All of them together, added here only: unrealized {_fmt(sum(v))}."))
 
 
 @tool({
@@ -732,6 +900,7 @@ def get_positions(ctx, args):
             "start_date": {"type": "string", "description": "ISO date."},
             "end_date": {"type": "string", "description": "ISO date."},
             "underlying": {"type": "string"},
+            "account": ACCOUNT_ARG,
             "broker": BROKER_ARG,
         },
     },
@@ -741,15 +910,13 @@ def get_pnl(ctx, args):
                               args.get("end_date"))
     scope = f" on {tsym.normalize_underlying(args['underlying'])}" \
         if args.get("underlying") else ""
-    totals = []
 
-    def one(broker, eng):
+    def one(eng, account):
         try:
-            rep = eng.pnl_report(start, end, underlying=args.get("underlying"))
+            rep = eng.pnl_report(account, start, end, underlying=args.get("underlying"))
         except Exception as e:
-            return f"Couldn't build the P&L report: {e}"
-        totals.append(rep.realized)
-        parts = [f"From {rep.start} to {rep.end}{scope}: realized "
+            return f"couldn't build the P&L report: {e}.", None
+        parts = [f"from {rep.start} to {rep.end}{scope}: realized "
                  f"{_fmt(rep.realized)} net of {_fmt(rep.fees)} in fees "
                  f"across {len(rep.events)} closed trades"]
         if rep.by_underlying and not args.get("underlying"):
@@ -760,12 +927,9 @@ def get_pnl(ctx, args):
             parts.append(f"current unrealized {_fmt(rep.unrealized)}")
         if rep.note:
             parts.append(rep.note.strip())
-        return ". ".join(parts) + "."
-    out = _per_broker(ctx, args, one)
-    if len(totals) > 1:
-        out += (f" Across both brokers, added here only: realized "
-                f"{_fmt(sum(totals))}.")
-    return out
+        return ". ".join(parts) + ".", rep.realized
+    return _per_account(ctx, args, one, total=lambda v: (
+        f"All of them together, added here only: realized {_fmt(sum(v))}."))
 
 
 @tool({

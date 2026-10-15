@@ -81,7 +81,7 @@ class TestRefusals(unittest.TestCase):
     def test_default_broker_is_the_personas_own(self):
         schwab, tasty = FakeEngine("schwab"), FakeEngine("tastytrade")
         run("tom", "get_positions", engines={"schwab": schwab, "tastytrade": tasty})
-        self.assertEqual(schwab.calls, [("positions", None)])
+        self.assertEqual(schwab.calls, [("positions", "schwab-1", None)])
         self.assertEqual(tasty.calls, [])
 
 
@@ -90,11 +90,11 @@ class TestLindaReadsBoth(unittest.TestCase):
         engines = {"schwab": FakeEngine("schwab", realized=100.0),
                    "tastytrade": FakeEngine("tastytrade", realized=-30.0)}
         out = run("linda", "get_pnl", {"period": "today"}, engines=engines)
-        self.assertIn("Charles Schwab: ", out)
-        self.assertIn("tastytrade: ", out)
+        self.assertIn("Charles Schwab, account ", out)   # broker, then account
+        self.assertIn("tastytrade, account ", out)
         self.assertIn("realized 100.00", out)
         self.assertIn("realized -30.00", out)
-        self.assertIn("Across both brokers, added here only: realized 70.00", out)
+        self.assertIn("All of them together, added here only: realized 70.00", out)
         for eng in engines.values():
             self.assertEqual(len(eng.calls), 1)   # each account asked once, separately
 

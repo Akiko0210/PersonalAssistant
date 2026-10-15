@@ -24,6 +24,7 @@ from pathlib import Path
 from lib.dates import PERIODS, period_range
 from stores import working_state
 from tools import tool
+from trading import accounts as taccounts
 from trading import config as tcfg
 from trading import statement as tstatement
 from trading import symbols as tsym
@@ -41,8 +42,9 @@ log = logging.getLogger("trading")
 
 _FILTERS = {
     "account": {"type": "string", "description": (
-        "Account, or any part of it ('699'); 'all' combines accounts. Omit "
-        "when the user didn't say: with several accounts the tool asks.")},
+        "Account: its nickname ('IRA', 'red'), or any part of it ('699'); "
+        "'all' combines accounts. Omit when the user didn't say: the account "
+        "chosen with set_account is used, and with none the tool asks.")},
     "period": {"type": "string", "enum": list(PERIODS)},
     "start_date": {"type": "string", "description": "ISO date, inclusive."},
     "end_date": {"type": "string", "description": "ISO date, inclusive."},
@@ -89,16 +91,27 @@ def _totals_line(what, t):
 
 # --- Filters -------------------------------------------------------------------
 
-def _account(arg):
+def _account(arg, persona=None):
     """(account, None), (None, None) for all accounts, or (None, reply):
-    the reply asks which account instead of guessing."""
+    the reply asks which account instead of guessing. A nickname ('IRA') and,
+    when nothing was said, the persona's chosen Schwab account
+    (trading/accounts.py) both turn into the digits the log's masked ids
+    keep ('*****699SCHW'), so "red" means the same account as on the live
+    tools."""
     known = trade_log.accounts()
+    arg = (arg or "").strip()
+    named = taccounts.digits_for("schwab", arg) if arg else None
+    if named:
+        arg = named[-3:]
+    elif not arg and persona:
+        chosen = taccounts.focus("schwab", persona)
+        if chosen:
+            arg = chosen[-3:]
     if not known:
         return None, ("The trade log is empty: import a statement or log a "
                       "fill first.")
     listing = "; ".join(f"{a} ({n} trades, {lo} to {hi})"
                         for a, n, lo, hi in known)
-    arg = (arg or "").strip()
     if arg.lower() == "all":
         return None, None
     hits = [a for a, *_ in known if arg.upper() in a.upper()]
@@ -408,7 +421,7 @@ def query_trade_log(ctx, args):
                     "lists them.")
     # A position names its own account; otherwise ask rather than guess.
     account, ask = ((None, None) if chosen and not args.get("account")
-                    else _account(args.get("account")))
+                    else _account(args.get("account"), ctx.active_agent))
     if ask:
         return ask
     start, end = _range(args)
@@ -487,7 +500,8 @@ def _position_line(p, account=None):
         "dates, strategies, refs, and exact P&L (or net cash so far). A "
         "period selects positions whose latest trade falls in it, which for "
         "closed ones is the close date, i.e. realized P&L. Use for "
-        "thinkorswim P&L questions; get_pnl covers tastytrade only."
+        "thinkorswim P&L by the user's position rule; get_pnl is the live "
+        "broker account's own figures."
     ),
     "input_schema": {
         "type": "object",
@@ -498,7 +512,7 @@ def _position_line(p, account=None):
     },
 })
 def trade_log_positions(ctx, args):
-    account, ask = _account(args.get("account"))
+    account, ask = _account(args.get("account"), ctx.active_agent)
     if ask:
         return ask
     names = [account] if account else [a for a, *_ in trade_log.accounts()]

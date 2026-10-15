@@ -9,7 +9,9 @@ Same module surface as tastytrade.py, built on the Schwab Trader API
   here silently; the refresh token lasts 7 days and then only a new sign-in
   helps — so every call that would fail on it raises BrokerError(code="auth")
   with the sign-in hint, and auth_state() warns a day ahead.
-- Accounts are addressed by an encrypted hash (/accounts/accountNumbers).
+- Accounts are addressed by an encrypted hash (/accounts/accountNumbers);
+  every account call takes the plain number and looks its hash up, so one
+  login serves all the accounts the user shared (trading/accounts.py picks).
 - Quotes are REST snapshots (/quotes), not a stream: Schwab allows one
   streamer connection per user, which the agent and the dashboard would
   fight over, and /quotes already carries bid/ask/mark, IV and the greeks
@@ -35,8 +37,8 @@ import requests
 from lib.atomic_io import read_json, write_json_atomic
 from trading import config as tcfg
 from trading import symbols as tsym
-from trading.models import (BrokerError, ChainData, DryRunResult, OptionInfo,
-                            PlacedOrder, Position, Quote)
+from trading.models import (Balance, BrokerError, ChainData, DryRunResult,
+                            OptionInfo, PlacedOrder, Position, Quote)
 
 KEY = "schwab"
 LABEL = "Charles Schwab"
@@ -58,11 +60,11 @@ def env_label():
 
 
 def status(client):
-    s = {"env": "live", "base_url": tcfg.SCHWAB_API, "account": None}
+    s = {"env": "live", "base_url": tcfg.SCHWAB_API, "accounts": []}
     s.update(client.auth_state())
     if s["signed_in"]:
         try:
-            s["account"] = client.account_number()
+            s["accounts"] = client.account_numbers()
         except BrokerError as e:
             s["problem"] = str(e)
     return s
@@ -102,8 +104,7 @@ class Client:
         self._clock = clock
         self._tokens = read_json(self._tokens_path, {}, expect=dict)
         self._lock = threading.Lock()
-        self._hash = None
-        self._number = None
+        self._hashes = {}            # account number -> encrypted hash
 
     # --- sign-in -----------------------------------------------------------
 
@@ -237,42 +238,48 @@ class Client:
 
     # --- account -----------------------------------------------------------
 
-    def _resolve_account(self):
-        if self._hash:
+    def _load_accounts(self):
+        if self._hashes:
             return
         rows = self._request("GET", "/trader/v1/accounts/accountNumbers")
-        rows = rows if isinstance(rows, list) else []
-        if self._account_id:
-            rows = [r for r in rows if str(r.get("accountNumber")) == str(self._account_id)]
-        if len(rows) != 1:
-            nums = ", ".join("…" + str(r.get("accountNumber"))[-4:] for r in rows) or "none"
-            raise BrokerError(
-                f"Schwab shared {len(rows)} account(s) ({nums}); set "
-                "SCHWAB_ACCOUNT_ID in .env to the one to trade.")
-        self._hash, self._number = rows[0]["hashValue"], str(rows[0]["accountNumber"])
+        self._hashes = {str(r["accountNumber"]): r["hashValue"]
+                        for r in (rows if isinstance(rows, list) else [])
+                        if r.get("accountNumber") and r.get("hashValue")}
+        if not self._hashes:
+            raise BrokerError("Schwab shared no accounts with this app — sign in "
+                              "again and tick the accounts to share.", code="auth")
 
-    def account_hash(self):
-        self._resolve_account()
-        return self._hash
-
-    def account_number(self):
-        self._resolve_account()
-        return self._number
+    def account_numbers(self):
+        """Every account the user shared at sign-in."""
+        self._load_accounts()
+        return list(self._hashes)
 
     @property
-    def account_id(self):
-        return self._number or self._account_id
+    def default_account(self):
+        """SCHWAB_ACCOUNT_ID from .env, if set — only a default now."""
+        return self._account_id
 
-    def _acct(self, tail=""):
-        return f"/trader/v1/accounts/{self.account_hash()}{tail}"
+    def _acct(self, account, tail=""):
+        self._load_accounts()
+        h = self._hashes.get(str(account))
+        if not h:
+            raise BrokerError(f"Schwab didn't share account {account} with this app.")
+        return f"/trader/v1/accounts/{h}{tail}"
 
-    def positions(self):
-        data = self._request("GET", self._acct(), params={"fields": "positions"})
-        return (data.get("securitiesAccount") or {}).get("positions", [])
+    def account(self, account):
+        """Balances and positions of one account (one call carries both)."""
+        data = self._request("GET", self._acct(account), params={"fields": "positions"})
+        return data.get("securitiesAccount") or {}
 
-    def transactions_all(self, start, end):
+    def positions(self, account):
+        return self.account(account).get("positions", [])
+
+    def balances(self, account):
+        return self.account(account).get("currentBalances") or {}
+
+    def transactions_all(self, account, start, end):
         """Every TRADE in [start, end] (ISO dates; at most one year)."""
-        return self._request("GET", self._acct("/transactions"), params={
+        return self._request("GET", self._acct(account, "/transactions"), params={
             "startDate": _iso(start), "endDate": _iso(end), "types": "TRADE"})
 
     # --- market data -------------------------------------------------------
@@ -287,30 +294,30 @@ class Client:
 
     # --- orders ------------------------------------------------------------
 
-    def dry_run_order(self, payload):
-        return self._request("POST", self._acct("/previewOrder"), json_body=payload)
+    def dry_run_order(self, account, payload):
+        return self._request("POST", self._acct(account, "/previewOrder"), json_body=payload)
 
-    def place_order(self, payload):
-        placed = self._request("POST", self._acct("/orders"), json_body=payload)
+    def place_order(self, account, payload):
+        placed = self._request("POST", self._acct(account, "/orders"), json_body=payload)
         order_id = placed.get("orderId")
         try:
-            return self.get_order(order_id)
+            return self.get_order(account, order_id)
         except BrokerError:       # placed, just not readable yet
             return {"orderId": order_id, "status": "ACCEPTED"}
 
-    def get_order(self, order_id):
-        return self._request("GET", self._acct(f"/orders/{order_id}"))
+    def get_order(self, account, order_id):
+        return self._request("GET", self._acct(account, f"/orders/{order_id}"))
 
-    def list_orders(self, start_date=None, end_date=None):
+    def list_orders(self, account, start_date=None, end_date=None):
         start = start_date or tcfg.default_orders_start()
         end = datetime.now(timezone.utc) + timedelta(days=1)
-        return self._request("GET", self._acct("/orders"), params={
+        return self._request("GET", self._acct(account, "/orders"), params={
             "fromEnteredTime": _iso(start), "toEnteredTime": _iso(end)})
 
-    def cancel_order(self, order_id):
-        self._request("DELETE", self._acct(f"/orders/{order_id}"))
+    def cancel_order(self, account, order_id):
+        self._request("DELETE", self._acct(account, f"/orders/{order_id}"))
         try:
-            return self.get_order(order_id)
+            return self.get_order(account, order_id)
         except BrokerError:
             return {"orderId": order_id, "status": "CANCELED"}
 
@@ -585,13 +592,23 @@ def _normalize_transaction(tx):
             "net-value": abs(net), "net-value-effect": "Debit" if net < 0 else "Credit"}
 
 
-def transactions(client, start, end, underlying=None):
+def parse_balance(raw):
+    """Balance from currentBalances. A margin account reports buyingPower; a
+    cash account (an IRA) only cashAvailableForTrading."""
+    return Balance(net_liq=_f(raw.get("liquidationValue")),
+                   cash=_f(raw.get("cashBalance"), _f(raw.get("totalCash"))),
+                   buying_power=_f(raw.get("buyingPower"),
+                                   _f(raw.get("cashAvailableForTrading"))),
+                   raw=raw)
+
+
+def transactions(client, account, start, end, underlying=None):
     end = end or date.today().isoformat()
     floor = (date.fromisoformat(end) - timedelta(days=tcfg.SCHWAB_TRANSACTIONS_MAX_DAYS))
     if not start or date.fromisoformat(start) < floor:
         start = floor.isoformat()
     out = []
-    for tx in client.transactions_all(start, end) or []:
+    for tx in client.transactions_all(account, start, end) or []:
         n = _normalize_transaction(tx)
         if n and (not underlying or n["underlying-symbol"] == underlying):
             out.append(n)

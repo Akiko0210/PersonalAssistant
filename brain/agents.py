@@ -54,9 +54,27 @@ RECORD_RULES = (
 TRADING_TOOLS = {"trading_status", "get_quote", "list_expirations",
                  "build_strategy", "adjust_leg", "set_order_terms",
                  "price_order", "review_order", "submit_order", "list_orders",
-                 "cancel_order", "get_positions", "get_pnl", "clear_ticket"}
+                 "cancel_order", "get_positions", "get_pnl", "get_balance",
+                 "set_account", "clear_ticket"}
 # The read-only subset a reviewer may hold without being able to trade.
-TRADING_READ_TOOLS = {"trading_status", "list_orders", "get_positions", "get_pnl"}
+# set_account is in it: choosing which account to look at places nothing.
+TRADING_READ_TOOLS = {"trading_status", "list_orders", "get_positions", "get_pnl",
+                      "get_balance", "set_account"}
+
+# How every trading hat handles several accounts on one login (the user's
+# Schwab login shares an IRA and "red"). On 2026-10-15 Tom, facing two
+# accounts, told the user to edit a config file: the choice is spoken now.
+ACCOUNT_RULES = (
+    "The user may have several accounts at a broker. When they say which one "
+    "to work on ('move to my IRA', 'switch to red'), call set_account; it "
+    "stays chosen, across sessions, until they switch. When they give an "
+    "account a name ('call 868 red'), call set_account with that nickname. "
+    "Every answer names its account, as the tools do ('In IRA (…699): …'); "
+    "never drop it. For one question about another account, or about all of "
+    "them ('across all my accounts'), pass account to the tool and leave the "
+    "chosen one as it is. When a tool asks which account, ask the user — "
+    "never tell them to edit settings or files. "
+)
 
 # How a trading persona runs its order flow — Tom and Bonny say it the same
 # way, on different brokers.
@@ -192,7 +210,7 @@ AGENTS = {
             "Schwab's sign-in lapses every 7 days: when a tool says sign in "
             "again, tell the user exactly that and where (the dashboard's "
             "Trading page), and stop — nothing works until they have. "
-            + ORDER_FLOW +
+            + ORDER_FLOW + ACCOUNT_RULES +
             "You have a "
             "trading knowledge base built from reference material the user "
             "ingested (books, PDFs, and course videos). Use recall for "
@@ -277,7 +295,7 @@ AGENTS = {
             "(thinkorswim) account, its trade log and its statements are "
             "Tom's — if the user wants something done there, say so and send "
             "them to Tom, never do it yourself. "
-            + ORDER_FLOW +
+            + ORDER_FLOW + ACCOUNT_RULES +
             "Use recall for trading concepts, strategies, or definitions the "
             "user's reference material would cover, and cite the source when "
             "it helps. Read trade details aloud naturally rather than reciting "
@@ -313,6 +331,7 @@ AGENTS = {
             "You review the user's trades on both brokers: get_positions, "
             "get_pnl and list_orders cover each account separately, and "
             "take a broker when the user wants to look at only one. "
+            + ACCOUNT_RULES +
             "Daily check-in, mandatory and first: at the start of each "
             "trading day, before engaging with anything else the user "
             "brings, walk through how they are feeling, their plan for the "
