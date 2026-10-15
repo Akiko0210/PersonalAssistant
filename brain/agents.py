@@ -218,9 +218,14 @@ AGENTS = {
             "Fills stay in "
             "the trade log; the record holds the plan and the decisions, and "
             "is how you know what the user is running without being told. "
-            "When log_trade says a new fill may belong to an open campaign, "
-            "ask the user and, on a yes, link_trades it; query_trade_log "
-            "with record=<id> then gives that campaign's trades and P&L."
+            "Positions live in the trade log: a fill that closes a leg of "
+            "exactly one open position joins it by itself, so rolls follow "
+            "their position. When log_trade says a fill closes no position's "
+            "leg, or legs of several, ask the user and assign_trades on their "
+            "answer (a new position named as they say, tied to its campaign "
+            "with record=). For what is open, query_trade_log with "
+            "position=<id> or record=<campaign id> — never a leg list you "
+            "remember or wrote in a record body."
         ),
         # recall is deliberately in EVERY hat's allowlist: every persona must
         # be able to reach its own past when asked for more — this hat (then
@@ -244,8 +249,8 @@ AGENTS = {
                   # writes it (alerts, statements) and reads positions/P&L.
                   "log_trade", "import_statement", "query_trade_log",
                   "trade_log_positions",
-                  # A campaign record's contracts (working record ↔ trade log).
-                  "link_trades",
+                  # The user's answer when a fill's position is ambiguous.
+                  "assign_trades",
                   # Gmail (broker/market mail); send gated as on Alice.
                   "search_email_threads", "get_email_thread",
                   "create_email_draft", "send_email",

@@ -17,10 +17,13 @@ every position P&L after it.
 
 import re
 import sqlite3
+from collections import Counter, defaultdict
 from contextlib import contextmanager
+from datetime import datetime
 
 from trading import config as tcfg
 from trading import symbols as tsym
+from trading import trade_positions as tpos
 
 # --- Fill-line grammar -----------------------------------------------------
 
@@ -119,7 +122,17 @@ CREATE TABLE IF NOT EXISTS trades (
     fills       INTEGER NOT NULL DEFAULT 1,  -- broker rows merged in
     description TEXT NOT NULL,      -- the broker's line
     source      TEXT NOT NULL,      -- 'statement' | 'email'
+    position_id INTEGER,            -- positions.id; NULL: not assigned
     PRIMARY KEY (account, ref));
+-- An explicit position: what the user means by "the diagonal". Its legs are
+-- never stored — they are the net of its trades, so they cannot go stale
+-- the way a hand-kept leg list did (a campaign body a week out of date).
+CREATE TABLE IF NOT EXISTS positions (
+    id          INTEGER PRIMARY KEY,
+    account     TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    record_id   INTEGER,            -- the campaign record it serves (working_state)
+    created     TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS legs (
     account     TEXT NOT NULL,
     ref         TEXT NOT NULL,
@@ -132,7 +145,8 @@ CREATE INDEX IF NOT EXISTS trades_time ON trades (account, executed_at);
 """
 
 _COLS = ("account", "ref", "executed_at", "symbol", "strategy", "quantity",
-         "price", "amount", "fees", "fills", "description", "source")
+         "price", "amount", "fees", "fills", "description", "source",
+         "position_id")
 
 
 @contextmanager
@@ -146,6 +160,10 @@ def _db():
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys = ON")   # legs follow their trade
         db.executescript(_SCHEMA)
+        # Logs made before positions existed lack the column.
+        if "position_id" not in {r[1] for r in db.execute(
+                "PRAGMA table_info(trades)")}:
+            db.execute("ALTER TABLE trades ADD COLUMN position_id INTEGER")
         with db:
             yield db
     finally:
@@ -159,36 +177,81 @@ def save(trades, *, replace=False, supersede=None):
     an alert is a no-op. A statement passes `replace` so its exact row wins.
     `supersede` = (account, start, end) first deletes the alert-logged rows
     in that span, because a statement is the complete record of its span and
-    an alert # is not the statement's REF # for the same fill."""
+    an alert # is not the statement's REF # for the same fill.
+
+    A replaced row hands its position to its replacement: the same ref
+    directly, a superseded alert row through the statement row with its
+    legs nearest in time. Without that, every import would silently
+    ungroup the positions it covers."""
     written = superseded = 0
     with _db() as db:
+        carried = []    # (signature, time, position) of superseded alert rows
         if supersede:
+            carried = [(_signature(t), t["executed_at"], t["position_id"])
+                       for t in _read(db, "t.source = 'email' AND t.account = ? "
+                                      "AND t.executed_at >= ? AND "
+                                      "t.executed_at <= ? AND "
+                                      "t.position_id IS NOT NULL", supersede)]
             superseded = db.execute(
                 "DELETE FROM trades WHERE source = 'email' AND account = ? "
                 "AND executed_at >= ? AND executed_at <= ?", supersede).rowcount
         for t in trades:
             key = (t["account"], t["ref"])
-            if db.execute("SELECT 1 FROM trades WHERE account = ? AND ref = ?",
-                          key).fetchone():
+            old = db.execute("SELECT position_id FROM trades WHERE account = ? "
+                             "AND ref = ?", key).fetchone()
+            if old:
                 if not replace:
                     continue
                 db.execute("DELETE FROM trades WHERE account = ? AND ref = ?",
                            key)
+            pid = (old and old["position_id"]) or _take(carried, t)
             db.execute(f"INSERT INTO trades ({', '.join(_COLS)}) "
                        f"VALUES ({', '.join('?' * len(_COLS))})",
-                       [t.get(c) for c in _COLS])
+                       [pid if c == "position_id" else t.get(c) for c in _COLS])
             db.executemany("INSERT INTO legs VALUES (?, ?, ?, ?, ?, ?)",
                            [(*key, *leg) for leg in t["legs"]])
             written += 1
     return written, superseded
 
 
+def _signature(t):
+    # Contracts and direction, not size: a statement merges an order's split
+    # fills, so its row can be bigger than the alert that announced it.
+    return (t["account"], frozenset((e, k, cp, q > 0) for e, k, cp, q in t["legs"]))
+
+
+def _take(carried, t):
+    """The position of the carried alert row that is `t`'s fill (same legs,
+    nearest in time), removing it so one alert hands over only once."""
+    same = [c for c in carried if c[0] == _signature(t)]
+    if not same:
+        return None
+    when = datetime.fromisoformat(t["executed_at"])
+    best = min(same, key=lambda c: abs(datetime.fromisoformat(c[1]) - when))
+    carried.remove(best)
+    return best[2]
+
+
+def _read(db, where="", args=()):
+    cond = f" WHERE {where}" if where else ""
+    trades = [dict(r) | {"legs": []} for r in db.execute(
+        f"SELECT t.* FROM trades t{cond} ORDER BY t.executed_at, t.ref", args)]
+    by_key = {(t["account"], t["ref"]): t for t in trades}
+    for r in db.execute(
+            "SELECT l.* FROM legs l JOIN trades t "
+            f"ON l.account = t.account AND l.ref = t.ref{cond} "
+            "ORDER BY l.rowid", args):
+        by_key[(r["account"], r["ref"])]["legs"].append(
+            (r["expiration"], r["strike"], r["option_type"], r["quantity"]))
+    return trades
+
+
 def query(account=None, start=None, end=None, symbol=None, strategy=None,
-          refs=None):
+          refs=None, positions=None):
     """Orders oldest first, each a dict of the trade's columns plus `legs`
     as (expiration, strike, type, quantity). `account` is exact (resolve a
     spoken one against accounts() first); start and end are ISO dates,
-    inclusive."""
+    inclusive; `positions` is a list of position ids."""
     where, args = [], []
     for sql, value in (("t.account = ?", account),
                        ("substr(t.executed_at, 1, 10) >= ?", start),
@@ -198,22 +261,85 @@ def query(account=None, start=None, end=None, symbol=None, strategy=None,
         if value:
             where.append(sql)
             args.append(value)
-    if refs:
-        where.append(f"t.ref IN ({', '.join('?' * len(refs))})")
-        args.extend(refs)
-    cond = (" WHERE " + " AND ".join(where)) if where else ""
+    for column, values in (("t.ref", refs or None),
+                           ("t.position_id", positions)):
+        if values is not None:
+            where.append(f"{column} IN ({', '.join('?' * len(values))})")
+            args.extend(values)
     with _db() as db:
-        trades = [dict(r) | {"legs": []} for r in db.execute(
-            f"SELECT t.* FROM trades t{cond} ORDER BY t.executed_at, t.ref",
-            args)]
-        by_key = {(t["account"], t["ref"]): t for t in trades}
-        for r in db.execute(
-                "SELECT l.* FROM legs l JOIN trades t "
-                f"ON l.account = t.account AND l.ref = t.ref{cond} "
-                "ORDER BY l.rowid", args):
-            by_key[(r["account"], r["ref"])]["legs"].append(
-                (r["expiration"], r["strike"], r["option_type"], r["quantity"]))
-    return trades
+        return _read(db, " AND ".join(where), args)
+
+
+# --- Positions -----------------------------------------------------------------
+
+def create_position(account, name, record_id=None):
+    with _db() as db:
+        return db.execute(
+            "INSERT INTO positions (account, name, record_id, created) "
+            "VALUES (?, ?, ?, ?)", (account, name.strip(), record_id,
+                                    datetime.now().isoformat(timespec="seconds"))
+        ).lastrowid
+
+
+def positions(account=None, ids=None, record_id=None):
+    """Position rows, oldest first, filtered by any of the arguments."""
+    where, args = [], []
+    if account:
+        where.append("account = ?")
+        args.append(account)
+    if record_id is not None:
+        where.append("record_id = ?")
+        args.append(record_id)
+    if ids is not None:
+        where.append(f"id IN ({', '.join('?' * len(ids))})")
+        args.extend(ids)
+    cond = f" WHERE {' AND '.join(where)}" if where else ""
+    with _db() as db:
+        return [dict(r) for r in db.execute(
+            f"SELECT * FROM positions{cond} ORDER BY id", args)]
+
+
+def set_record(position_id, record_id):
+    with _db() as db:
+        db.execute("UPDATE positions SET record_id = ? WHERE id = ?",
+                   (record_id, position_id))
+
+
+def assign(account, refs, position_id):
+    """Put these trades in a position — the user's answer to an ambiguous
+    fill. Returns how many changed."""
+    with _db() as db:
+        return db.execute(
+            f"UPDATE trades SET position_id = ? WHERE account = ? AND ref IN "
+            f"({', '.join('?' * len(refs))})",
+            (position_id, account, *refs)).rowcount
+
+
+def auto_assign(account):
+    """Apply the one-match rule to `account`'s unassigned trades, oldest
+    first, each against the positions' legs as of that trade. Returns {ref:
+    [position ids]}: one id means it joined that position now (or earlier),
+    none or several mean the user must say. Walking the whole account makes
+    the order fills were logged in irrelevant — alerts arrive out of order."""
+    with _db() as db:
+        trades = _read(db, "t.account = ?", (account,))
+        net = defaultdict(Counter)       # position -> its legs so far
+        result, joined = {}, []
+        for t in trades:
+            if t["position_id"] is None:
+                hits = tpos.closing(t, net)
+                result[t["ref"]] = hits
+                if len(hits) == 1:
+                    t["position_id"] = hits[0]
+                    joined.append((hits[0], t["ref"]))
+            else:
+                result[t["ref"]] = [t["position_id"]]
+            if t["position_id"] is not None:
+                for e, k, cp, q in t["legs"]:
+                    net[t["position_id"]][(t["symbol"], e, k, cp)] += q
+        db.executemany("UPDATE trades SET position_id = ? WHERE account = ? "
+                       "AND ref = ?", [(p, account, r) for p, r in joined])
+    return result
 
 
 def accounts():

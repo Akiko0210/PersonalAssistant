@@ -1,6 +1,12 @@
 """Group logged trades into positions and price them. Pure: no I/O.
 
-A position is the user's rule: the minimal set of trades whose legs net to
+Two kinds of position. An ASSIGNED one is explicit: its trades carry its
+id (trade_log.positions), and `closing` is the rule that grows it — a fill
+joins the one position whose open leg it closes, so a roll chain follows
+its diagonal instead of splitting off as its own "debit spread"
+(2026-10-15). An unassigned trade still falls under the user's rule below.
+
+The user's rule: the minimal set of trades whose legs net to
 zero, meaning no smaller subset of it also nets to zero. Trades are walked
 oldest first. Each new trade closes the smallest zero-sum subset of the
 open trades that includes it; ties go to the earliest trades (FIFO).
@@ -43,6 +49,28 @@ def totals(trades):
             "pending": sum(t["fees"] is None for t in trades)}
 
 
+def closing(trade, open_by_position):
+    """Ids of the positions in {id: net legs} that `trade` closes or partly
+    closes a leg of: a leg of the opposite sign on the same contract. The
+    caller passes one account's positions, so another account never
+    matches."""
+    return [pid for pid, net in open_by_position.items()
+            if any(net.get((trade["symbol"], e, k, cp), 0) * q < 0
+                   for e, k, cp, q in trade["legs"])]
+
+
+def describe(trades, today=None):
+    """{status, open_legs, totals} of one position's trades: "closed" when
+    every leg nets to zero, "open" while a leftover leg has time to run,
+    "unresolved" once every leftover has expired."""
+    today = (today or date.today()).isoformat()
+    legs = net_legs(trades)
+    status = ("closed" if not legs else
+              "open" if any(e >= today for _, e, _, _ in legs) else
+              "unresolved")
+    return {"status": status, "open_legs": legs, **totals(trades)}
+
+
 def _linked(seed, pool, contracts):
     """Indices in `pool` that share a contract with trade `seed`, directly or
     through each other, in time order."""
@@ -74,7 +102,6 @@ def group_positions(trades, today=None):
     -> positions numbered by first trade. Each position is {number, status,
     trades, open_legs, tangled} plus totals(). `tangled` means the search
     hit its cap and left these trades grouped by shared contracts instead."""
-    today = (today or date.today()).isoformat()
     contracts = [{(t["symbol"], e, k, cp) for e, k, cp, _ in t["legs"]}
                  for t in trades]
     still_open, closed, tangled = [], [], set()
@@ -88,19 +115,17 @@ def group_positions(trades, today=None):
         if hit:
             closed.append(sorted(hit))
             still_open = [j for j in still_open if j not in hit]
-    groups = [(g, "closed") for g in closed]
+    groups = closed
     while still_open:
         seed = still_open.pop(0)
         g = [seed] + _linked(seed, still_open, contracts)
         still_open = [j for j in still_open if j not in g]
-        live = any(e >= today for _, e, _, _ in net_legs(
-            [trades[j] for j in g]))
-        groups.append((sorted(g), "open" if live else "unresolved"))
-    groups.sort(key=lambda gs: gs[0][0])
+        groups.append(sorted(g))
+    groups.sort()
     positions = []
-    for n, (g, status) in enumerate(groups, 1):
+    for n, g in enumerate(groups, 1):
         ts = [trades[j] for j in g]
-        positions.append({"number": n, "status": status, "trades": ts,
-                          "open_legs": net_legs(ts),
-                          "tangled": bool(tangled & set(g)), **totals(ts)})
+        positions.append({"number": n, "trades": ts,
+                          "tangled": bool(tangled & set(g)),
+                          **describe(ts, today)})
     return positions

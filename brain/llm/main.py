@@ -970,7 +970,7 @@ class Claude:
         tools = api_tools(exclude={"save_conversation_note",
                                    "set_conversation_model",
                                    "switch_agent", "ask_agent",
-                                   *agents.RECORD_TOOLS, "link_trades"}) + [choose_tool]
+                                   *agents.RECORD_TOOLS, "assign_trades"}) + [choose_tool]
         history = [{"role": "user",
                     "content": "I just finished recording a note. Where should it go?"}]
         chosen = None

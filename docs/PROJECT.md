@@ -306,7 +306,19 @@ unit-tested without a microphone, speakers, or an API key.
   - **Fill grammar:** thinkorswim's line format, proven on all 110 fills of
     the 2026-09-20 statement. Anything else (iron condors, /ES futures
     options) is refused, not guessed.
-  - **Positions follow the user's rule** — the minimal set of trades whose
+  - **Positions are explicit** — a `positions` table, each trade carrying
+    its `position_id` — because rebuilding positions per query gave three
+    different short legs for one diagonal on 2026-10-15. Legs are never
+    stored: a position's open legs are the net of its trades. **The
+    one-match rule** (`trade_positions.closing`, applied by
+    `trade_log.auto_assign`): a fill that closes or partly closes an open
+    leg of exactly one position in its account joins it, so roll chains
+    follow their position. No match, or several, and the user decides
+    (`assign_trades`). The walk is chronological over the whole account, so
+    out-of-order alerts don't matter. A statement import hands each
+    superseded alert row's position to the statement row with the same legs
+    nearest in time, then re-runs the rule (its expirations close legs).
+  - **Unassigned trades follow the user's rule** — the minimal set of trades whose
     legs net to zero — computed by `trade_positions.group_positions`: each
     trade closes the smallest zero-sum subset of open trades that includes
     it, with ties going FIFO.
@@ -510,16 +522,15 @@ central list or dispatch chain.
   one logged order), `import_statement` (a thinkorswim statement CSV →
   authoritative rows with fees; refused unless it ties out to its TOTAL row),
   `query_trade_log` (trades + exact totals + open legs, filtered by period,
-  account, symbol, strategy, refs, or `record` — a campaign's linked
-  contracts), `trade_log_positions` (positions under the user's zero-net
-  rule, with exact P&L), `link_trades` (fills → a campaign record's
-  contracts). Campaigns link by CONTRACT (account, symbol, expiration,
-  strike, type), not by ref: a statement import replaces alert-logged rows
-  under different REF #s, but their legs are the same contracts. `log_trade`
-  names the open campaigns a new fill may belong to (touching a linked
-  contract, or the same underlying); linking stays the user's call. Writers
-  are Tom's; the two readers are Linda's too. Details under the trading
-  package above.
+  account, symbol, strategy, refs, `position`, or `record` — the positions
+  serving a campaign), `trade_log_positions` (named positions, then
+  unassigned trades under the user's zero-net rule, with exact P&L),
+  `assign_trades` (the user's answer for an ambiguous fill: an existing
+  position or a new named one, optionally tied to a campaign record).
+  `log_trade` says where each new fill landed, or what to ask. A position
+  names its campaign by record id; `working_state.title` is the permission
+  check, so neither store reads the other's tables. Writers are Tom's; the
+  two readers are Linda's too. Details under the trading package above.
 
 ---
 

@@ -46,17 +46,6 @@ CREATE TABLE IF NOT EXISTS entries (
     model     TEXT);                    -- the writer's live model
 CREATE INDEX IF NOT EXISTS records_owner ON records (owner, status);
 CREATE INDEX IF NOT EXISTS entries_record ON entries (record_id, ts);
--- A campaign's option contracts (Tom). Contracts, not trade-log refs: an
--- alert-logged fill is replaced on statement import by a row under a
--- different REF #, but its legs are the same contracts.
-CREATE TABLE IF NOT EXISTS contracts (
-    record_id   INTEGER NOT NULL REFERENCES records ON DELETE CASCADE,
-    account     TEXT NOT NULL,
-    symbol      TEXT NOT NULL,
-    expiration  TEXT NOT NULL,
-    strike      REAL NOT NULL,
-    option_type TEXT NOT NULL,
-    PRIMARY KEY (record_id, account, symbol, expiration, strike, option_type));
 """
 
 _PREAMBLE = (
@@ -176,48 +165,19 @@ def close(owner, rid, outcome, *, model=None):
     _wrote(owner, rid, "closed", row["title"], len(outcome))
 
 
-def link(owner, rid, contracts):
-    """Attach (account, symbol, expiration, strike, option_type) tuples to an
-    open record; returns how many were new. Plain tuples, so this store never
-    needs the trading package."""
-    contracts = set(contracts)
-    with _db() as db:
-        row = _own(db, owner, rid)
-        if row["status"] != "open":
-            raise ValueError(f"Record #{rid} is closed; start a new one.")
-        before = db.total_changes
-        db.executemany("INSERT OR IGNORE INTO contracts VALUES (?, ?, ?, ?, ?, ?)",
-                       [(rid, *c) for c in contracts])
-        added = db.total_changes - before
-    _wrote(owner, rid, "linked", row["title"], added)
-    return added
-
-
 # --- reads ----------------------------------------------------------------------
-def contracts(caller, rid):
-    """Record `rid`'s linked contracts as a set of tuples, if `caller` may
-    read it; None when it may not (or the record doesn't exist)."""
+def title(caller, rid):
+    """Record `rid`'s title if `caller` may read it, else None. The trade
+    log's positions name their campaign by id; this is the permission check,
+    so that store never needs this one's tables."""
     owners = agents.readable_owners(caller)
     if not owners:
         return None
     with _db() as db:
-        if not _records(db, owners, "AND id = ?", (rid,)):
-            return None
-        return _linked(db, rid)
+        found = _records(db, owners, "AND id = ?", (rid,))
+    return found[0]["title"] if found else None
 
 
-def open_links(owner, kind):
-    """[(id, title, contracts)] for `owner`'s open records of `kind`."""
-    with _db() as db:
-        return [(r["id"], r["title"], _linked(db, r["id"]))
-                for r in _records(db, (owner,), "AND status = 'open' AND kind = ? "
-                                  "ORDER BY id", (kind,))]
-
-
-def _linked(db, rid):
-    return {tuple(r) for r in db.execute(
-        "SELECT account, symbol, expiration, strike, option_type "
-        "FROM contracts WHERE record_id = ?", (rid,))}
 def _records(db, owners, where="", args=()):
     marks = ",".join("?" * len(owners))
     return [dict(r) for r in db.execute(
