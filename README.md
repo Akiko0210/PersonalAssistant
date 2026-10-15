@@ -446,15 +446,45 @@ agent, mid-conversation, with no restart. Until it does, the email tools
 answer "Google account not authenticated, finish the authentication process,
 or restart the app and log in" rather than hanging the conversation.
 
-## Real trading by voice (tastytrade)
+## Real trading by voice (Charles Schwab and tastytrade)
 
-The agent can build and place real multi-leg option orders on the tastytrade
-API — SPX and stock options, /ES and /MES futures options — with live bid/ask,
-a mandatory spoken review before any submit, order cancel, positions, and
-realized/unrealized P&L. The dashboard has a matching **Trading** page (same
-ticket, live DXLink quotes, review/submit/cancel, P&L reports).
+The agent can build and place real multi-leg option orders on two brokers —
+**Tom** trades the Charles Schwab (thinkorswim) account, **Bonny** the
+tastytrade one — with live quotes, a mandatory spoken review before any
+submit, order cancel, positions, and realized/unrealized P&L. Each persona
+reaches only its own broker: ask Tom for something on tastytrade and he sends
+you to Bonny. **Linda** reviews both accounts (positions, orders, P&L; never
+a ticket) and narrows to one when asked; the two accounts are stored and
+calculated separately and only ever added up in a sentence. The dashboard's
+**Trading** page works on one broker at a time, chosen at the top (same
+ticket as the voice, review/submit/cancel, P&L reports).
 
-Setup — add your tastytrade OAuth credentials to `.env`:
+### Charles Schwab (Tom)
+
+Register an app on the [Schwab Developer Portal](https://developer.schwab.com)
+(Trader API – Individual, with both Accounts and Trading *and* Market Data;
+callback URL `https://127.0.0.1`), wait for approval, then add to `.env`:
+
+```
+SCHWAB_CLIENT_ID=...        # the app's App Key
+SCHWAB_CLIENT_SECRET=...    # its Secret
+SCHWAB_CALLBACK_URL=https://127.0.0.1   # optional; must match the app
+SCHWAB_ACCOUNT_ID=...       # optional: which linked account, when several
+```
+
+Then sign in from the dashboard's Trading page (Schwab → *Sign in to
+Schwab*): Schwab's login opens, you land on an error page at the callback
+address, and you paste that whole address back into the page. **The sign-in
+lasts 7 days** (Schwab's rule, not ours): the status warns a day ahead, and
+after it lapses every Schwab tool says to sign in again. Schwab has no
+sandbox — every token is a live one — and its API cannot trade futures, so
+/ES and /MES stay with Bonny. Quotes come from REST snapshots rather than a
+stream (Schwab allows one stream per user, which the agent and the dashboard
+would fight over), and option quotes carry the greeks directly.
+
+### tastytrade (Bonny)
+
+Add your tastytrade OAuth credentials to `.env`:
 
 ```
 TASTY_CLIENT_SECRET=...   # my.tastytrade.com -> My Profile -> API -> OAuth app
@@ -469,9 +499,9 @@ copying keys: `TASTY_ENV_FILE=C:\Home\Proj\Tasty-Web\.env` (its
 **The safety gate is `TASTY_ENV`**: anything other than exactly `live` uses
 the sandbox, so real money always requires that explicit opt-in.
 
-Then, in conversation: *"set up an iron condor on SPX"* → *"move the put side
-down ten"* → *"price it at mid"* → *"review it"* (the agent speaks cost,
-buying-power effect, fees, warnings) → *"submit it"*. Submission only works
+Then, in conversation with either persona: *"set up an iron condor on SPX"* →
+*"move the put side down ten"* → *"price it at mid"* → *"review it"* (the
+agent speaks cost, buying-power effect, fees, warnings) → *"submit it"*. Submission only works
 after a review of that exact ticket and your explicit go-ahead; any edit
 invalidates the review. *"Cancel the order"*, *"what are my positions?"*, and
 *"how much did I make this week on SPX?"* work as expected. Design and API

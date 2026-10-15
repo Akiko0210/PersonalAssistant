@@ -71,7 +71,8 @@ yourself editing them, stop and reconsider.
   be imported. Extend a variant file or add a new one — never scatter
   `sys.platform`/provider checks elsewhere. Current variant packages:
   `media_control/`, `speech/tts/`, `speech/sound/`, `lib/single_instance/`,
-  `brain/llm/`.
+  `brain/llm/`, `trading/` (`schwab.py`/`tastytrade.py`, keyed by the
+  persona's `brokers` in `brain/agents.py`).
 - Several Pythons per machine, only one with the deps: `.claude/launch.json`
   pins it (Windows Store Python on the PC, `.venv` on the Mac) — keep the pin
   pointed at whichever interpreter has the deps on the machine you're on.

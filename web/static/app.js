@@ -1281,19 +1281,37 @@ views.logs = async function () {
 };
 
 /* ================= Trading ================= */
-/* Real trading via the tastytrade API (see TRADING_PLAN.md). The page gets
-   real-time bid/ask itself: it fetches a DXLink token from the local API and
-   opens the websocket directly (same pattern as Tasty-Web), so quotes stream
-   straight into the browser with no server-side relay. */
+/* Real trading on two brokers (see TRADING_PLAN.md): the page works on ONE
+   at a time, the one picked at the top, and every request names it — there
+   is no default account a ticket could land in. tastytrade quotes stream
+   straight into the browser over DXLink (token from the local API, same
+   pattern as Tasty-Web); Schwab has no stream here, so the page polls the
+   local API's REST snapshots instead. */
 
 const TR = {
-  status: null, chain: null, ticket: null, dryRun: null,
-  ws: null, wsReady: false, wsSubs: new Set(), quotes: {}, wsErr: "",
+  broker: null, status: null, chain: null, ticket: null, dryRun: null,
+  ws: null, wsReady: false, wsSubs: new Set(), quotes: {}, wsErr: "", poll: null,
 };
+const trQ = (path) => `${path}${path.includes("?") ? "&" : "?"}broker=${encodeURIComponent(TR.broker)}`;
+const trPost = (path, body) => apiPost(path, { ...body, broker: TR.broker });
+
+/* Schwab: no websocket, so the subscribed symbols are re-fetched every few
+   seconds from /api/trading/quotes (the server caches for its own TTL). */
+function trPollQuotes() {
+  const syms = [...TR.wsSubs];
+  if (!syms.length) return;
+  api(trQ("/api/trading/quotes?symbols=" + encodeURIComponent(syms.join(","))))
+    .then(r => { Object.assign(TR.quotes, r.quotes || {}); trPaintQuotes(); })
+    .catch(e => { TR.wsErr = e.message; });
+}
 
 function trStream() {
+  if (TR.status && TR.status.stream_kind === "rest") {
+    if (!TR.poll) TR.poll = setInterval(trPollQuotes, 5000);
+    return;
+  }
   if (TR.ws) return;
-  api("/api/trading/quote-token").then(t => {
+  api(trQ("/api/trading/quote-token")).then(t => {
     if (!t.url || !t.token) throw new Error("no token");
     const ws = new WebSocket(t.url);
     TR.ws = ws;
@@ -1340,9 +1358,21 @@ function trSubscribe(symbols) {
     TR.wsSubs.add(s);
     add.push({ type: "Quote", symbol: s }, { type: "Trade", symbol: s });
   }
-  if (add.length && TR.wsReady) {
+  if (!add.length) return;
+  if (TR.poll) trPollQuotes();
+  else if (TR.wsReady) {
     TR.ws.send(JSON.stringify({ type: "FEED_SUBSCRIPTION", channel: 1, add }));
   }
+}
+
+/* Leaving the page, or switching broker, drops the other broker's quotes:
+   a Schwab symbol must never be painted from a tastytrade tick or vice versa. */
+function trResetQuotes() {
+  if (TR.ws) { try { TR.ws.close(); } catch {} }
+  if (TR.poll) clearInterval(TR.poll);
+  TR.ws = null; TR.wsReady = false; TR.poll = null;
+  TR.wsSubs = new Set(); TR.quotes = {}; TR.wsErr = "";
+  TR.chain = null; TR.ticket = null; TR.dryRun = null;
 }
 
 function trFeedData(data) {
@@ -1469,7 +1499,7 @@ function trRenderTicket() {
     push();
   };
   $("#tr-clear").onclick = async () => {
-    await apiPost("/api/trading/ticket", { op: "clear" });
+    await trPost("/api/trading/ticket", { op: "clear" });
     TR.ticket = null; TR.dryRun = null; trRenderTicket();
   };
   $("#tr-review").onclick = trReview;
@@ -1501,7 +1531,7 @@ async function trPushTicket() {
       : { op: "set", underlying: TR.ticket.underlying, strategy: TR.ticket.strategy,
           legs: TR.ticket.legs, tif: TR.ticket.tif,
           limit_price: TR.ticket.limit_price, price_effect: TR.ticket.price_effect };
-    const r = await apiPost("/api/trading/ticket", body);
+    const r = await trPost("/api/trading/ticket", body);
     TR.ticket = r.ticket; TR.dryRun = null;
     trRenderTicket();
   } catch (e) {
@@ -1514,7 +1544,7 @@ async function trReview() {
   const el = $("#tr-dryrun");
   el.innerHTML = '<div class="empty">Running dry run…</div>';
   let r;
-  try { r = await apiPost("/api/trading/dry-run", {}); }
+  try { r = await trPost("/api/trading/dry-run", {}); }
   catch (e) { el.innerHTML = `<div class="tr-problem">⚠ ${esc(e.message)}</div>`; return; }
   TR.dryRun = r;
   if (r.ticket) TR.ticket = r.ticket;
@@ -1523,20 +1553,21 @@ async function trReview() {
     return;
   }
   const env = TR.status ? TR.status.env : "?";
+  const label = TR.status ? TR.status.label : TR.broker;
   el.innerHTML = `
     <div class="tr-review">
       <div><strong>Dry run OK.</strong>
-        Buying-power effect ${trNum(r.buying_power_change)} ·
+        ${r.buying_power_change != null ? `Buying-power effect ${trNum(r.buying_power_change)} ·` : ""}
         fees ${trNum(r.total_fees)} ·
-        new buying power ${trNum(r.new_buying_power)}</div>
+        ${r.buying_power_change != null ? "new" : "projected"} buying power ${trNum(r.new_buying_power)}</div>
       ${r.warnings.map(w => `<div class="tr-problem">⚠ ${esc(w)}</div>`).join("")}
-      <button id="tr-submit" class="btn-primary">Submit to ${esc(env)}…</button>
+      <button id="tr-submit" class="btn-primary">Submit to ${esc(label)} (${esc(env)})…</button>
     </div>`;
   $("#tr-submit").onclick = async () => {
     const desc = TR.ticket.description || "this order";
-    if (!window.confirm(`Place with ${env.toUpperCase()} account?\n\n${desc}`)) return;
+    if (!window.confirm(`Place with the ${label} ${env.toUpperCase()} account?\n\n${desc}`)) return;
     try {
-      const s = await apiPost("/api/trading/submit",
+      const s = await trPost("/api/trading/submit",
         { confirm: true, fingerprint: r.fingerprint });
       el.innerHTML = `<div class="tr-review"><strong>Submitted.</strong>
         Order ${esc(s.order.id)} — ${esc(s.order.status)}</div>`;
@@ -1551,7 +1582,7 @@ async function trLoadOrders() {
   const box = $("#tr-orders");
   if (!box) return;
   let data;
-  try { data = await api("/api/trading/orders"); }
+  try { data = await api(trQ("/api/trading/orders")); }
   catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   const rows = data.orders.map(o => `
     <tr><td>${esc(o.id)}</td><td>${esc(o.underlying)}</td>
@@ -1571,7 +1602,7 @@ async function trLoadOrders() {
     <div class="mono-list">${log || '<div class="empty">empty</div>'}</div>`;
   box.querySelectorAll(".tr-cancel").forEach(b => b.onclick = async () => {
     b.disabled = true;
-    try { await apiPost("/api/trading/cancel", { order_id: b.dataset.id }); }
+    try { await trPost("/api/trading/cancel", { order_id: b.dataset.id }); }
     catch (e) { window.alert("Cancel failed: " + e.message); }
     trLoadOrders();
   });
@@ -1581,7 +1612,7 @@ async function trLoadPositions() {
   const box = $("#tr-positions");
   if (!box) return;
   let data;
-  try { data = await api("/api/trading/positions"); }
+  try { data = await api(trQ("/api/trading/positions")); }
   catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   const rows = data.positions.map(p => `
     <tr><td>${esc(p.symbol)}</td><td class="num">${p.quantity}</td>
@@ -1610,7 +1641,7 @@ async function trLoadPnl() {
   const u = $("#tr-pnl-under").value.trim();
   if (u) qs.set("underlying", u);
   let rep;
-  try { rep = await api("/api/trading/pnl?" + qs); }
+  try { rep = await api(trQ("/api/trading/pnl?" + qs)); }
   catch (e) { box.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
   const by = Object.entries(rep.by_underlying || {})
     .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
@@ -1681,26 +1712,81 @@ function trStatementDrop() {
   };
 }
 
+/* Schwab's sign-in card: one button opens Schwab's login in a new tab; the
+   user lands on a 404 page whose address holds the code, pastes that address
+   here, and Finish sign-in trades it for tokens. Shown whenever Schwab is the
+   broker, since the sign-in lapses every 7 days. */
+async function trSchwabAuth() {
+  const box = $("#tr-auth");
+  if (!box) return;
+  let a;
+  try { a = await api("/api/trading/schwab/auth"); }
+  catch (e) { box.innerHTML = `<div class="tr-problem">⚠ ${esc(e.message)}</div>`; return; }
+  // The spoken hint says where to go; here the user already is there.
+  const here = (s) => s.replace(/\s*Schwab needs you to sign in again.*$/, "");
+  const state = a.problem ? `<div class="tr-problem">${esc(here(a.problem))}</div>`
+    : a.warning ? `<div class="tr-problem">⚠ ${esc(here(a.warning))}</div>`
+    : `<div class="kb-status ok">Signed in · ${a.hours_left} hours left on this sign-in.</div>`;
+  box.innerHTML = `
+    ${state}
+    <a class="btn-big tr-stmt-upload" href="${esc(a.url)}" target="_blank" rel="noopener">Sign in to Schwab</a>
+    <div class="kb-hint">Schwab then sends you to <code>${esc(a.callback)}</code>, which shows an
+      error page — that is expected. Copy that page's whole address and paste it here.</div>
+    <input id="tr-auth-url" class="f-text" placeholder="https://127.0.0.1/?code=…&session=…">
+    <button id="tr-auth-finish" class="btn-big tr-stmt-upload">Finish sign-in</button>
+    <div class="kb-status" id="tr-auth-msg"></div>`;
+  $("#tr-auth-finish").onclick = async () => {
+    const msg = $("#tr-auth-msg");
+    try {
+      const r = await apiPost("/api/trading/schwab/auth", { redirect_url: $("#tr-auth-url").value });
+      msg.className = "kb-status ok";
+      msg.textContent = `Signed in. ${r.hours_left} hours until the next sign-in.`;
+      views.trading();
+    } catch (e) {
+      msg.className = "kb-status err";
+      msg.textContent = e.message;
+    }
+  };
+}
+
 views.trading = async function () {
-  main.innerHTML = header("Trading", "Loading trading status…");
+  main.innerHTML = header("Trading", "Loading brokers…");
+  let list;
+  try { list = (await api("/api/trading/brokers")).brokers; }
+  catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
+  let saved = null;
+  try { saved = localStorage.getItem("trBroker"); } catch {}
+  if (!list.some(b => b.key === TR.broker)) TR.broker = null;
+  TR.broker = TR.broker || (list.some(b => b.key === saved) ? saved : list[0].key);
+  trResetQuotes();
+
   let st;
-  try { st = await api("/api/trading/status"); }
+  try { st = await api(trQ("/api/trading/status")); }
   catch (e) { main.innerHTML += `<div class="card empty">${esc(e.message)}</div>`; return; }
   TR.status = st;
 
   const today = new Date().toISOString().slice(0, 10);
   const envBadge = `<span class="badge tr-env ${st.env === "live" ? "tr-live" : ""}">${esc(st.env.toUpperCase())}</span>`;
+  const chooser = list.map(b => `
+    <button class="btn-big tr-broker ${b.key === TR.broker ? "tr-broker-on" : ""}" data-broker="${esc(b.key)}">
+      ${esc(b.label)}${b.persona ? ` · ${esc(b.persona)}` : ""}${b.configured ? "" : " · not configured"}
+    </button>`).join("");
   main.innerHTML = header("Trading",
-    "Multi-leg options on the tastytrade API — the same ticket the voice agent builds.") + `
+    `Multi-leg options on ${esc(st.label)} — the same ticket ${esc((list.find(b => b.key === TR.broker) || {}).persona || "the agent")} builds by voice.`) + `
     <div class="card">
+      <h2>Broker</h2>
+      ${chooser}
       <div class="tr-status">${envBadge}
         ${st.configured
-          ? `account <code>${esc(st.account || "?")}</code> · stream: ${esc(st.stream || "n/a")}`
+          ? `account <code>${esc(st.account || "?")}</code> · quotes: ${esc(st.stream || "n/a")}`
           : `<span class="tr-problem">${esc(st.problem || "not configured")}</span>`}
         <span id="tr-stream-note" class="card-sub"></span>
       </div>
+      ${st.configured && st.problem ? `<div class="tr-problem">${esc(st.problem)}</div>` : ""}
+      ${st.warning ? `<div class="tr-problem">⚠ ${esc(st.warning)}</div>` : ""}
     </div>
-    <div class="card">
+    ${TR.broker === "schwab" ? '<div class="card"><h2>Schwab sign-in</h2><div id="tr-auth"></div></div>' : ""}
+    <div class="card" ${TR.broker === "schwab" ? "" : "hidden"}>
       <h2>Statement for Tom</h2>
       <button class="btn-ghost-lg tr-stmt-pick" id="tr-stmt-pick">Select file</button>
       <div class="dropzone" id="tr-stmt-drop" tabindex="0" role="button"
@@ -1740,10 +1826,16 @@ views.trading = async function () {
       <div id="tr-pnl-out" class="card-sub">Pick a period and run the report.</div>
     </div>`;
 
-  // Tom's trade log is thinkorswim, not tastytrade: works unconfigured too.
+  main.querySelectorAll(".tr-broker").forEach(b => b.onclick = () => {
+    TR.broker = b.dataset.broker;
+    try { localStorage.setItem("trBroker", TR.broker); } catch {}
+    views.trading();
+  });
+  // Tom's trade log is thinkorswim, not a live account: works unconfigured too.
   trStatementDrop();
-  if (!st.configured) {
-    const note = '<div class="empty">Waiting for trading credentials (see status above).</div>';
+  if (TR.broker === "schwab") trSchwabAuth();
+  if (!st.configured || st.problem) {
+    const note = `<div class="empty">${esc(st.problem || "Waiting for trading credentials (see status above).")}</div>`;
     $("#tr-ticket").innerHTML = note;
     $("#tr-orders").innerHTML = note;
     $("#tr-positions").innerHTML = note;
@@ -1755,13 +1847,13 @@ views.trading = async function () {
     const btn = $("#tr-build");
     btn.disabled = true; btn.textContent = "Building…";
     try {
-      const r = await apiPost("/api/trading/ticket", {
+      const r = await trPost("/api/trading/ticket", {
         op: "build", symbol: $("#tr-sym").value,
         strategy: $("#tr-strat").value,
         size: parseInt($("#tr-size").value, 10) || 1 });
       TR.ticket = r.ticket;
-      TR.chain = await api("/api/trading/chain?symbol=" +
-        encodeURIComponent(r.ticket.underlying));
+      TR.chain = await api(trQ("/api/trading/chain?symbol=" +
+        encodeURIComponent(r.ticket.underlying)));
       trSubscribe([TR.chain.underlying_streamer]);
       trRenderTicket();
     } catch (e) {
@@ -1773,11 +1865,11 @@ views.trading = async function () {
 
   // Existing ticket (e.g. built by voice) — load it and its chain.
   try {
-    const t = await api("/api/trading/ticket");
+    const t = await api(trQ("/api/trading/ticket"));
     TR.ticket = t.ticket;
     if (t.ticket) {
-      TR.chain = await api("/api/trading/chain?symbol=" +
-        encodeURIComponent(t.ticket.underlying));
+      TR.chain = await api(trQ("/api/trading/chain?symbol=" +
+        encodeURIComponent(t.ticket.underlying)));
       trSubscribe([TR.chain.underlying_streamer]);
     }
   } catch { TR.ticket = null; }

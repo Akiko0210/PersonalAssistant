@@ -14,9 +14,15 @@ Recognised keys (Tasty-Web's names accepted as aliases):
     TASTY_BASE_URL        optional explicit base URL override
     TASTY_ENV_FILE        optional path to another .env to fall back on
 
+    SCHWAB_CLIENT_ID      the Dev Portal app's App Key
+    SCHWAB_CLIENT_SECRET  its Secret
+    SCHWAB_CALLBACK_URL   the app's registered callback (default https://127.0.0.1)
+    SCHWAB_ACCOUNT_ID     optional: which linked account, when there are several
+
 The environment gate is deliberate: unset or anything other than exactly
 "live" means the sandbox base URL (api.cert.tastyworks.com). Real-money
-trading must be opted into by writing TASTY_ENV=live.
+trading must be opted into by writing TASTY_ENV=live. Schwab has no sandbox:
+its tokens are only ever production ones (see trading/schwab.py).
 """
 
 import os
@@ -39,11 +45,45 @@ LIVE_BASE_URL = "https://api.tastyworks.com"
 # answers 401 with an nginx HTML page. See TRADING_RESEARCH.md §2.
 USER_AGENT = "voice-agent-trading/1.0"
 
+# --- Schwab Trader API (developer.schwab.com, read 2026-10-15) -------------
+
+SCHWAB_API = "https://api.schwabapi.com"
+# Refresh tokens die 7 days after the browser sign-in that minted them, and
+# only a new sign-in revives them; access tokens last 30 minutes. The agent
+# tracks both so "sign in again" is said before an order fails on it.
+SCHWAB_REFRESH_TOKEN_LIFE_S = 7 * 24 * 3600
+SCHWAB_REFRESH_WARN_S = 24 * 3600   # status starts warning this long before expiry
+SCHWAB_DEFAULT_CALLBACK = "https://127.0.0.1"
+# Schwab has no quote stream here (REST only, see schwab.py): a quote this
+# fresh is reused rather than re-fetched, so pricing a 4-leg ticket is one
+# /quotes call, not four, and two tools in one turn don't double it.
+SCHWAB_QUOTE_TTL_S = 5.0
+# /transactions takes at most one year per call; the P&L lookback (370 days
+# below) is clamped to it rather than paged.
+SCHWAB_TRANSACTIONS_MAX_DAYS = 365
+
 # --- Files ---------------------------------------------------------------
 
 TRADING_DIR = app_config.DATA_DIR / "trading"
-TICKET_PATH = TRADING_DIR / "ticket.json"          # the shared working ticket
-ORDERS_LOG_PATH = TRADING_DIR / "orders_log.json"  # audit trail (append-only)
+
+
+# Each broker keeps its own working ticket, order audit log and (Schwab) token
+# file under data/trading/<broker>/: a ticket built on one broker can never be
+# submitted to the other, because the other's engine never sees the file.
+def broker_dir(broker):
+    return TRADING_DIR / broker
+
+
+def ticket_path(broker):
+    return broker_dir(broker) / "ticket.json"
+
+
+def orders_log_path(broker):
+    return broker_dir(broker) / "orders_log.json"
+
+
+def tokens_path(broker):
+    return broker_dir(broker) / "tokens.json"
 
 # --- Trade log (thinkorswim/Schwab fills; see trading/trade_log.py) --------
 
@@ -160,9 +200,36 @@ def credentials_problem():
     ] if not val]
     if not missing:
         return None
-    return ("Trading is not configured: missing " + ", ".join(missing) +
+    return ("tastytrade is not configured: missing " + ", ".join(missing) +
             ". Add the keys to .env, or set TASTY_ENV_FILE to a .env that "
             "has them (for example the Tasty-Web project's).")
+
+
+def schwab_client_id():
+    return _env("SCHWAB_CLIENT_ID")
+
+
+def schwab_client_secret():
+    return _env("SCHWAB_CLIENT_SECRET")
+
+
+def schwab_callback_url():
+    return _env("SCHWAB_CALLBACK_URL") or SCHWAB_DEFAULT_CALLBACK
+
+
+def schwab_account_id():
+    return _env("SCHWAB_ACCOUNT_ID")
+
+
+def schwab_credentials_problem():
+    missing = [label for label, val in [
+        ("app key (SCHWAB_CLIENT_ID)", schwab_client_id()),
+        ("secret (SCHWAB_CLIENT_SECRET)", schwab_client_secret()),
+    ] if not val]
+    if not missing:
+        return None
+    return ("Schwab is not configured: missing " + ", ".join(missing) +
+            ". Add the keys from the Schwab Developer Portal app to .env.")
 
 
 def default_orders_start():
@@ -172,5 +239,14 @@ def default_orders_start():
     return (date.today() - timedelta(days=ORDERS_LOOKBACK_DAYS)).isoformat()
 
 
-def ensure_dirs():
-    TRADING_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_dirs(broker):
+    """Create data/trading/<broker>/. tastytrade's ticket and audit log lived
+    one level up before brokers were split (2026-10): the audit trail must
+    survive the move, so the old files are carried in once, never copied."""
+    d = broker_dir(broker)
+    d.mkdir(parents=True, exist_ok=True)
+    if broker == "tastytrade":
+        for name in ("ticket.json", "orders_log.json"):
+            old, new = TRADING_DIR / name, d / name
+            if old.is_file() and not new.exists():
+                old.replace(new)

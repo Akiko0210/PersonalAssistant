@@ -1,51 +1,125 @@
-"""Voice tools for real trading (tastytrade). See TRADING_PLAN.md.
+"""Voice tools for real trading on two brokers. See TRADING_PLAN.md.
 
 Design rules:
 - Every handler degrades to a friendly spoken string — a missing .env key,
-  a sandbox without quotes, or a broker rejection must never crash the
-  conversation loop (dispatch would catch it, but a clear sentence beats
-  "Tool error: ...").
+  a sandbox without quotes, an expired Schwab sign-in, or a broker rejection
+  must never crash the conversation loop (dispatch would catch it, but a
+  clear sentence beats "Tool error: ...").
+- The broker is the persona's, never the model's choice: Tom's hat says
+  Schwab, Bonny's says tastytrade (brain/agents.py `brokers`). A tool asked
+  for the other broker refuses and names who has it. Linda reads both; her
+  read-only tools take `broker` to focus on one and otherwise cover each
+  separately — numbers are only ever added in the sentence, never in storage.
 - The dangerous direction is gated twice: submit_order requires a prior
   review (dry run) of the exact current ticket — enforced by fingerprint
   in trading.orders, shared with the dashboard — and its `confirmed` flag,
   which the model is instructed to set only after the user has heard the
   review and explicitly said to go ahead.
-- The working ticket is persisted (data/trading/ticket.json), so a draft
-  built by voice is the same draft shown in the dashboard's Trading page.
+- The working ticket is persisted per broker (data/trading/<broker>/
+  ticket.json), so a draft built by voice is the same draft shown in the
+  dashboard's Trading page, and a Schwab draft can never reach tastytrade.
 """
 
 from datetime import date, timedelta
 
+from brain import agents
 from lib.dates import PERIODS, period_range
 from tools import tool
 from trading import config as tcfg
+from trading import main as tmain
 from trading import strategies as tstrat
 from trading import symbols as tsym
 from trading import ticket as tticket
 
-
-def _engine():
-    """(engine, None) or (None, spoken-problem). Import inside the call so
-    a missing `requests` dependency degrades to a sentence too."""
-    try:
-        from trading.engine import get_engine
-        return get_engine()
-    except Exception as e:
-        return None, f"Trading engine failed to start: {e}"
+BROKER_ARG = {"type": "string", "enum": tmain.keys(),
+              "description": "Only when the user names a broker; otherwise "
+                             "your own broker (or, for a reader of both, each)."}
 
 
 def _fmt(x, none="unknown"):
     return f"{x:,.2f}" if isinstance(x, (int, float)) else none
 
 
-def _load_ticket():
-    tk = tticket.load()
+# --- which broker ----------------------------------------------------------
+
+def _mine(ctx):
+    hat = agents.AGENTS.get(ctx.active_agent or "") or {}
+    return tuple(hat.get("brokers", ()))
+
+
+def _owner_of(broker):
+    """The persona that trades `broker` alone — who to send the user to."""
+    for key, hat in agents.AGENTS.items():
+        if tuple(hat.get("brokers", ())) == (broker,):
+            return hat["name"]
+    return None
+
+
+def _brokers(ctx, args):
+    """([broker_key, ...], None) or (None, spoken-problem): every broker a
+    read-only call covers — the one asked for, or all of the persona's."""
+    mine = _mine(ctx)
+    if not mine:
+        return None, "This assistant doesn't trade — ask Tom (Schwab) or Bonny (tastytrade)."
+    asked = args.get("broker")
+    if not asked:
+        return list(mine), None
+    key = tmain.normalize(asked)
+    if not key:
+        return None, f"I don't know a broker called '{asked}'."
+    if key not in mine:
+        me = agents.AGENTS[ctx.active_agent]["name"]
+        owner = _owner_of(key)
+        return None, (f"{me} works on {tmain.label(mine[0])} only; "
+                      f"{tmain.label(key)} is {owner}'s — ask {owner}." if owner else
+                      f"{me} doesn't trade on {tmain.label(key)}.")
+    return [key], None
+
+
+def _broker(ctx, args):
+    """(broker_key, None) or (None, problem): the ONE broker a mutating call
+    acts on. A persona with two brokers must be told which."""
+    keys, problem = _brokers(ctx, args)
+    if problem:
+        return None, problem
+    if len(keys) > 1:
+        return None, "Which broker — Schwab or tastytrade?"
+    return keys[0], None
+
+
+def _engine_for(broker):
+    """(engine, None) or (None, spoken-problem). Import inside the call so
+    a missing `requests` dependency degrades to a sentence too."""
+    try:
+        from trading.engine import get_engine
+        return get_engine(broker)
+    except Exception as e:
+        return None, f"Trading engine failed to start: {e}"
+
+
+def _engine(ctx, args):
+    broker, problem = _broker(ctx, args)
+    if problem:
+        return None, problem
+    return _engine_for(broker)
+
+
+def _engines(ctx, args):
+    """[(broker, engine-or-None, problem-or-None)] for a read across brokers."""
+    keys, problem = _brokers(ctx, args)
+    if problem:
+        return None, problem
+    return [(k, *_engine_for(k)) for k in keys], None
+
+
+def _load_ticket(broker):
+    tk = tticket.load(broker)
     return tk if tk and tk.legs is not None else None
 
 
 def _ticket_chain(eng):
     """(ticket, chain, None) or (None, None, spoken-problem)."""
-    tk = _load_ticket()
+    tk = _load_ticket(eng.key)
     if tk is None:
         return None, None, ("There is no order ticket yet — build a "
                             "strategy first.")
@@ -55,10 +129,10 @@ def _ticket_chain(eng):
         return None, None, f"Couldn't load the {tk.underlying} chain: {e}"
 
 
-def _engine_and_ticket():
+def _engine_and_ticket(ctx, args=None):
     """(eng, ticket, chain, None) or (None, None, None, spoken-problem) —
     the engine + current-ticket preamble the ticket-mutating tools share."""
-    eng, err = _engine()
+    eng, err = _engine(ctx, args or {})
     if err:
         return None, None, None, err
     tk, chain, problem = _ticket_chain(eng)
@@ -67,30 +141,47 @@ def _engine_and_ticket():
     return eng, tk, chain, None
 
 
+def _per_broker(ctx, args, one):
+    """Run one(broker, engine) -> sentence for each broker a read covers,
+    prefixing the broker's name when there is more than one."""
+    engs, problem = _engines(ctx, args)
+    if problem:
+        return problem
+    parts = []
+    for broker, eng, err in engs:
+        text = err if err else one(broker, eng)
+        parts.append(f"{tmain.label(broker)}: {text}" if len(engs) > 1 else text)
+    return " ".join(parts)
+
+
 @tool({
     "name": "trading_status",
     "description": (
-        "Report the trading setup: sandbox or live environment, account, "
-        "quote-stream state, and the current order ticket if any. Use when "
-        "the user asks about trading configuration, whether trading is in "
-        "sandbox or live mode, or why something trading-related failed."
+        "Report the trading setup: broker, sandbox or live environment, "
+        "account, sign-in state, quote state, and the current order ticket "
+        "if any. Use when the user asks about trading configuration, "
+        "whether trading is in sandbox or live mode, or why something "
+        "trading-related failed."
     ),
-    "input_schema": {"type": "object", "properties": {}},
+    "input_schema": {"type": "object", "properties": {"broker": BROKER_ARG}},
 })
 def trading_status(ctx, args):
-    eng, err = _engine()
-    if err:
-        return err
-    s = eng.status()
-    tk = _load_ticket()
-    parts = [f"Trading is in {s['env']} mode on account {s['account']}.",
-             f"Quote stream: {s['stream']}."]
-    parts.append(f"Current ticket: {tk.describe()}" if tk
-                 else "No order ticket is open.")
-    if s["env"] == "sandbox":
-        parts.append("Orders go to the tastytrade sandbox, not real money; "
-                     "set TASTY_ENV=live to trade for real.")
-    return " ".join(parts)
+    def one(broker, eng):
+        s = eng.status()
+        tk = _load_ticket(broker)
+        parts = [f"Trading is in {s['env']} mode on account {s.get('account') or 'unknown'}.",
+                 f"Quotes: {s['stream']}."]
+        if s.get("problem"):
+            parts.append(s["problem"])
+        if s.get("warning"):
+            parts.append(s["warning"])
+        parts.append(f"Current ticket: {tk.describe()}" if tk
+                     else "No order ticket is open.")
+        if s["env"] == "sandbox":
+            parts.append("Orders go to the tastytrade sandbox, not real money; "
+                         "set TASTY_ENV=live to trade for real.")
+        return " ".join(parts)
+    return _per_broker(ctx, args, one)
 
 
 @tool({
@@ -106,12 +197,13 @@ def trading_status(ctx, args):
         "properties": {
             "symbol": {"type": "string",
                        "description": "Underlying, e.g. 'SPX', '/ES', 'AAPL'."},
+            "broker": BROKER_ARG,
         },
         "required": ["symbol"],
     },
 })
 def get_quote(ctx, args):
-    eng, err = _engine()
+    eng, err = _engine(ctx, args)
     if err:
         return err
     symbol = tsym.normalize_underlying(args.get("symbol", ""))
@@ -152,7 +244,7 @@ def get_quote(ctx, args):
     },
 })
 def list_expirations(ctx, args):
-    eng, err = _engine()
+    eng, err = _engine(ctx, args)
     if err:
         return err
     symbol = tsym.normalize_underlying(args.get("symbol", ""))
@@ -175,7 +267,9 @@ def list_expirations(ctx, args):
         ", ".join(tstrat.STRATEGIES) + ". Replaces any existing ticket. "
         "After building, read the legs back to the user; they can then "
         "adjust legs, set a price, review, and submit. Use for 'set up an "
-        "iron condor on SPX', 'buy a call on the e-mini', etc."
+        "iron condor on SPX', 'buy a call on the e-mini', etc. The ticket "
+        "goes to your own broker; if the user names the other broker, pass "
+        "it and the tool says who handles it."
     ),
     "input_schema": {
         "type": "object",
@@ -191,12 +285,13 @@ def list_expirations(ctx, args):
                                           "nearest."},
             "size": {"type": "integer",
                      "description": "Contracts per leg (default 1)."},
+            "broker": BROKER_ARG,
         },
         "required": ["strategy", "symbol"],
     },
 })
 def build_strategy(ctx, args):
-    eng, err = _engine()
+    eng, err = _engine(ctx, args)
     if err:
         return err
     strategy = tstrat.match_strategy(args.get("strategy", ""))
@@ -222,10 +317,11 @@ def build_strategy(ctx, args):
         return f"Couldn't build a {strategy} on {symbol} from the chain."
     tk = tticket.Ticket(underlying=symbol, strategy=strategy, legs=legs)
     tk.touch()
-    tticket.save(tk)
+    tticket.save(tk, eng.key)
     at = f" (underlying at {_fmt(price)})" if price is not None else \
          " (no live underlying price — strikes centred on the chain)"
-    return f"Built{at}: {tk.describe()} Say adjustments, or ask me to review it."
+    return (f"Built on {tmain.label(eng.key)}{at}: {tk.describe()} "
+            "Say adjustments, or ask me to review it.")
 
 
 @tool({
@@ -254,7 +350,7 @@ def build_strategy(ctx, args):
     },
 })
 def adjust_leg(ctx, args):
-    eng, tk, chain, problem = _engine_and_ticket()
+    eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
         return problem
     i = int(args.get("leg_number", 0)) - 1
@@ -289,7 +385,7 @@ def adjust_leg(ctx, args):
     if not changes:
         return "Nothing to change — say a strike, expiration, size, side, or type."
     tk.touch()
-    tticket.save(tk)
+    tticket.save(tk, eng.key)
     problems = tk.validate(chain)
     tail = (" Note: " + " ".join(problems)) if problems else ""
     return (f"Leg {i + 1} updated ({', '.join(changes)}). "
@@ -318,7 +414,7 @@ def adjust_leg(ctx, args):
     },
 })
 def set_order_terms(ctx, args):
-    eng, tk, chain, problem = _engine_and_ticket()
+    eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
         return problem
     said = []
@@ -344,7 +440,7 @@ def set_order_terms(ctx, args):
         said.append(f"time-in-force {tk.tif}")
     if not said:
         return "Say a price (with credit or debit), 'mid', or a time-in-force."
-    tticket.save(tk)
+    tticket.save(tk, eng.key)
     return f"Done: {', '.join(said)}. {tk.describe()}"
 
 
@@ -364,7 +460,7 @@ def set_order_terms(ctx, args):
     "input_schema": {"type": "object", "properties": {}},
 })
 def price_order(ctx, args):
-    eng, tk, chain, problem = _engine_and_ticket()
+    eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
         return problem
     problems = tk.validate(chain)
@@ -397,7 +493,7 @@ def price_order(ctx, args):
                  f"{g(ng['gamma'], '+.4f')}, theta {g(ng['theta'], '+.2f')} a "
                  f"day, vega {g(ng['vega'], '+.2f')}"
                  if None not in ng.values() else
-                 "No net greeks: the stream sent none for at least one leg")
+                 "No net greeks: the quotes carried none for at least one leg")
     return ("Live pricing, quotes only (nothing placed, buying power not "
             "checked). " + ". ".join(lines) + ".")
 
@@ -415,7 +511,7 @@ def price_order(ctx, args):
     "input_schema": {"type": "object", "properties": {}},
 })
 def review_order(ctx, args):
-    eng, tk, chain, problem = _engine_and_ticket()
+    eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
         return problem
     problems = tk.validate(chain)
@@ -425,7 +521,7 @@ def review_order(ctx, args):
         net = tk.net_mid(chain, eng.leg_quote_fn(chain))
         if net is not None:
             tk.apply_net_price(net)
-            tticket.save(tk)
+            tticket.save(tk, eng.key)
         else:
             return ("No limit price set, and mid pricing has no live "
                     "quotes. Set a price first ('make it a 1.20 credit').")
@@ -437,9 +533,12 @@ def review_order(ctx, args):
         return ("The broker rejected the dry run (this account can't place "
                 "it; the price is unaffected — price_order gives it): " +
                 " ".join(result.errors))
-    parts = [f"Reviewed: {tk.describe()}",
-             f"Buying power effect {_fmt(result.buying_power_change)}",
-             f"fees about {_fmt(result.total_fees)}"]
+    parts = [f"Reviewed on {tmain.label(eng.key)}: {tk.describe()}"]
+    if result.buying_power_change is not None:
+        parts.append(f"Buying power effect {_fmt(result.buying_power_change)}")
+    elif result.new_buying_power is not None:   # Schwab reports the projection
+        parts.append(f"Projected buying power {_fmt(result.new_buying_power)}")
+    parts.append(f"fees about {_fmt(result.total_fees)}")
     if result.warnings:
         parts.append("Warnings: " + "; ".join(result.warnings))
     env = eng.status()["env"]
@@ -470,17 +569,19 @@ def review_order(ctx, args):
     },
 })
 def submit_order(ctx, args):
-    eng, tk, chain, problem = _engine_and_ticket()
+    eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
         return problem
     order, reason = eng.orders.submit(tk, chain,
                                       confirmed=bool(args.get("confirmed")))
     if reason:
         return reason
-    ctx.record_event(f"Order {order.id} submitted: {tk.describe()}")
+    ctx.record_event(f"Order {order.id} submitted on {tmain.label(eng.key)}: "
+                     f"{tk.describe()}")
     env = eng.status()["env"]
-    return (f"Order {order.id} submitted ({env}): status {order.status}. "
-            "Ask me for the order status any time, or say cancel to pull it.")
+    return (f"Order {order.id} submitted on {tmain.label(eng.key)} ({env}): "
+            f"status {order.status}. Ask me for the order status any time, "
+            "or say cancel to pull it.")
 
 
 @tool({
@@ -499,32 +600,33 @@ def submit_order(ctx, args):
                                            "covers orders still working from "
                                            "earlier days.")},
             "working_only": {"type": "boolean"},
+            "broker": BROKER_ARG,
         },
     },
 })
 def list_orders(ctx, args):
-    eng, err = _engine()
-    if err:
-        return err
     # Defaulting to today made "any working orders?" answer "no" while orders
     # were live at the broker — they were simply older than midnight.
     start = args.get("start_date") or tcfg.default_orders_start()
-    try:
-        orders = eng.orders.list_orders(start_date=start)
-    except Exception as e:
-        return f"Couldn't fetch orders: {e}"
-    if args.get("working_only"):
-        orders = [o for o in orders if o.is_working]
-    if not orders:
-        return f"No orders since {start}."
-    lines = []
-    for o in orders[:10]:
-        legs = "; ".join(f"{l['action']} {l['quantity']} {l['symbol']}"
-                         for l in o.legs)
-        price = f" at {o.price:g} {o.price_effect}" if o.price else ""
-        lines.append(f"Order {o.id} on {o.underlying}: {o.status}{price} — {legs}")
-    more = f" (+{len(orders) - 10} more)" if len(orders) > 10 else ""
-    return ". ".join(lines) + more
+
+    def one(broker, eng):
+        try:
+            orders = eng.orders.list_orders(start_date=start)
+        except Exception as e:
+            return f"Couldn't fetch orders: {e}"
+        if args.get("working_only"):
+            orders = [o for o in orders if o.is_working]
+        if not orders:
+            return f"No orders since {start}."
+        lines = []
+        for o in orders[:10]:
+            legs = "; ".join(f"{l['action']} {l['quantity']} {l['symbol']}"
+                             for l in o.legs)
+            price = f" at {o.price:g} {o.price_effect}" if o.price else ""
+            lines.append(f"Order {o.id} on {o.underlying}: {o.status}{price} — {legs}")
+        more = f" (+{len(orders) - 10} more)" if len(orders) > 10 else ""
+        return ". ".join(lines) + more + "."
+    return _per_broker(ctx, args, one)
 
 
 @tool({
@@ -539,11 +641,12 @@ def list_orders(ctx, args):
         "type": "object",
         "properties": {
             "order_id": {"type": "string"},
+            "broker": BROKER_ARG,
         },
     },
 })
 def cancel_order(ctx, args):
-    eng, err = _engine()
+    eng, err = _engine(ctx, args)
     if err:
         return err
     order_id = (args.get("order_id") or "").strip()
@@ -577,37 +680,37 @@ def cancel_order(ctx, args):
         "type": "object",
         "properties": {
             "underlying": {"type": "string"},
+            "broker": BROKER_ARG,
         },
     },
 })
 def get_positions(ctx, args):
-    eng, err = _engine()
-    if err:
-        return err
-    try:
-        positions = eng.positions(args.get("underlying"))
-    except Exception as e:
-        return f"Couldn't fetch positions: {e}"
-    if not positions:
-        scope = f" in {tsym.normalize_underlying(args['underlying'])}" \
-            if args.get("underlying") else ""
-        return f"No open positions{scope}."
-    lines, total, unmarked = [], 0.0, 0
-    for p in positions[:12]:
-        mark = eng.mark(p)
-        u = p.unrealized(mark)
-        side = "long" if p.quantity > 0 else "short"
-        upnl = f"unrealized {_fmt(u)}" if u is not None else "no mark"
-        if u is None:
-            unmarked += 1
-        else:
-            total += u
-        lines.append(f"{side} {abs(p.quantity):g} {p.symbol} "
-                     f"(avg {_fmt(p.average_open_price)}, {upnl})")
-    summary = f"Total unrealized {_fmt(total)}"
-    if unmarked:
-        summary += f" ({unmarked} position(s) unmarked)"
-    return ". ".join(lines) + f". {summary}."
+    def one(broker, eng):
+        try:
+            positions = eng.positions(args.get("underlying"))
+        except Exception as e:
+            return f"Couldn't fetch positions: {e}"
+        if not positions:
+            scope = f" in {tsym.normalize_underlying(args['underlying'])}" \
+                if args.get("underlying") else ""
+            return f"No open positions{scope}."
+        lines, total, unmarked = [], 0.0, 0
+        for p in positions[:12]:
+            mark = eng.mark(p)
+            u = p.unrealized(mark)
+            side = "long" if p.quantity > 0 else "short"
+            upnl = f"unrealized {_fmt(u)}" if u is not None else "no mark"
+            if u is None:
+                unmarked += 1
+            else:
+                total += u
+            lines.append(f"{side} {abs(p.quantity):g} {p.symbol} "
+                         f"(avg {_fmt(p.average_open_price)}, {upnl})")
+        summary = f"Total unrealized {_fmt(total)}"
+        if unmarked:
+            summary += f" ({unmarked} position(s) unmarked)"
+        return ". ".join(lines) + f". {summary}."
+    return _per_broker(ctx, args, one)
 
 
 @tool({
@@ -617,7 +720,9 @@ def get_positions(ctx, args):
         "transaction history, net of fees) plus current unrealized, "
         "optionally for one underlying. Period can be a named one or "
         "explicit dates. Use for 'how much did I make this week?', 'P&L "
-        "on SPX for June', 'what's my realized today?'."
+        "on SPX for June', 'what's my realized today?'. Each broker's "
+        "account is reported on its own; a combined figure is only a sum "
+        "spoken at the end."
     ),
     "input_schema": {
         "type": "object",
@@ -627,33 +732,40 @@ def get_positions(ctx, args):
             "start_date": {"type": "string", "description": "ISO date."},
             "end_date": {"type": "string", "description": "ISO date."},
             "underlying": {"type": "string"},
+            "broker": BROKER_ARG,
         },
     },
 })
 def get_pnl(ctx, args):
-    eng, err = _engine()
-    if err:
-        return err
     start, end = period_range(args.get("period"), args.get("start_date"),
                               args.get("end_date"))
-    try:
-        rep = eng.pnl_report(start, end, underlying=args.get("underlying"))
-    except Exception as e:
-        return f"Couldn't build the P&L report: {e}"
     scope = f" on {tsym.normalize_underlying(args['underlying'])}" \
         if args.get("underlying") else ""
-    parts = [f"From {rep.start} to {rep.end}{scope}: realized "
-             f"{_fmt(rep.realized)} net of {_fmt(rep.fees)} in fees "
-             f"across {len(rep.events)} closed trades"]
-    if rep.by_underlying and not args.get("underlying"):
-        tops = sorted(rep.by_underlying.items(), key=lambda kv: -abs(kv[1]))[:4]
-        parts.append("by underlying: " +
-                     ", ".join(f"{u} {_fmt(v)}" for u, v in tops))
-    if rep.unrealized is not None:
-        parts.append(f"current unrealized {_fmt(rep.unrealized)}")
-    if rep.note:
-        parts.append(rep.note.strip())
-    return ". ".join(parts) + "."
+    totals = []
+
+    def one(broker, eng):
+        try:
+            rep = eng.pnl_report(start, end, underlying=args.get("underlying"))
+        except Exception as e:
+            return f"Couldn't build the P&L report: {e}"
+        totals.append(rep.realized)
+        parts = [f"From {rep.start} to {rep.end}{scope}: realized "
+                 f"{_fmt(rep.realized)} net of {_fmt(rep.fees)} in fees "
+                 f"across {len(rep.events)} closed trades"]
+        if rep.by_underlying and not args.get("underlying"):
+            tops = sorted(rep.by_underlying.items(), key=lambda kv: -abs(kv[1]))[:4]
+            parts.append("by underlying: " +
+                         ", ".join(f"{u} {_fmt(v)}" for u, v in tops))
+        if rep.unrealized is not None:
+            parts.append(f"current unrealized {_fmt(rep.unrealized)}")
+        if rep.note:
+            parts.append(rep.note.strip())
+        return ". ".join(parts) + "."
+    out = _per_broker(ctx, args, one)
+    if len(totals) > 1:
+        out += (f" Across both brokers, added here only: realized "
+                f"{_fmt(sum(totals))}.")
+    return out
 
 
 @tool({
@@ -666,8 +778,11 @@ def get_pnl(ctx, args):
     "input_schema": {"type": "object", "properties": {}},
 })
 def clear_ticket(ctx, args):
-    tk = _load_ticket()
+    broker, problem = _broker(ctx, args)
+    if problem:
+        return problem
+    tk = _load_ticket(broker)
     if tk is None:
         return "There was no ticket to clear."
-    tticket.clear()
+    tticket.clear(broker)
     return f"Cleared the ticket ({tk.describe()})"

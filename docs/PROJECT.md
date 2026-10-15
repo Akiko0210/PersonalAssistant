@@ -251,20 +251,39 @@ unit-tested without a microphone, speakers, or an API key.
   domain.
 
 ### Trading package
-- **`trading/`** — real trading on the tastytrade API: multi-leg option
-  strategy building (19 named strategies, validated against the live option
-  chain), real-time bid/ask over a DXLink websocket, order dry-run → confirmed
-  submit → cancel, and realized/unrealized P&L from transaction history and
-  live marks. Self-contained: the agent reaches it only through
+- **`trading/`** — real trading on two brokers, as a variant package:
+  multi-leg option strategy building (19 named strategies, validated against
+  the live option chain), live quotes, order dry-run → confirmed submit →
+  cancel, and realized/unrealized P&L from transaction history and live
+  marks. `main.py` is the broker registry; `schwab.py` and `tastytrade.py`
+  are the variants, each exposing the same module surface (client, chain
+  fetch, order payload, parsers, quotes), and everything else — the ticket,
+  the order gate, the engine, the P&L math — sees only the dataclasses in
+  `models.py`. One engine per broker (`engine.get_engine(key)`), each with
+  its own ticket, audit log and (Schwab) token file under
+  `data/trading/<broker>/`, so a draft built on one account can never reach
+  the other. Self-contained: the agent reaches it only through
   `tools/trading_tools.py`, the dashboard through lazily imported
-  `/api/trading/*` routes, and an unconfigured machine degrades to a friendly
-  "not configured" message. Credentials come from `.env` (`TASTY_*` keys, or
-  `TASTY_ENV_FILE` pointing at the Tasty-Web project's `.env`); orders go to
-  the sandbox unless `TASTY_ENV=live` is set explicitly. Submitting requires a
-  dry-run review of the exact current ticket (fingerprint-checked) plus an
-  explicit spoken confirmation — the gate lives in `trading/orders.py`, shared
-  by voice and web. Design + API research: **TRADING_PLAN.md**,
-  **TRADING_RESEARCH.md**.
+  `/api/trading/*` routes (every route names its broker), and an
+  unconfigured broker degrades to a friendly "not configured" message.
+  - **Which broker a tool acts on is the persona's**, never the model's:
+    `brain/agents.py` gives each hat a `brokers` tuple (Tom `schwab`, Bonny
+    `tastytrade`, Linda both, read-only) and the tools resolve it from
+    `ctx.active_agent`. Asking Tom for tastytrade is refused by name.
+  - **tastytrade**: OAuth refresh token from `.env` (`TASTY_*`, or
+    `TASTY_ENV_FILE`); sandbox unless `TASTY_ENV=live`; DXLink stream.
+  - **Schwab**: three-legged OAuth2 whose refresh token dies after 7 days
+    (`schwab.Client.auth_state` warns a day ahead; a lapsed one makes every
+    call raise `BrokerError(code="auth")` with the sign-in hint, and the
+    dashboard's Trading page runs the sign-in). No sandbox, no futures
+    (Schwab's API), and REST quotes rather than a stream — Schwab allows one
+    stream per user, which two processes would fight over, and `/quotes`
+    already carries the greeks. Schwab's transactions are normalized into
+    tastytrade's shape so `pnl.py` stays one copy.
+  - Submitting requires a dry-run review of the exact current ticket
+    (fingerprint-checked) plus an explicit spoken confirmation — the gate
+    lives in `trading/orders.py`, shared by voice, web and both brokers.
+    Design + API research: **TRADING_PLAN.md**, **TRADING_RESEARCH.md**.
 
 - **The trade log** (`trading/trade_log.py`, `statement.py`,
   `trade_positions.py`; tools in `tools/trade_log_tools.py`) — Tom's SQLite
@@ -346,7 +365,8 @@ unit-tested without a microphone, speakers, or an API key.
 
 ### Personas and background delegation
 
-Alice (general), Bob (notes/memory), and Tom (trading) each keep their OWN
+Alice (general), Bob (notes/memory), Tom (trading on Schwab), Bonny
+(trading on tastytrade) and Linda (coach) each keep their OWN
 conversation with the user (`brain/agents.py`, one history file per persona)
 and their own private memory. Switching personas swaps the whole thread
 (`Claude.switch_to`): what one persona was told, another cannot see, and
@@ -483,7 +503,9 @@ central list or dispatch chain.
   price and Tom decided he couldn't price options, 2026-10-05),
   `review_order` (the dry run only), `submit_order` (requires review + explicit confirmation),
   `list_orders`, `cancel_order`, `get_positions`, `get_pnl`, `clear_ticket` —
-  real trading via the tastytrade API (see the trading package above).
+  real trading on the persona's broker (Tom → Schwab, Bonny → tastytrade; see
+  the trading package above). The read tools take an optional `broker` for
+  Linda, who covers both accounts separately and sums only in the sentence.
 - **trade log** (`trade_log_tools.py`): `log_trade` (an email fill alert →
   one logged order), `import_statement` (a thinkorswim statement CSV →
   authoritative rows with fees; refused unless it ties out to its TOTAL row),
@@ -690,6 +712,8 @@ data/history_<key>.json  each persona's transcript (sanitized on every save)
 data/gmail_client_secret.json  Google OAuth client (from the Cloud console)
 data/gmail_token.json          Gmail token, written by `python -m lib.gmail_auth`
 data/trading/trade_log.db      Tom's SQLite log of thinkorswim/Schwab fills
+data/trading/<broker>/         per broker: ticket.json, orders_log.json, and
+                               Schwab's tokens.json (the 7-day sign-in)
 data/working_state.db          each persona's working record (campaigns, notebook, list)
 knowledge/           reference PDFs/text/video you ingest + manifest.json
 logs/                dated session logs

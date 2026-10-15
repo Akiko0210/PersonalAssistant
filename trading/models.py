@@ -8,6 +8,23 @@ ticket), and consumed by the voice tools and dashboard adapters.
 from dataclasses import dataclass, field, asdict
 
 
+class BrokerError(Exception):
+    """A broker's REST rejection or a network failure, with the broker's own
+    messages attached — callers turn them into spoken/JSON output. One type
+    for both brokers so the shared order/engine code never imports a variant.
+    `code` is "auth" when the fix is a sign-in, not a retry."""
+
+    def __init__(self, message, status=None, errors=None, code=None):
+        super().__init__(message)
+        self.status = status
+        self.errors = errors or []  # [{code, message}, ...] from the API
+        self.code = code
+
+    def details(self):
+        msgs = [e.get("message") or e.get("code", "") for e in self.errors]
+        return "; ".join(m for m in msgs if m) or str(self)
+
+
 @dataclass
 class Quote:
     """Latest known market data for one streamer symbol."""
@@ -35,7 +52,7 @@ class Quote:
 class OptionInfo:
     """One tradable option contract, as found in a chain."""
     occ: str            # order symbol (OCC / future-option format)
-    streamer: str       # dxFeed symbol for quotes
+    streamer: str       # quote key: dxFeed symbol (tastytrade) or the OCC (Schwab)
 
 
 @dataclass

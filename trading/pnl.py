@@ -21,13 +21,14 @@ Unrealized: positions have no live mark (close-price is yesterday's), so
 the caller supplies mark_fn(position) -> price from streaming quotes or a
 REST snapshot; positions without a mark are listed with unrealized None.
 
-Pure module: fully testable with fixture transactions/positions.
+Transactions arrive in tastytrade's native shape; Schwab's variant
+normalizes its own into it (schwab.transactions), so this math stays one
+copy. Pure module: fully testable with fixture transactions/positions.
 """
 
 from collections import deque
-from datetime import datetime, timezone
 
-from trading.models import PnLReport, Position, RealizedEvent
+from trading.models import PnLReport, RealizedEvent
 
 SETTLEMENT_SUBTYPES = {"Futures Settlement", "Mark to Market"}
 CLOSING_RD_SUBTYPES = {"Expiration", "Assignment", "Exercise",
@@ -56,28 +57,6 @@ def _ts(tx):
 def _in_period(iso, start, end):
     d = (iso or "")[:10]
     return (not start or d >= start) and (not end or d <= end)
-
-
-def parse_positions(items):
-    out = []
-    for p in items:
-        qty = _num(p.get("quantity"))
-        if p.get("quantity-direction") == "Short":
-            qty = -qty
-        if qty == 0:
-            continue
-        out.append(Position(
-            symbol=p.get("symbol", ""),
-            underlying=p.get("underlying-symbol", p.get("symbol", "")),
-            instrument_type=p.get("instrument-type", ""),
-            quantity=qty,
-            average_open_price=_num(p.get("average-open-price")),
-            multiplier=_num(p.get("multiplier"), 1.0) or 1.0,
-            close_price=_num(p.get("close-price"), None),
-            streamer_symbol=p.get("streamer-symbol") or None,
-            realized_today=_num(p.get("realized-today")),
-            raw=p))
-    return out
 
 
 def _direction(tx, inventory_qty):

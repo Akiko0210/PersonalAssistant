@@ -1,11 +1,14 @@
-"""The trading engine: one lazily built object wiring the package together.
+"""The trading engine: one lazily built object per broker wiring the
+package together.
 
-Both surfaces (voice tools, dashboard routes) call get_engine() — the
-first call constructs the client/quote service/order manager from config;
-if credentials are missing it returns (None, friendly-problem-string)
-instead of raising, so an unconfigured machine degrades to a clear
-message rather than a stack trace. Nothing in the agent's startup path
-constructs this: a user who never says a trading word never pays for it.
+Both surfaces (voice tools, dashboard routes) call get_engine(broker) — the
+first call constructs that broker's client/quotes/order manager from its
+variant module (trading/main.py); if credentials are missing it returns
+(None, friendly-problem-string) instead of raising, so an unconfigured
+broker degrades to a clear message rather than a stack trace. Nothing in
+the agent's startup path constructs this: a user who never says a trading
+word never pays for it. The two engines never share state: each has its
+own ticket file, audit log, chain cache key and quote cache.
 """
 
 import threading
@@ -13,37 +16,28 @@ from datetime import date, timedelta
 
 from trading import chains as tchains
 from trading import config as tcfg
+from trading import main as tmain
 from trading import pnl as tpnl
 from trading import symbols as tsym
 from trading.orders import OrderManager
-from trading.quotes import QuoteService
-from trading.tasty_client import TastyClient
 
-_engine = None
+_engines = {}
 _engine_lock = threading.Lock()
 
 
 class TradingEngine:
-    def __init__(self):
-        self.client = TastyClient()
-        self.quotes = QuoteService(self.client)
-        self.orders = OrderManager(self.client)
+    def __init__(self, broker):
+        self.broker = broker                      # the variant module
+        self.key = broker.KEY
+        tcfg.ensure_dirs(self.key)   # now, so a legacy audit log is read, not just written
+        self.client = broker.Client()
+        self.quotes = broker.make_quotes(self.client)
+        self.orders = OrderManager(self.client, broker)
 
     # --- market data -----------------------------------------------------
 
     def chain(self, underlying, force=False):
-        return tchains.fetch_chain(self.client, underlying, force=force)
-
-    def _snapshot_fallback(self, api_symbol, streamer_symbol, group):
-        """REST snapshot for one symbol into the quote cache (live only;
-        sandbox has no REST quotes — errors are swallowed, caller copes
-        with a None quote)."""
-        try:
-            data = self.client.market_data_by_type(**{group: api_symbol})
-            items = data.get("items", []) if isinstance(data, dict) else []
-            self.quotes.snapshot_merge(items, {api_symbol: streamer_symbol})
-        except Exception:
-            pass
+        return tchains.fetch_chain(self.broker, self.client, underlying, force=force)
 
     def underlying_quote(self, underlying, wait_s=2.5):
         """Live Quote for an underlying ('SPX', '/ES', 'AAPL')."""
@@ -55,12 +49,8 @@ class TradingEngine:
             q = self.quotes.get(streamer, wait_s=wait_s)
             if q and (q.bid is not None or q.last is not None):
                 return q
-        group = ("future" if chain.is_futures
-                 else "index" if underlying in ("SPX", "RUT", "NDX", "VIX", "XSP")
-                 else "equity")
-        api_symbol = (chain.expiration_contract.get(chain.expirations[0])
-                      if chain.is_futures else underlying)
-        self._snapshot_fallback(api_symbol or underlying, streamer, group)
+        # No tick (sandbox has none; Schwab never streams): REST snapshot.
+        self.quotes.refresh([(self.broker.underlying_api_symbol(chain), streamer)])
         return self.quotes.get(streamer)
 
     def leg_quote_fn(self, chain, greeks=False):
@@ -75,21 +65,23 @@ class TradingEngine:
                 self.quotes.subscribe([streamer], greeks=greeks)
                 return self.quotes.get(streamer, wait_s=2.0, greeks=greeks)
             return self.quotes.get(streamer)
+        prefetch = getattr(self.quotes, "prefetch", None)
+        if prefetch:
+            get_quote.prefetch = prefetch   # Ticket.leg_quotes batches on it
         return get_quote
 
     # --- positions & P&L -------------------------------------------------
 
     def positions(self, underlying=None):
-        items = self.client.positions()
-        pos = tpnl.parse_positions(items)
+        pos = self.broker.parse_positions(self.client.positions())
         if underlying:
             u = tsym.normalize_underlying(underlying)
             pos = [p for p in pos if p.underlying == u]
         return pos
 
     def mark(self, position, wait_s=1.5):
-        """Best available mark: live DXLink mid, then REST snapshot, then
-        yesterday's close (stale but honest — flagged by the caller)."""
+        """Best available mark: live mid, then REST snapshot, then the
+        broker's own close/mark (stale but honest — flagged by the caller)."""
         streamer = position.streamer_symbol
         if not streamer and "Option" in position.instrument_type:
             parsed = tsym.parse_occ(position.symbol)
@@ -110,11 +102,7 @@ class TradingEngine:
             if q and q.mid is not None:
                 return q.mid
         if streamer:
-            group = ("future-option" if position.symbol.startswith("./")
-                     else "equity-option" if "Option" in position.instrument_type
-                     else "future" if position.symbol.startswith("/")
-                     else "equity")
-            self._snapshot_fallback(position.symbol, streamer, group)
+            self.quotes.refresh([(position.symbol, streamer)])
             q = self.quotes.get(streamer)
             if q and q.mid is not None:
                 return q.mid
@@ -127,11 +115,8 @@ class TradingEngine:
         if start:
             fetch_start = (date.fromisoformat(start) -
                            timedelta(days=tcfg.PNL_OPEN_LOOKBACK_DAYS)).isoformat()
-        filters = {"start_date": fetch_start, "end_date": end,
-                   "types": ["Trade", "Receive Deliver", "Money Movement"]}
-        if underlying:
-            filters["underlying_symbol"] = tsym.normalize_underlying(underlying)
-        txs = self.client.transactions_all(**filters)
+        u = tsym.normalize_underlying(underlying) if underlying else None
+        txs = self.broker.transactions(self.client, fetch_start, end, u)
         positions = self.positions(underlying)
         return tpnl.report(txs, start, end, positions=positions,
                            mark_fn=self.mark)
@@ -139,22 +124,25 @@ class TradingEngine:
     # --- status ----------------------------------------------------------
 
     def status(self):
-        return {
-            "env": "live" if tcfg.is_live() else "sandbox",
-            "base_url": tcfg.base_url(),
-            "account": self.client.account_id,
-            "stream": ("running" if self.quotes.start()
-                       else f"unavailable ({self.quotes.last_error})"),
-        }
+        s = {"broker": self.key, "label": tmain.label(self.key)}
+        s.update(self.broker.status(self.client))
+        s["stream"] = (("running" if self.quotes.start()
+                        else f"unavailable ({self.quotes.last_error})")
+                       if self.key == "tastytrade" else "REST snapshots (no stream)")
+        return s
 
 
-def get_engine():
-    """(engine, None) or (None, why-not) — never raises for missing config."""
-    global _engine
-    problem = tcfg.credentials_problem()
+def get_engine(broker):
+    """(engine, None) or (None, why-not) — never raises for missing config
+    or an unknown broker key."""
+    try:
+        mod = tmain.module(broker)
+    except KeyError:
+        return None, f"Unknown broker '{broker}'."
+    problem = mod.credentials_problem()
     if problem:
         return None, problem
     with _engine_lock:
-        if _engine is None:
-            _engine = TradingEngine()
-        return _engine, None
+        if broker not in _engines:
+            _engines[broker] = TradingEngine(mod)
+        return _engines[broker], None

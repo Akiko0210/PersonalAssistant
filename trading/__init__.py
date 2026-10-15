@@ -1,24 +1,29 @@
-"""Real trading for the voice agent, via the tastytrade Open API.
+"""Real trading for the voice agent, on two brokers.
 
-Self-contained package: multi-leg option strategy building, real-time
-bid/ask over DXLink, order review/submit/cancel, and realized/unrealized
-P&L. Nothing here is imported by the rest of the app except through
+Self-contained variant package (CLAUDE.md's convention): multi-leg option
+strategy building, live quotes, order review/submit/cancel, and
+realized/unrealized P&L, on Charles Schwab (Tom) and tastytrade (Bonny).
+Nothing here is imported by the rest of the app except through
 `tools/trading_tools.py` (the voice surface) and the dashboard's lazily
 imported trading routes — see TRADING_PLAN.md for the architecture and
 TRADING_RESEARCH.md for the API research it is built on.
 
 Module map:
-    config.py        env/credentials, base URLs, paths, futures constants
-    models.py        dataclasses shared across the package
+    main.py          the broker registry: key -> variant module
+    tastytrade.py    VARIANT: OAuth2 refresh-token client, DXLink wiring,
+                     chain/order/position/transaction parsing, order payload
+    schwab.py        VARIANT: three-legged OAuth2 with the 7-day sign-in,
+                     REST quotes (no stream), its own parsing and payload
+    config.py        env/credentials, base URLs, per-broker paths, constants
+    models.py        dataclasses + BrokerError shared across the package
     symbols.py       OCC option symbols, futures symbology, spoken forms
-    tasty_client.py  authenticated REST client (OAuth2 refresh-token)
-    chains.py        option-chain fetch + normalization + cache
+    chains.py        the per-broker option-chain cache
     strategies.py    the 19 strategy leg templates + strike math
     ticket.py        the working order ticket (validate, price, persist)
-    quotes.py        DXLink streaming quotes + REST snapshot fallback
+    quotes.py        the DXLink streaming service tastytrade.py wires in
     orders.py        dry-run/review -> submit -> cancel, with audit log
     pnl.py           realized (transactions, FIFO) + unrealized (marks)
-    engine.py        lazy singleton wiring the above together
+    engine.py        one lazy engine per broker wiring the above together
     trade_log.py     SQLite log of thinkorswim/Schwab fills + fill-line parser
     statement.py     Schwab account-statement CSV -> orders, with tie-out
     trade_positions.py  minimal zero-net position grouping + P&L (pure)

@@ -3,16 +3,15 @@ import time
 import unittest
 from datetime import date, timedelta
 
-from trading import config as tcfg
 from pathlib import Path
 
 from tests.trading_fixtures import spx_chain
 from trading import config as tcfg
 from trading import orders as torders
+from trading import tastytrade
 from trading import ticket as tticket
-from trading.models import Leg
+from trading.models import BrokerError, Leg
 from trading.orders import OrderManager
-from trading.tasty_client import TastyError
 from trading.ticket import Ticket
 
 
@@ -26,7 +25,7 @@ class FakeClient:
     def dry_run_order(self, payload):
         self.dry_runs.append(payload)
         if self.reject_dry_run:
-            raise TastyError("preflight", status=422,
+            raise BrokerError("preflight", status=422,
                              errors=[{"message": self.reject_dry_run}])
         return {
             "order": {"id": "0", "status": "Received"},
@@ -68,18 +67,14 @@ class FakeClient:
 class OrdersBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = (tcfg.TRADING_DIR, tcfg.TICKET_PATH,
-                       tcfg.ORDERS_LOG_PATH)
-        tcfg.TRADING_DIR = Path(self.tmp.name)
-        tcfg.TICKET_PATH = Path(self.tmp.name) / "ticket.json"
-        tcfg.ORDERS_LOG_PATH = Path(self.tmp.name) / "orders_log.json"
+        self._saved = tcfg.TRADING_DIR
+        tcfg.TRADING_DIR = Path(self.tmp.name)   # per-broker paths derive from it
         self.chain = spx_chain()
         self.client = FakeClient()
-        self.mgr = OrderManager(self.client)
+        self.mgr = OrderManager(self.client, tastytrade)
 
     def tearDown(self):
-        (tcfg.TRADING_DIR, tcfg.TICKET_PATH,
-         tcfg.ORDERS_LOG_PATH) = self._saved
+        tcfg.TRADING_DIR = self._saved
         self.tmp.cleanup()
 
     def ticket(self):
@@ -100,7 +95,7 @@ class TestReview(OrdersBase):
         self.assertAlmostEqual(r.total_fees, 3.4)
         self.assertEqual(r.warnings, ["resulting position is a spread"])
         self.assertEqual(tk.review["fingerprint"], tk.fingerprint())
-        self.assertEqual(tticket.load().review["fingerprint"],
+        self.assertEqual(tticket.load("tastytrade").review["fingerprint"],
                          tk.fingerprint())
 
     def test_review_rejection_surfaces_broker_message(self):
@@ -167,7 +162,7 @@ class TestSubmitGate(OrdersBase):
         tk = self.ticket()
         self.mgr.review(tk, self.chain)
         self.mgr.submit(tk, self.chain, confirmed=True)
-        kinds = [e["kind"] for e in torders.read_log()]
+        kinds = [e["kind"] for e in torders.read_log("tastytrade")]
         self.assertEqual(kinds, ["dry-run", "submitted"])
 
 

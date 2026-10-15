@@ -6,23 +6,29 @@ actually opened. Every function takes plain dicts and returns
 JSON-serializable dicts; anything that can fail returns {"error": ...}
 with a human-readable message instead of raising.
 
-The browser gets real-time quotes itself: /api/trading/quote-token hands
-it the DXLink url+token and the page opens the websocket directly (the
-same pattern Tasty-Web uses), so the dashboard process never streams.
+Every route names its broker (`?broker=schwab` / body "broker"): the page
+shows one broker at a time, the one the user picked, and there is no
+default that could quietly land a ticket on the other account.
+
+tastytrade quotes reach the browser directly: /api/trading/quote-token
+hands it the DXLink url+token and the page opens the websocket itself.
+Schwab has no stream here (one connection per user — see schwab.py), so
+the page polls /api/trading/quotes for the REST snapshots instead.
 """
 
-from datetime import date, timedelta
+from datetime import date
 
 from trading import config as tcfg
+from trading import main as tmain
 from trading import strategies as tstrat
 from trading import symbols as tsym
 from trading import ticket as tticket
 from trading.orders import read_log
 
 
-def _engine():
+def _engine(broker):
     from trading.engine import get_engine
-    return get_engine()
+    return get_engine(broker)
 
 
 def _err(e):
@@ -54,27 +60,74 @@ def _ticket_dict(tk, chain=None):
     return d
 
 
-def status():
-    problem = tcfg.credentials_problem()
-    base = {"env": "live" if tcfg.is_live() else "sandbox",
-            "configured": problem is None,
-            "problem": problem,
+def brokers():
+    """The broker chooser: every broker, configured or not, with who trades
+    it by voice."""
+    from brain import agents
+    out = []
+    for key in tmain.keys():
+        mod = tmain.module(key)
+        persona = next((a["name"] for a in agents.AGENTS.values()
+                        if tuple(a.get("brokers", ())) == (key,)), None)
+        problem = mod.credentials_problem()
+        out.append({"key": key, "label": tmain.label(key), "persona": persona,
+                    "configured": problem is None, "problem": problem})
+    return {"brokers": out}
+
+
+def status(broker):
+    try:
+        mod = tmain.module(broker)
+    except KeyError:
+        return _err(f"Unknown broker '{broker}'.")
+    problem = mod.credentials_problem()
+    base = {"broker": broker, "label": tmain.label(broker), "env": mod.env_label(),
+            "configured": problem is None, "problem": problem,
+            "stream_kind": "dxlink" if broker == "tastytrade" else "rest",
             "strategies": tstrat.STRATEGIES}
     if problem:
         return base
-    eng, err = _engine()
+    eng, err = _engine(broker)
     if err:
         return {**base, "configured": False, "problem": err}
     base.update(eng.status())
-    tk = tticket.load()
+    tk = tticket.load(broker)
     base["ticket"] = tk.to_dict() if tk else None
     return base
 
 
-def quote_token():
-    eng, err = _engine()
+# --- Schwab sign-in ----------------------------------------------------------
+
+def schwab_auth_get():
+    """Where to send the browser to sign in, and the current state."""
+    eng, err = _engine("schwab")
     if err:
         return _err(err)
+    return {"url": eng.client.authorize_url(),
+            "callback": eng.client.callback_url, **eng.client.auth_state()}
+
+
+def schwab_auth_post(body):
+    """Finish a sign-in from the address Schwab redirected to."""
+    eng, err = _engine("schwab")
+    if err:
+        return _err(err)
+    try:
+        eng.client.exchange_code(body.get("redirect_url") or body.get("code") or "")
+    except Exception as e:
+        return _err(e)
+    return {"ok": True, **eng.client.auth_state()}
+
+
+# --- quotes -------------------------------------------------------------------
+
+def quote_token(broker):
+    eng, err = _engine(broker)
+    if err:
+        return _err(err)
+    if not hasattr(eng.client, "quote_token"):
+        return _err(f"{tmain.label(broker)} has no quote stream; the page "
+                    "polls /api/trading/quotes instead.")
     try:
         tok = eng.client.quote_token()
         return {"token": tok.get("token"), "url": tok.get("dxlink-url")}
@@ -83,8 +136,24 @@ def quote_token():
                     "real-time data entitlement.")
 
 
-def chain(symbol):
-    eng, err = _engine()
+def quotes(broker, symbols):
+    """REST snapshots keyed by quote symbol, for the brokers without a
+    stream (and as a fallback for the one with)."""
+    eng, err = _engine(broker)
+    if err:
+        return _err(err)
+    keys = [s for s in (symbols or "").split(",") if s]
+    eng.quotes.refresh([(k, k) for k in keys])
+    out = {}
+    for k in keys:
+        q = eng.quotes.get(k)
+        if q:
+            out[k] = {"bid": q.bid, "ask": q.ask, "last": q.last, "mid": q.mid}
+    return {"quotes": out}
+
+
+def chain(broker, symbol):
+    eng, err = _engine(broker)
     if err:
         return _err(err)
     try:
@@ -93,11 +162,13 @@ def chain(symbol):
         return _err(e)
 
 
-def ticket_get():
-    eng, err = _engine()
+# --- ticket -------------------------------------------------------------------
+
+def ticket_get(broker):
+    eng, err = _engine(broker)
     if err:
         return _err(err)
-    tk = tticket.load()
+    tk = tticket.load(broker)
     if not tk:
         return {"ticket": None}
     try:
@@ -111,12 +182,13 @@ def ticket_post(body):
     """op=build: {strategy, symbol, expiration?, size?} from templates.
     op=set: full ticket fields {underlying, strategy?, legs, tif,
     limit_price, price_effect}. op=clear: discard."""
-    eng, err = _engine()
+    broker = body.get("broker", "")
+    eng, err = _engine(broker)
     if err:
         return _err(err)
     op = body.get("op")
     if op == "clear":
-        tticket.clear()
+        tticket.clear(broker)
         return {"ticket": None}
     try:
         if op == "build":
@@ -153,15 +225,16 @@ def ticket_post(body):
     except Exception as e:
         return _err(e)
     tk.touch()
-    tticket.save(tk)
+    tticket.save(tk, broker)
     return {"ticket": _ticket_dict(tk, ch)}
 
 
-def dry_run():
-    eng, err = _engine()
+def dry_run(body):
+    broker = body.get("broker", "")
+    eng, err = _engine(broker)
     if err:
         return _err(err)
-    tk = tticket.load()
+    tk = tticket.load(broker)
     if not tk:
         return _err("No ticket to review.")
     try:
@@ -174,7 +247,7 @@ def dry_run():
             return _err("No limit price set and no live quotes for mid "
                         "pricing — set a price.")
         tk.apply_net_price(net)
-        tticket.save(tk)
+        tticket.save(tk, broker)
     r = eng.orders.review(tk, ch)
     return {"ok": r.ok, "errors": r.errors, "warnings": r.warnings,
             "buying_power_change": r.buying_power_change,
@@ -186,13 +259,14 @@ def dry_run():
 
 
 def submit(body):
-    eng, err = _engine()
+    broker = body.get("broker", "")
+    eng, err = _engine(broker)
     if err:
         return _err(err)
     if not body.get("confirm"):
         return _err("Submit requires confirm:true from the confirmation "
                     "dialog.")
-    tk = tticket.load()
+    tk = tticket.load(broker)
     if not tk:
         return _err("No ticket to submit.")
     if body.get("fingerprint") and body["fingerprint"] != tk.fingerprint():
@@ -210,7 +284,7 @@ def submit(body):
 
 
 def cancel(body):
-    eng, err = _engine()
+    eng, err = _engine(body.get("broker", ""))
     if err:
         return _err(err)
     order_id = str(body.get("order_id") or "").strip()
@@ -222,8 +296,8 @@ def cancel(body):
     return {"order": {"id": order.id, "status": order.status}}
 
 
-def orders_list(start_date=None):
-    eng, err = _engine()
+def orders_list(broker, start_date=None):
+    eng, err = _engine(broker)
     if err:
         return _err(err)
     try:
@@ -238,11 +312,11 @@ def orders_list(start_date=None):
         "price": o.price, "price_effect": o.price_effect,
         "tif": o.time_in_force, "legs": o.legs, "created_at": o.created_at,
         "working": o.is_working} for o in orders],
-        "log": read_log(50)}
+        "log": read_log(broker, 50)}
 
 
-def positions():
-    eng, err = _engine()
+def positions(broker):
+    eng, err = _engine(broker)
     if err:
         return _err(err)
     try:
@@ -267,8 +341,8 @@ def positions():
             "unmarked": unmarked}
 
 
-def pnl(start, end, underlying=None):
-    eng, err = _engine()
+def pnl(broker, start, end, underlying=None):
+    eng, err = _engine(broker)
     if err:
         return _err(err)
     try:
