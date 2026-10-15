@@ -251,20 +251,53 @@ unit-tested without a microphone, speakers, or an API key.
   domain.
 
 ### Trading package
-- **`trading/`** — real trading on the tastytrade API: multi-leg option
-  strategy building (19 named strategies, validated against the live option
-  chain), real-time bid/ask over a DXLink websocket, order dry-run → confirmed
-  submit → cancel, and realized/unrealized P&L from transaction history and
-  live marks. Self-contained: the agent reaches it only through
+- **`trading/`** — real trading on two brokers, as a variant package:
+  multi-leg option strategy building (19 named strategies, validated against
+  the live option chain), live quotes, order dry-run → confirmed submit →
+  cancel, and realized/unrealized P&L from transaction history and live
+  marks. `main.py` is the broker registry; `schwab.py` and `tastytrade.py`
+  are the variants, each exposing the same module surface (client, chain
+  fetch, order payload, parsers, quotes), and everything else — the ticket,
+  the order gate, the engine, the P&L math — sees only the dataclasses in
+  `models.py`. One engine per broker (`engine.get_engine(key)`), each with
+  its own ticket, audit log and (Schwab) token file under
+  `data/trading/<broker>/`, so a draft built on one account can never reach
+  the other. Self-contained: the agent reaches it only through
   `tools/trading_tools.py`, the dashboard through lazily imported
-  `/api/trading/*` routes, and an unconfigured machine degrades to a friendly
-  "not configured" message. Credentials come from `.env` (`TASTY_*` keys, or
-  `TASTY_ENV_FILE` pointing at the Tasty-Web project's `.env`); orders go to
-  the sandbox unless `TASTY_ENV=live` is set explicitly. Submitting requires a
-  dry-run review of the exact current ticket (fingerprint-checked) plus an
-  explicit spoken confirmation — the gate lives in `trading/orders.py`, shared
-  by voice and web. Design + API research: **TRADING_PLAN.md**,
-  **TRADING_RESEARCH.md**.
+  `/api/trading/*` routes (every route names its broker), and an
+  unconfigured broker degrades to a friendly "not configured" message.
+  - **Which broker a tool acts on is the persona's**, never the model's:
+    `brain/agents.py` gives each hat a `brokers` tuple (Tom `schwab`, Bonny
+    `tastytrade`, Linda both, read-only) and the tools resolve it from
+    `ctx.active_agent`. Asking Tom for tastytrade is refused by name.
+  - **Which account, one level down** (`trading/accounts.py`): a login can
+    reach several accounts (the user's Schwab login shares two). They are
+    discovered from the broker, never configured; the user's nicknames
+    ("IRA") and each persona's chosen account live in
+    `data/trading/<broker>/accounts.json`, set by voice with `set_account` or
+    the Trading page's account buttons — the same choice. The choice is
+    persisted on purpose (an account is a standing choice; retrieval focus
+    isn't). Every answer names its account; `account` reaches another one or
+    `"all"` (one block each, then a combined line added up in the sentence)
+    without moving the choice. Orders act on one account: the ticket carries
+    it, the review fingerprint includes it, so switching accounts after a
+    review forces a new one. `SCHWAB_ACCOUNT_ID` / `TASTY_ACCOUNT_ID` are
+    only defaults now. On 2026-10-15 two accounts stopped Tom cold and he
+    told the user to edit a config file — that path is gone.
+  - **tastytrade**: OAuth refresh token from `.env` (`TASTY_*`, or
+    `TASTY_ENV_FILE`); sandbox unless `TASTY_ENV=live`; DXLink stream.
+  - **Schwab**: three-legged OAuth2 whose refresh token dies after 7 days
+    (`schwab.Client.auth_state` warns a day ahead; a lapsed one makes every
+    call raise `BrokerError(code="auth")` with the sign-in hint, and the
+    dashboard's Trading page runs the sign-in). No sandbox, no futures
+    (Schwab's API), and REST quotes rather than a stream — Schwab allows one
+    stream per user, which two processes would fight over, and `/quotes`
+    already carries the greeks. Schwab's transactions are normalized into
+    tastytrade's shape so `pnl.py` stays one copy.
+  - Submitting requires a dry-run review of the exact current ticket
+    (fingerprint-checked) plus an explicit spoken confirmation — the gate
+    lives in `trading/orders.py`, shared by voice, web and both brokers.
+    Design + API research: **TRADING_PLAN.md**, **TRADING_RESEARCH.md**.
 
 - **The trade log** (`trading/trade_log.py`, `statement.py`,
   `trade_positions.py`; tools in `tools/trade_log_tools.py`) — Tom's SQLite
@@ -287,7 +320,19 @@ unit-tested without a microphone, speakers, or an API key.
   - **Fill grammar:** thinkorswim's line format, proven on all 110 fills of
     the 2026-09-20 statement. Anything else (iron condors, /ES futures
     options) is refused, not guessed.
-  - **Positions follow the user's rule** — the minimal set of trades whose
+  - **Positions are explicit** — a `positions` table, each trade carrying
+    its `position_id` — because rebuilding positions per query gave three
+    different short legs for one diagonal on 2026-10-15. Legs are never
+    stored: a position's open legs are the net of its trades. **The
+    one-match rule** (`trade_positions.closing`, applied by
+    `trade_log.auto_assign`): a fill that closes or partly closes an open
+    leg of exactly one position in its account joins it, so roll chains
+    follow their position. No match, or several, and the user decides
+    (`assign_trades`). The walk is chronological over the whole account, so
+    out-of-order alerts don't matter. A statement import hands each
+    superseded alert row's position to the statement row with the same legs
+    nearest in time, then re-runs the rule (its expirations close legs).
+  - **Unassigned trades follow the user's rule** — the minimal set of trades whose
     legs net to zero — computed by `trade_positions.group_positions`: each
     trade closes the smallest zero-sum subset of open trades that includes
     it, with ties going FIFO.
@@ -346,7 +391,8 @@ unit-tested without a microphone, speakers, or an API key.
 
 ### Personas and background delegation
 
-Alice (general), Bob (notes/memory), and Tom (trading) each keep their OWN
+Alice (general), Bob (notes/memory), Tom (trading on Schwab), Bonny
+(trading on tastytrade) and Linda (coach) each keep their OWN
 conversation with the user (`brain/agents.py`, one history file per persona)
 and their own private memory. Switching personas swaps the whole thread
 (`Claude.switch_to`): what one persona was told, another cannot see, and
@@ -482,22 +528,26 @@ central list or dispatch chain.
   call, so buying power can't block it — a rejected dry run once hid the
   price and Tom decided he couldn't price options, 2026-10-05),
   `review_order` (the dry run only), `submit_order` (requires review + explicit confirmation),
-  `list_orders`, `cancel_order`, `get_positions`, `get_pnl`, `clear_ticket` —
-  real trading via the tastytrade API (see the trading package above).
+  `list_orders`, `cancel_order`, `get_positions`, `get_pnl`, `get_balance`
+  (net liquidating value, cash, buying power), `set_account` (choose or name
+  an account), `clear_ticket` — real trading on the persona's broker (Tom →
+  Schwab, Bonny → tastytrade; see the trading package above). The read tools
+  take an optional `account` (nickname, last digits, or `all`) and `broker`
+  (for Linda, who covers both brokers); totals across accounts or brokers are
+  only ever summed in the sentence.
 - **trade log** (`trade_log_tools.py`): `log_trade` (an email fill alert →
   one logged order), `import_statement` (a thinkorswim statement CSV →
   authoritative rows with fees; refused unless it ties out to its TOTAL row),
   `query_trade_log` (trades + exact totals + open legs, filtered by period,
-  account, symbol, strategy, refs, or `record` — a campaign's linked
-  contracts), `trade_log_positions` (positions under the user's zero-net
-  rule, with exact P&L), `link_trades` (fills → a campaign record's
-  contracts). Campaigns link by CONTRACT (account, symbol, expiration,
-  strike, type), not by ref: a statement import replaces alert-logged rows
-  under different REF #s, but their legs are the same contracts. `log_trade`
-  names the open campaigns a new fill may belong to (touching a linked
-  contract, or the same underlying); linking stays the user's call. Writers
-  are Tom's; the two readers are Linda's too. Details under the trading
-  package above.
+  account, symbol, strategy, refs, `position`, or `record` — the positions
+  serving a campaign), `trade_log_positions` (named positions, then
+  unassigned trades under the user's zero-net rule, with exact P&L),
+  `assign_trades` (the user's answer for an ambiguous fill: an existing
+  position or a new named one, optionally tied to a campaign record).
+  `log_trade` says where each new fill landed, or what to ask. A position
+  names its campaign by record id; `working_state.title` is the permission
+  check, so neither store reads the other's tables. Writers are Tom's; the
+  two readers are Linda's too. Details under the trading package above.
 
 ---
 
@@ -690,6 +740,9 @@ data/history_<key>.json  each persona's transcript (sanitized on every save)
 data/gmail_client_secret.json  Google OAuth client (from the Cloud console)
 data/gmail_token.json          Gmail token, written by `python -m lib.gmail_auth`
 data/trading/trade_log.db      Tom's SQLite log of thinkorswim/Schwab fills
+data/trading/<broker>/         per broker: ticket.json, orders_log.json,
+                               accounts.json (nicknames + chosen account), and
+                               Schwab's tokens.json (the 7-day sign-in)
 data/working_state.db          each persona's working record (campaigns, notebook, list)
 knowledge/           reference PDFs/text/video you ingest + manifest.json
 logs/                dated session logs

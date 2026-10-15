@@ -1,6 +1,7 @@
 import unittest
 
 from trading import pnl as tpnl
+from trading import tastytrade
 
 
 def tx(ttype="Trade", sub="", action="", symbol="SPXW  260724C06350000",
@@ -104,7 +105,7 @@ class TestReport(unittest.TestCase):
         self.assertAlmostEqual(rep.by_underlying["/ES"], -62.5)
 
     def test_unrealized_with_marks(self):
-        positions = tpnl.parse_positions([
+        positions = tastytrade.parse_positions([
             {"symbol": "SPXW  260724C06350000", "underlying-symbol": "SPX",
              "instrument-type": "Equity Option", "quantity": "2",
              "quantity-direction": "Long", "average-open-price": "10.0",
@@ -122,7 +123,7 @@ class TestReport(unittest.TestCase):
         self.assertEqual(len(rep.unrealized_by_position), 2)
 
     def test_missing_mark_noted(self):
-        positions = tpnl.parse_positions([
+        positions = tastytrade.parse_positions([
             {"symbol": "X", "underlying-symbol": "X",
              "instrument-type": "Equity", "quantity": "1",
              "quantity-direction": "Long", "average-open-price": "10",
@@ -133,7 +134,7 @@ class TestReport(unittest.TestCase):
         self.assertAlmostEqual(rep.unrealized, 0.0)
 
     def test_zero_quantity_positions_dropped(self):
-        self.assertEqual(tpnl.parse_positions([
+        self.assertEqual(tastytrade.parse_positions([
             {"symbol": "X", "quantity": "0", "quantity-direction": "Zero",
              "average-open-price": "1", "multiplier": "1"}]), [])
 

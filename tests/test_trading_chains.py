@@ -1,6 +1,6 @@
 import unittest
 
-from trading.chains import _normalize_equity, _normalize_futures
+from trading.tastytrade import _normalize_equity, _normalize_futures
 
 
 def strike_row(strike, call, put):

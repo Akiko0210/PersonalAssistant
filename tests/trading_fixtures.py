@@ -55,3 +55,87 @@ def quotes_for(chain, bid=10.0, ask=10.4):
             return Quote(symbol=streamer, bid=bid, ask=ask, updated_at=1.0)
         return None
     return get_quote
+
+
+# --- HTTP fake for the broker clients ---------------------------------------
+
+class FakeResponse:
+    def __init__(self, status=200, body=None, headers=None):
+        self.status_code = status
+        self._body = body
+        self.headers = headers or {}
+        self.content = b"x" if body is not None else b""
+
+    def json(self):
+        return self._body
+
+
+class FakeHTTP:
+    """A requests.Session stand-in: `script` maps "METHOD path-prefix" to a
+    FakeResponse (or a list consumed in order); every call is recorded in
+    `calls` as (method, url, kwargs)."""
+
+    def __init__(self, script=None):
+        self.script = dict(script or {})
+        self.calls = []
+        self.headers = {}
+
+    def _answer(self, method, url):
+        for key, resp in self.script.items():
+            m, _, prefix = key.partition(" ")
+            if m == method and prefix in url:
+                if isinstance(resp, list):
+                    return resp.pop(0) if len(resp) > 1 else resp[0]
+                return resp
+        return FakeResponse(404, {"message": f"unscripted {method} {url}"})
+
+    def request(self, method, url, **kw):
+        self.calls.append((method, url, kw))
+        return self._answer(method, url)
+
+    def post(self, url, **kw):
+        return self.request("POST", url, **kw)
+
+
+# --- a stand-in engine for persona->broker routing tests --------------------
+
+class FakeEngine:
+    """Just enough TradingEngine for the read tools, over real
+    trading/accounts.py choices: `accounts` maps account number -> realized
+    P&L (also its net liquidating value), and every call records which
+    account it reached."""
+
+    def __init__(self, key, realized=0.0, accounts=None):
+        from trading import accounts as taccounts
+        self.key = key
+        self._acc = taccounts
+        self.by_account = accounts or {f"{key}-1": realized}
+        self.calls = []
+
+    def accounts(self):
+        return list(self.by_account)
+
+    def default_account(self, persona):
+        return self._acc.default(self.key, persona, self.accounts())
+
+    def label(self, account):
+        return self._acc.label(self.key, account)
+
+    def status(self):
+        return {"env": "live", "accounts": self.accounts(), "stream": "ok"}
+
+    def positions(self, account, underlying=None):
+        self.calls.append(("positions", account, underlying))
+        return []
+
+    def balance(self, account):
+        from trading.models import Balance
+        self.calls.append(("balance", account))
+        v = self.by_account[account]
+        return Balance(net_liq=v, cash=v / 2, buying_power=v / 4)
+
+    def pnl_report(self, account, start, end, underlying=None):
+        from trading.models import PnLReport
+        self.calls.append(("pnl", account, start, end, underlying))
+        return PnLReport(start=start or "", end=end or "",
+                         realized=self.by_account[account])

@@ -4,6 +4,25 @@ Read first: `docs/PROJECT.md` (architecture + the reasoning behind every
 design decision), `README.md` (user-facing docs), `docs/MEDIA_CONTROL.md`
 (headset button arcana). Tests: `python -m unittest discover tests`.
 
+## Who the user is (consider it in every change)
+
+The app is for a visually impaired user who isn't blind but has **tunnel vision**.
+They run daily life and options trades through it, mostly by voice. Before
+shipping anything, ask how it works for someone who can't scan a screen:
+
+- **Voice is the primary interface.** Every feature must be usable by
+  speaking and listening; a screen-only feature is unfinished. Spoken replies
+  should be short, lead with the answer, and read numbers naturally.
+- **Accuracy beats speed.** The user can't easily check a number against the
+  screen, so a stale or guessed position, price, or fill does real harm (the
+  2026-10-15 phantom short leg). Answer from current data, and say so plainly
+  when the data might be stale.
+- **Never hide state in visuals.** A colour, an icon, or a toast alone is
+  invisible to this user; every state change also needs text next to its
+  control, or a spoken line.
+- **The dashboard rules below** (narrow column, 17px+ text, ≥46px targets)
+  follow from this; apply the same thinking to anything new.
+
 ## Architecture in one paragraph
 
 One process. `voice_agent.py` (root) owns the microphone, TTS, and all live
@@ -94,7 +113,8 @@ read-only investigations need no issue.
   be imported. Extend a variant file or add a new one — never scatter
   `sys.platform`/provider checks elsewhere. Current variant packages:
   `media_control/`, `speech/tts/`, `speech/sound/`, `lib/single_instance/`,
-  `brain/llm/`.
+  `brain/llm/`, `trading/` (`schwab.py`/`tastytrade.py`, keyed by the
+  persona's `brokers` in `brain/agents.py`).
 - Several Pythons per machine, only one with the deps: `.claude/launch.json`
   pins it (Windows Store Python on the PC, `.venv` on the Mac) — keep the pin
   pointed at whichever interpreter has the deps on the machine you're on.

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from tests.trading_fixtures import es_chain, quotes_for, spx_chain
 from trading import config as tcfg
+from trading import tastytrade
 from trading import ticket as tticket
 from trading.models import Leg
 from trading.ticket import Ticket
@@ -12,13 +13,12 @@ from trading.ticket import Ticket
 class TicketBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = (tcfg.TRADING_DIR, tcfg.TICKET_PATH)
+        self._saved = tcfg.TRADING_DIR
         tcfg.TRADING_DIR = Path(self.tmp.name)
-        tcfg.TICKET_PATH = Path(self.tmp.name) / "ticket.json"
         self.chain = spx_chain()
 
     def tearDown(self):
-        tcfg.TRADING_DIR, tcfg.TICKET_PATH = self._saved
+        tcfg.TRADING_DIR = self._saved
         self.tmp.cleanup()
 
     def condor(self):
@@ -125,7 +125,7 @@ class TestPricingAndPayload(TicketBase):
     def test_payload_shape(self):
         tk = self.condor()
         tk.limit_price, tk.price_effect = 1.50, "Credit"
-        p = tk.payload(self.chain)
+        p = tastytrade.order_payload(tk, self.chain)
         self.assertEqual(p["order-type"], "Limit")
         self.assertEqual(p["price"], "1.50")
         self.assertEqual(p["price-effect"], "Credit")
@@ -140,30 +140,36 @@ class TestPricingAndPayload(TicketBase):
         tk = Ticket(underlying="/ES", legs=[
             Leg(6400.0, "Call", "2026-08-21", "Long")])
         tk.limit_price, tk.price_effect = 10.0, "Debit"
-        p = tk.payload(chain)
+        p = tastytrade.order_payload(tk, chain)
         self.assertEqual(p["legs"][0]["instrument-type"], "Future Option")
 
-    def test_payload_requires_price(self):
+    def test_order_legs_require_price(self):
         with self.assertRaises(ValueError):
-            self.condor().payload(self.chain)
+            self.condor().order_legs(self.chain)
 
 
 class TestPersistence(TicketBase):
     def test_round_trip(self):
         tk = self.condor()
         tk.limit_price, tk.price_effect = 1.10, "Credit"
-        tticket.save(tk)
-        back = tticket.load()
+        tticket.save(tk, "tastytrade")
+        back = tticket.load("tastytrade")
         self.assertEqual(back.fingerprint(), tk.fingerprint())
         self.assertEqual(back.describe(), tk.describe())
 
     def test_load_missing(self):
-        self.assertIsNone(tticket.load())
+        self.assertIsNone(tticket.load("tastytrade"))
 
     def test_clear(self):
-        tticket.save(self.condor())
-        tticket.clear()
-        self.assertIsNone(tticket.load())
+        tticket.save(self.condor(), "tastytrade")
+        tticket.clear("tastytrade")
+        self.assertIsNone(tticket.load("tastytrade"))
+
+    def test_brokers_never_share_a_ticket(self):
+        # A draft built for Schwab must be invisible to tastytrade's engine.
+        tticket.save(self.condor(), "schwab")
+        self.assertIsNone(tticket.load("tastytrade"))
+        self.assertIsNotNone(tticket.load("schwab"))
 
 
 if __name__ == "__main__":

@@ -12,6 +12,13 @@ modules with small APIs, pure logic testable without a network or an API key.
 
 ## 1. Decisions (and why)
 
+> **2026-10-15 update.** §1.1–1.2 describe the first build, on tastytrade
+> alone. The package is now a variant package on two brokers: Charles Schwab
+> (Tom) and tastytrade (Bonny), with `trading/main.py` as the registry and
+> `schwab.py` / `tastytrade.py` as the variants — see PROJECT.md's trading
+> section. §1.2's reasons still hold for Schwab: no futures order entry, a
+> 7-day sign-in, no sandbox; they are now handled rather than avoided.
+
 ### 1.1 Broker: tastytrade, via a native Python client
 
 **Decision: port the proven logic from the Tasty-Web project into a Python

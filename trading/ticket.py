@@ -9,9 +9,11 @@ price, and a time-in-force. It is:
   their locked legs together);
 - priced from live quotes (net mid, credit positive — Tasty-Web's sign
   convention);
-- serialized to the exact API payload (port of buildOrderPayload);
-- persisted atomically to data/trading/ticket.json so the voice agent and
-  the dashboard edit the same draft;
+- reduced to orderable legs (order_legs) that each broker variant turns
+  into its own payload;
+- persisted atomically to data/trading/<broker>/ticket.json so the voice
+  agent and the dashboard edit the same draft, and a draft on one broker
+  can never reach the other;
 - fingerprinted, so the review->submit gate in orders.py can refuse to
   submit anything that changed after its dry-run review.
 """
@@ -37,6 +39,7 @@ class Ticket:
     price_effect: str = None      # "Credit" | "Debit"
     updated_at: float = 0.0
     review: dict = None           # stamped by orders.review(); see fingerprint
+    account: str = None           # the account it is for; set at build/review
 
     # --- integrity -------------------------------------------------------
 
@@ -44,6 +47,9 @@ class Ticket:
         """Hash of everything that defines the order. Any change after a
         review invalidates the review (orders.py compares)."""
         content = {
+            # The account is in the hash: a ticket reviewed on the IRA and
+            # then moved to another account must be reviewed again there.
+            "account": self.account,
             "underlying": self.underlying, "tif": self.tif,
             "price": self.limit_price, "effect": self.price_effect,
             "legs": [[l.strike, l.cp, l.expiration, l.side, l.size,
@@ -119,12 +125,16 @@ class Ticket:
     # --- pricing ---------------------------------------------------------
 
     def leg_quotes(self, chain, get_quote):
-        """[(leg, Quote-or-None)] via each leg's streamer symbol."""
-        out = []
-        for leg in self.legs:
-            info = chain.option(leg.expiration, leg.strike, leg.cp[0])
-            out.append((leg, get_quote(info.streamer) if info else None))
-        return out
+        """[(leg, Quote-or-None)] via each leg's streamer symbol. A
+        get_quote with a `prefetch` attribute (Schwab's REST cache) is
+        handed every symbol first, so a 4-leg ticket is one request."""
+        infos = [chain.option(leg.expiration, leg.strike, leg.cp[0])
+                 for leg in self.legs]
+        prefetch = getattr(get_quote, "prefetch", None)
+        if prefetch:
+            prefetch([i.streamer for i in infos if i])
+        return [(leg, get_quote(info.streamer) if info else None)
+                for leg, info in zip(self.legs, infos)]
 
     def net_mid(self, chain, get_quote):
         """Net mid across legs, per contract: positive = credit to you.
@@ -162,10 +172,11 @@ class Ticket:
         self.price_effect = "Credit" if net > 0 else "Debit"
         self.touch()
 
-    # --- API payload -----------------------------------------------------
+    # --- orderable legs --------------------------------------------------
 
-    def payload(self, chain):
-        """The POST /orders body. Raises ValueError if not orderable."""
+    def order_legs(self, chain):
+        """[(occ_symbol, leg)] for an orderable ticket — what a broker's
+        order_payload builds from. Raises ValueError if not orderable."""
         problems = self.validate(chain)
         if self.limit_price is None or self.limit_price <= 0:
             problems.append("No limit price set.")
@@ -173,24 +184,8 @@ class Ticket:
             problems.append("No price effect (credit/debit) set.")
         if problems:
             raise ValueError(" ".join(problems))
-        legs = []
-        for leg in self.legs:
-            occ = chain.option(leg.expiration, leg.strike, leg.cp[0]).occ
-            legs.append({
-                "instrument-type": "Future Option" if occ.startswith("./")
-                                   else "Equity Option",
-                "symbol": occ,
-                "quantity": leg.size,
-                "action": leg.action,
-            })
-        return {
-            "time-in-force": self.tif,
-            "order-type": "Limit",
-            "price": f"{self.limit_price:.2f}",
-            "price-effect": self.price_effect,
-            "source": "voice-agent",
-            "legs": legs,
-        }
+        return [(chain.option(leg.expiration, leg.strike, leg.cp[0]).occ, leg)
+                for leg in self.legs]
 
     # --- description -----------------------------------------------------
 
@@ -221,25 +216,25 @@ class Ticket:
                    limit_price=d.get("limit_price"),
                    price_effect=d.get("price_effect"),
                    updated_at=d.get("updated_at", 0.0),
-                   review=d.get("review"))
+                   review=d.get("review"), account=d.get("account"))
 
 
-def save(ticket):
-    tcfg.ensure_dirs()
-    write_json_atomic(tcfg.TICKET_PATH, ticket.to_dict())
+def save(ticket, broker):
+    tcfg.ensure_dirs(broker)
+    write_json_atomic(tcfg.ticket_path(broker), ticket.to_dict())
 
 
-def load():
-    """The persisted ticket, or None."""
+def load(broker):
+    """The persisted ticket for `broker`, or None."""
     try:
-        with open(tcfg.TICKET_PATH, encoding="utf-8") as f:
+        with open(tcfg.ticket_path(broker), encoding="utf-8") as f:
             return Ticket.from_dict(json.load(f))
     except (OSError, ValueError, TypeError, KeyError):
         return None
 
 
-def clear():
+def clear(broker):
     try:
-        tcfg.TICKET_PATH.unlink()
+        tcfg.ticket_path(broker).unlink()
     except OSError:
         pass

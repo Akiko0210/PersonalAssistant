@@ -7,17 +7,24 @@ post-trade reviews see real executions instead of the user's retelling.
 
 Every number a reader returns is summed here, from the log. The model
 interprets positions; it never adds the cash up itself.
+
+Positions are explicit (trade_log.positions): a new fill joins the one
+position whose open leg it closes, and the user decides every other case —
+no match, or several. One position per thing the user names, so the same
+question gets the same answer however it is asked (2026-10-15: three
+queries over one day's data gave three different short legs).
 """
 
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from lib.dates import PERIODS, period_range
 from stores import working_state
 from tools import tool
+from trading import accounts as taccounts
 from trading import config as tcfg
 from trading import statement as tstatement
 from trading import symbols as tsym
@@ -35,8 +42,9 @@ log = logging.getLogger("trading")
 
 _FILTERS = {
     "account": {"type": "string", "description": (
-        "Account, or any part of it ('699'); 'all' combines accounts. Omit "
-        "when the user didn't say: with several accounts the tool asks.")},
+        "Account: its nickname ('IRA', 'red'), or any part of it ('699'); "
+        "'all' combines accounts. Omit when the user didn't say: the account "
+        "chosen with set_account is used, and with none the tool asks.")},
     "period": {"type": "string", "enum": list(PERIODS)},
     "start_date": {"type": "string", "description": "ISO date, inclusive."},
     "end_date": {"type": "string", "description": "ISO date, inclusive."},
@@ -48,8 +56,11 @@ _FILTERS = {
 # --- Formatting --------------------------------------------------------------
 
 def _legs(legs):
-    """Net legs {(symbol, exp, strike, type): qty} as one phrase."""
+    """Net legs {(symbol, exp, strike, type): qty} as one phrase. An expired
+    leftover says so: unmarked, it was read aloud as a live short leg."""
+    today = date.today().isoformat()
     return ", ".join(f"{q:+d} {s} {e} {k:g}{cp}"
+                     + (" (expired, not yet cleared)" if e < today else "")
                      for (s, e, k, cp), q in sorted(legs.items()))
 
 
@@ -80,16 +91,27 @@ def _totals_line(what, t):
 
 # --- Filters -------------------------------------------------------------------
 
-def _account(arg):
+def _account(arg, persona=None):
     """(account, None), (None, None) for all accounts, or (None, reply):
-    the reply asks which account instead of guessing."""
+    the reply asks which account instead of guessing. A nickname ('IRA') and,
+    when nothing was said, the persona's chosen Schwab account
+    (trading/accounts.py) both turn into the digits the log's masked ids
+    keep ('*****699SCHW'), so "red" means the same account as on the live
+    tools."""
     known = trade_log.accounts()
+    arg = (arg or "").strip()
+    named = taccounts.digits_for("schwab", arg) if arg else None
+    if named:
+        arg = named[-3:]
+    elif not arg and persona:
+        chosen = taccounts.focus("schwab", persona)
+        if chosen:
+            arg = chosen[-3:]
     if not known:
         return None, ("The trade log is empty: import a statement or log a "
                       "fill first.")
     listing = "; ".join(f"{a} ({n} trades, {lo} to {hi})"
                         for a, n, lo, hi in known)
-    arg = (arg or "").strip()
     if arg.lower() == "all":
         return None, None
     hits = [a for a, *_ in known if arg.upper() in a.upper()]
@@ -109,35 +131,39 @@ def _range(args):
     return args.get("start_date"), args.get("end_date")
 
 
-# --- Campaigns (Tom's working record) ------------------------------------------
+# --- Positions -----------------------------------------------------------------
 
-def _contracts(t):
-    """The option contracts a trade touches, keyed as the record links them."""
-    return {(t["account"], t["symbol"], e, k, cp) for e, k, cp, _ in t["legs"]}
+def _label(p):
+    return f"P{p['id']} '{p['name']}'"
 
 
-def _campaign_hint(owner, trades):
-    """One line naming the open campaigns these new fills may belong to, or
-    "". A fill on a linked contract is almost certainly that campaign's (a
-    roll, an adjustment); one on the same underlying might be. The hint never
-    links: which campaign a trade serves is the user's call."""
-    try:
-        camps = working_state.open_links(owner, "campaign")
-    except Exception as e:  # noqa: BLE001 - the fill is logged; a hint is optional
-        log.warning("campaign hint unavailable: %s", e)
-        return ""
-    touched = set().union(*map(_contracts, trades))
-    symbols = {t["symbol"] for t in trades}
-    named = []
-    for rid, title, linked in camps:
-        if linked & touched:
-            named.append(f"#{rid} '{title}' (touches its contracts)")
-        elif not linked or symbols & {c[1] for c in linked}:
-            named.append(f"#{rid} '{title}' (same underlying)")
-    if not named:
-        return ""
-    return ("Open campaigns this may belong to: " + "; ".join(named)
-            + ". If it does, link_trades with its ref")
+def _placed(account, refs):
+    """One line per ref after the one-match rule has run: where it joined,
+    or what to ask the user."""
+    result = trade_log.auto_assign(account)
+    names = {p["id"]: _label(p) for p in trade_log.positions(account=account)}
+    by_position = {}
+    for t in trade_log.query(account=account):
+        if t["position_id"] is not None:
+            by_position.setdefault(t["position_id"], []).append(t)
+    open_ones = [names[pid] for pid, ts in by_position.items()
+                 if tpos.net_legs(ts)]
+    out = []
+    for ref in refs:
+        hits = result.get(ref, [])
+        if len(hits) == 1:
+            out.append(f"#{ref} is in {names[hits[0]]}")
+        elif hits:
+            out.append(f"#{ref} closes legs of " + " and ".join(
+                names[h] for h in hits) + ": ask the user which it belongs "
+                "to, then assign_trades")
+        else:
+            out.append(f"#{ref} closes no open position's leg: ask the user "
+                       "whether it starts a new position (and its name) or "
+                       "adds to one ("
+                       + (", ".join(open_ones) or "none open") + "), then "
+                       "assign_trades")
+    return out
 
 
 # --- Writers (Tom) -------------------------------------------------------------
@@ -198,52 +224,85 @@ def log_trade(ctx, args):
         out.append(f"{verb} on {m['account']}: {_trade_line(trade)}")
     if logged:
         out.append("Fees stay pending until the next statement import")
-        hint = _campaign_hint(ctx.active_agent, logged)
-        if hint:
-            out.append(hint)
+        for account in dict.fromkeys(t["account"] for t in logged):
+            out += _placed(account, [t["ref"] for t in logged
+                                     if t["account"] == account])
     return ". ".join(out) + "."
 
 
+def _record(ctx, args):
+    """(record id or None, error or None) for an optional `record` arg."""
+    if args.get("record") is None:
+        return None, None
+    rid = int(args["record"])
+    if working_state.title(ctx.active_agent, rid) is None:
+        return None, f"You have no record #{rid} you can read."
+    return rid, None
+
+
 @tool({
-    "name": "link_trades",
+    "name": "assign_trades",
     "description": (
-        "Attach trade-log fills to one of your campaign records, so the "
-        "campaign knows its option contracts: pass the record's id and the "
-        "fills' refs as log_trade or query_trade_log printed them. Link the "
-        "opening fills and every roll or adjustment — a roll's new legs carry "
-        "the campaign onto its new contracts. Links survive a statement import "
-        "replacing alert-logged fills. query_trade_log with record=id then "
-        "shows the campaign's trades and P&L."
+        "Put trade-log fills in a position: the user's answer when log_trade "
+        "says a fill closes no open position's leg, or legs of several. Pass "
+        "the refs and either position=<id> (an existing one) or "
+        "new_position=<the name the user gives it>; record=<campaign id> "
+        "ties the position to its campaign record. Only on the user's yes. "
+        "Fills that roll this position's legs afterwards join it by "
+        "themselves."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "record_id": {"type": "integer",
-                          "description": "The campaign record's id."},
             "refs": {"type": "array", "items": {"type": "string"},
-                     "description": "Refs of the fills to link."},
+                     "description": "Refs as log_trade or query_trade_log "
+                                    "printed them."},
+            "position": {"type": "integer",
+                         "description": "An existing position's id."},
+            "new_position": {"type": "string",
+                             "description": "Name for a new position."},
+            "record": {"type": "integer",
+                       "description": "The campaign record it serves."},
         },
-        "required": ["record_id", "refs"],
+        "required": ["refs"],
     },
 })
-def link_trades(ctx, args):
+def assign_trades(ctx, args):
     refs = [str(r).strip() for r in args.get("refs") or [] if str(r).strip()]
     if not refs:
         return "Which fills? Pass their refs."
     trades = trade_log.query(refs=refs)
     if not trades:
         return "None of those refs is in the trade log."
-    linked = set().union(*map(_contracts, trades))
-    try:
-        rid = int(args.get("record_id"))
-    except (TypeError, ValueError):
-        return "Which campaign? Pass its record id."
-    try:
-        added = working_state.link(ctx.active_agent, rid, linked)
-    except ValueError as e:  # not this persona's record, or closed
-        return str(e)
-    reply = (f"Linked {len(trades)} fills to #{rid}: {added} new contracts "
-             f"({len(linked)} in these fills).")
+    accounts = {t["account"] for t in trades}
+    if len(accounts) > 1:
+        return ("Those fills are in different accounts; a position lives in "
+                "one. Assign each account's fills separately.")
+    account = accounts.pop()
+    rid, err = _record(ctx, args)
+    if err:
+        return err
+    name = (args.get("new_position") or "").strip()
+    if name:
+        pid = trade_log.create_position(account, name, rid)
+    elif args.get("position") is not None:
+        found = trade_log.positions(ids=[int(args["position"])])
+        if not found or found[0]["account"] != account:
+            return (f"No position P{args['position']} in {account}; "
+                    "trade_log_positions lists them.")
+        pid = found[0]["id"]
+        if rid is not None:
+            trade_log.set_record(pid, rid)
+    else:
+        return "Which position? Pass position=<id> or new_position=<name>."
+    trade_log.assign(account, [t["ref"] for t in trades], pid)
+    # Rolls logged after these fills, still waiting, can join now.
+    pending = [t["ref"] for t in trade_log.query(account=account)
+               if t["position_id"] is None]
+    joined = [line for line in _placed(account, pending) if " is in " in line]
+    reply = f"Assigned {len(trades)} fills to P{pid}."
+    if joined:
+        reply += " Then: " + "; ".join(joined) + "."
     missing = sorted(set(refs) - {t["ref"] for t in trades})
     if missing:
         reply += " Not in the log: " + ", ".join(missing) + "."
@@ -300,6 +359,9 @@ def import_statement_text(name, text):
         st["orders"], replace=True,
         supersede=(st["account"], st["since"],
                    grace.isoformat(timespec="seconds")))
+    # Its expirations close position legs, and any row the carry-over missed
+    # is re-placed by the same one-match rule.
+    trade_log.auto_assign(st["account"])
     fills = [o for o in st["orders"] if o["strategy"] != "expiration"]
     merged = sum(o["fills"] - 1 for o in fills)
     reply = (f"Imported {name} for {st['account']}, {st['since']} to "
@@ -325,44 +387,56 @@ def import_statement_text(name, text):
         "exact totals and the legs the selection leaves open. Filter by "
         "period or dates, account, symbol, strategy, or a list of refs. Pass "
         "refs to check any grouping of trades: no open legs means they form "
-        "a closed set, and its net is the exact P&L. Pass record=<campaign "
-        "id> for every trade on that campaign's linked contracts (its "
-        "accounts included). Quote these totals rather than adding numbers "
-        "yourself. tastytrade trades aren't here (get_pnl)."
+        "a closed set, and its net is the exact P&L. Pass position=<id> for "
+        "one position's trades — the way to answer 'what's open in X' — or "
+        "record=<campaign id> for the positions serving that campaign. "
+        "Quote these totals rather than adding numbers yourself. tastytrade "
+        "trades aren't here (get_pnl)."
     ),
     "input_schema": {
         "type": "object",
         "properties": {**_FILTERS,
                        "refs": {"type": "array", "items": {"type": "string"},
                                 "description": "Refs of the trades to select."},
+                       "position": {"type": "integer",
+                                    "description": "A position's id."},
                        "record": {"type": "integer",
                                   "description": "A campaign record's id."}},
     },
 })
 def query_trade_log(ctx, args):
-    linked = None
-    if args.get("record") is not None:
-        linked = working_state.contracts(ctx.active_agent, int(args["record"]))
-        if not linked:
-            return (f"Record #{args['record']} has no linked trades"
-                    + ("" if linked is not None else " you can read")
-                    + " — link_trades attaches fills to a campaign.")
-    # A campaign names its own accounts; otherwise ask rather than guess.
-    account, ask = ((None, None) if linked and not args.get("account")
-                    else _account(args.get("account")))
+    chosen = None       # the positions selected, when a position/record is
+    rid, err = _record(ctx, args)
+    if err:
+        return err
+    if rid is not None:
+        chosen = trade_log.positions(record_id=rid)
+        if not chosen:
+            return (f"Record #{rid} has no positions yet — assign_trades "
+                    "with record= ties one to it.")
+    elif args.get("position") is not None:
+        chosen = trade_log.positions(ids=[int(args["position"])])
+        if not chosen:
+            return (f"No position P{args['position']}; trade_log_positions "
+                    "lists them.")
+    # A position names its own account; otherwise ask rather than guess.
+    account, ask = ((None, None) if chosen and not args.get("account")
+                    else _account(args.get("account"), ctx.active_agent))
     if ask:
         return ask
     start, end = _range(args)
     trades = trade_log.query(account=account, start=start, end=end,
                              symbol=args.get("symbol"),
                              strategy=args.get("strategy"),
-                             refs=args.get("refs"))
-    if linked:
-        trades = [t for t in trades if _contracts(t) & linked]
+                             refs=args.get("refs"),
+                             positions=chosen and [p["id"] for p in chosen])
     if not trades:
         return "No trades in the log match that."
     shown = trades[-tcfg.TRADE_QUERY_MAX_ROWS:]
     lines = [_trade_line(t, with_account=account is None) for t in shown]
+    if chosen:
+        lines.insert(0, "Positions: " + ", ".join(
+            f"{_label(p)} on {p['account']}" for p in chosen))
     if len(shown) < len(trades):
         lines.insert(0, f"(The latest {len(shown)} of {len(trades)} trades; "
                         "narrow the dates for the rest. Totals cover all.)")
@@ -373,11 +447,30 @@ def query_trade_log(ctx, args):
     return "\n".join(lines)
 
 
+def _all_positions(account):
+    """One account's named positions, then its unassigned trades grouped by
+    the user's zero-net rule."""
+    trades = trade_log.query(account=account)
+    named = []
+    for row in trade_log.positions(account=account):
+        ts = [t for t in trades if t["position_id"] == row["id"]]
+        if ts:
+            label = _label(row) + (f" (campaign #{row['record_id']})"
+                                   if row["record_id"] else "")
+            named.append({"label": label, "trades": ts, "tangled": False,
+                          **tpos.describe(ts)})
+    rest = tpos.group_positions([t for t in trades if t["position_id"] is None])
+    # By latest trade, so the row cap (which keeps the newest) never drops
+    # a live named position behind months of old rule-grouped ones.
+    return sorted(named + [p | {"label": f"#{p['number']}"} for p in rest],
+                  key=lambda p: p["trades"][-1]["executed_at"])
+
+
 def _position_line(p, account=None):
     ts = p["trades"]
     first, last = ts[0]["executed_at"][:10], ts[-1]["executed_at"][:10]
     kinds = list(dict.fromkeys(t["strategy"] for t in ts))
-    head = (f"#{p['number']} {p['status']} {first} to {last} {ts[0]['symbol']} "
+    head = (f"{p['label']} {p['status']} {first} to {last} {ts[0]['symbol']} "
             f"{'/'.join(kinds)}, {len(ts)} trade{'s' * (len(ts) > 1)} "
             f"[{' '.join(t['ref'] for t in ts)}]")
     if account:
@@ -399,14 +492,16 @@ def _position_line(p, account=None):
     "name": "trade_log_positions",
     "description": (
         "The user's thinkorswim/Schwab positions and their P&L, computed "
-        "from the trade log. A position follows the user's rule: the minimal "
-        "set of trades whose legs net to zero. Each is closed; open; or "
+        "from the trade log. Named positions are P<id> 'name' (with their "
+        "campaign record); trades not assigned to one follow the user's rule: the minimal set of trades whose legs net to zero "
+        "(#n). Each is closed; open; or "
         "unresolved (its leftover legs have already expired: opened before "
         "the log starts, or the expiration isn't logged yet). Each line gives "
         "dates, strategies, refs, and exact P&L (or net cash so far). A "
         "period selects positions whose latest trade falls in it, which for "
         "closed ones is the close date, i.e. realized P&L. Use for "
-        "thinkorswim P&L questions; get_pnl covers tastytrade only."
+        "thinkorswim P&L by the user's position rule; get_pnl is the live "
+        "broker account's own figures."
     ),
     "input_schema": {
         "type": "object",
@@ -417,7 +512,7 @@ def _position_line(p, account=None):
     },
 })
 def trade_log_positions(ctx, args):
-    account, ask = _account(args.get("account"))
+    account, ask = _account(args.get("account"), ctx.active_agent)
     if ask:
         return ask
     names = [account] if account else [a for a, *_ in trade_log.accounts()]
@@ -439,8 +534,7 @@ def trade_log_positions(ctx, args):
 
     # Grouping always sees the whole history: a position closed in the
     # period may have opened long before it.
-    picked = [(name, p) for name in names
-              for p in tpos.group_positions(trade_log.query(account=name))
+    picked = [(name, p) for name in names for p in _all_positions(name)
               if keep(p)]
     if not picked:
         return "No positions in the log match that."

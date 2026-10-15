@@ -192,81 +192,107 @@ class TestTools(LogBase):
         self.assertLessEqual(readers | writers, agents.AGENTS["tom"]["tools"])
         self.assertLessEqual(readers, agents.AGENTS["linda"]["tools"])
         self.assertFalse(writers & agents.AGENTS["linda"]["tools"])
-        self.assertIn("link_trades", agents.AGENTS["tom"]["tools"])
-        self.assertNotIn("link_trades", agents.AGENTS["linda"]["tools"])
+        self.assertIn("assign_trades", agents.AGENTS["tom"]["tools"])
+        self.assertNotIn("assign_trades", agents.AGENTS["linda"]["tools"])
 
 
-class TestCampaignLinks(LogBase):
-    """Tom's campaign records ↔ the trade log, linked by contract."""
+class TestPositions(LogBase):
+    """Explicit positions: the one-match rule, the user's answer for the
+    rest, and positions surviving a statement import. The chain is the
+    2026-10-15 one: a diagonal's short rolled 7760 -> 7730 -> 7700, then
+    bought back, which Tom kept reading as a live 7730."""
+
+    BLUE = "*****839SCHW"
+    OPEN = "BOT +1 DIAGONAL SPX 100 (Weeklys) 4 NOV 26/15 OCT 26 7750/7760 PUT @90.00"
+    ROLL1 = "BOT +1 VERTICAL SPX 100 (Weeklys) 15 OCT 26 7760/7730 PUT @20.30"
+    ROLL2 = "BOT +1 VERTICAL SPX 100 (Weeklys) 15 OCT 26 7730/7700 PUT @13.00"
+    CLOSE = "BOT +1 SPX 100 (Weeklys) 15 OCT 26 7700 PUT @2.35"
 
     def setUp(self):
         super().setUp()
         self._saved_ws = cfg.WORKING_STATE_PATH
         cfg.WORKING_STATE_PATH = Path(self.tmp.name) / "working_state.db"
-        self.rid = working_state.create("tom", "SPX Campaign", kind="campaign")
+        self.rid = working_state.create("tom", "Nov 4 diagonal", kind="plan")
 
     def tearDown(self):
         cfg.WORKING_STATE_PATH = self._saved_ws
         super().tearDown()
 
-    def _alert_fill(self, ref, line, when, account="*****699SCHW"):
-        fill = trade_log.parse_fill(line)
+    def log(self, ref, line, hour, account=BLUE):
+        return self.call("log_trade", alert=f"#{ref} {line} , ACCOUNT {account}",
+                         email_date=f"Wed, 14 Oct 2026 {hour}:00:00 -0400")
+
+    def open_diagonal(self):
+        self.assertIn("closes no open position's leg", self.log("1", self.OPEN, 10))
+        self.assertIn("Assigned 1 fills to P1", self.call(
+            "assign_trades", refs=["1"], new_position="Nov 4 diagonal",
+            record=self.rid))
+
+    def open_legs(self, **args):
+        return self.call("query_trade_log", **args).splitlines()[-1]
+
+    def test_a_roll_chain_joins_its_position_by_itself(self):
+        self.open_diagonal()
+        for ref, line, hour in (("2", self.ROLL1, 11), ("3", self.ROLL2, 12),
+                                ("4", self.CLOSE, 13)):
+            self.assertIn(f"#{ref} is in P1 'Nov 4 diagonal'",
+                          self.log(ref, line, hour))
+        legs = self.open_legs(position=1)
+        self.assertIn("+1 SPX 2026-11-04 7750P", legs)
+        self.assertNotIn("2026-10-15", legs)       # no phantom short leg
+        self.assertEqual(self.open_legs(record=self.rid), legs)
+
+    def test_alerts_logged_out_of_order_still_join(self):
+        self.open_diagonal()
+        self.assertIn("closes no open position's leg", self.log("3", self.ROLL2, 12))
+        self.assertIn("#2 is in P1", self.log("2", self.ROLL1, 11))
+        self.assertEqual(["1", "2", "3"], [t["ref"] for t in trade_log.query(
+            positions=[1])])
+
+    def test_a_fill_closing_legs_of_two_positions_asks(self):
+        self.open_diagonal()
+        self.log("5", "SOLD -1 SPX 100 (Weeklys) 15 OCT 26 7760 PUT @13.00", 11)
+        self.call("assign_trades", refs=["5"], new_position="Lone short")
+        reply = self.log("6", "BOT +1 SPX 100 (Weeklys) 15 OCT 26 7760 PUT @9.00", 12)
+        self.assertIn("closes legs of P1 'Nov 4 diagonal' and P2 'Lone short'",
+                      reply)
+        self.assertEqual(trade_log.query(refs=["6"])[0]["position_id"], None)
+        self.assertIn("Assigned 1 fills to P2",
+                      self.call("assign_trades", refs=["6"], position=2))
+
+    def test_another_accounts_fill_never_matches(self):
+        self.open_diagonal()
+        reply = self.log("7", self.ROLL1, 11, account="*****699SCHW")
+        self.assertIn("closes no open position's leg", reply)
+        self.assertIn("No position P1 in *****699SCHW",
+                      self.call("assign_trades", refs=["7"], position=1))
+
+    def test_a_statement_import_keeps_the_position(self):
+        fill = trade_log.parse_fill("BOT +2 SPX 100 (Weeklys) 5 JUN 26 7500 CALL @2.90")
         trade_log.save([trade_log.order(
-            fill, account=account, ref=ref, executed_at=when,
+            fill, account="*****699SCHW", ref="1", executed_at="2026-06-05T09:21:00",
             amount=fill["amount"], fees=None, description="x", source="email")])
-
-    def test_a_link_survives_the_statement_replacing_the_alert_row(self):
-        self._alert_fill("1", "BOT +2 SPX 100 (Weeklys) 5 JUN 26 7500 CALL @2.90",
-                         "2026-06-05T09:21:00")
-        self.assertIn("Linked 1 fills to #", self.call(
-            "link_trades", record_id=self.rid, refs=["1"]))
+        self.call("assign_trades", refs=["1"], new_position="June calls")
         self.call("import_statement", path=str(self.csv))
-        self.assertNotIn("1", [t["ref"] for t in trade_log.query()])
-        out = self.call("query_trade_log", record=self.rid)
-        self.assertIn("1006632596914", out)     # the statement's row, same contract
-        self.assertNotIn("BUTTERFLY", out.upper())  # the unlinked fly stays out
-        self.assertIn("1 trades: cash -1,160.00", out)
+        [t] = trade_log.query(positions=[1])      # the statement's merged row
+        self.assertEqual((t["ref"], t["quantity"]), ("1006632596914", 4))
+        self.call("import_statement", path=str(self.csv))      # repeatable
+        self.assertEqual(len(trade_log.query(positions=[1])), 1)
 
-    def test_a_roll_carries_the_campaign_onto_its_new_contracts(self):
-        self._alert_fill("10", "BOT +1 CALENDAR SPX 100 (Weeklys) 13 OCT 26/9 OCT 26 "
-                         "7750 CALL @8.70", "2026-09-30T11:06:00")
-        self.call("link_trades", record_id=self.rid, refs=["10"])
-        self._alert_fill("11", "BOT +1 CALENDAR SPX 100 (Weeklys) 16 OCT 26/13 OCT 26 "
-                         "7800 CALL @6.10", "2026-10-02T10:00:00")
-        self.assertIn("2 new contracts", self.call(
-            "link_trades", record_id=self.rid, refs=["11", "404"]))
-        out = self.call("query_trade_log", record=self.rid)
-        self.assertIn("10 2026-09-30", out)
-        self.assertIn("11 2026-10-02", out)
+    def test_positions_list_names_and_flags_expired_legs(self):
+        self.call("log_trade", alert=ALERT, email_date=ALERT_DATE)
+        self.call("assign_trades", refs=["131646602945"], new_position="Sept put")
+        out = self.call("trade_log_positions", account="868")
+        self.assertIn("P1 'Sept put' unresolved", out)
+        self.assertIn("7600P (expired, not yet cleared)", out)
 
-    def test_log_trade_names_the_campaigns_a_fill_may_belong_to(self):
-        rut = working_state.create("tom", "RUT Campaign", kind="campaign")
-        working_state.link("tom", rut, {("*****868SCHW", "RUT", "2026-10-16", 2400.0, "P")})
-        reply = self.call("log_trade", alert=ALERT, email_date=ALERT_DATE)
-        self.assertIn(f"#{self.rid} 'SPX Campaign' (same underlying)", reply)
-        self.assertNotIn("RUT Campaign", reply)
-        working_state.link("tom", self.rid,
-                           {("*****868SCHW", "SPX", "2026-09-25", 7600.0, "P")})
-        with trade_log._db() as db:   # forget it, so the alert logs anew
-            db.execute("DELETE FROM trades")
-        reply = self.call("log_trade", alert=ALERT, email_date=ALERT_DATE)
-        self.assertIn("(touches its contracts)", reply)
-        self.assertIn("link_trades", reply)
-
-    def test_a_closed_campaign_gets_no_hint(self):
-        working_state.close("tom", self.rid, "done")
-        self.assertNotIn("campaign", self.call(
-            "log_trade", alert=ALERT, email_date=ALERT_DATE))
-
-    def test_another_persona_cannot_link_or_read_toms_campaign(self):
-        self._alert_fill("1", "BOT +2 SPX 100 (Weeklys) 5 JUN 26 7500 CALL @2.90",
-                         "2026-06-05T09:21:00")
+    def test_linda_cannot_read_or_tie_to_toms_record(self):
+        self.open_diagonal()
         linda = ToolContext(active_agent="linda")
-        self.assertIn("no record", dispatch(linda, "link_trades",
-                                            {"record_id": self.rid, "refs": ["1"]}))
-        self.call("link_trades", record_id=self.rid, refs=["1"])
-        self.assertIn("you can read", dispatch(linda, "query_trade_log",
-                                               {"record": self.rid}))
+        self.assertIn("no record", dispatch(linda, "query_trade_log",
+                                            {"record": self.rid}))
+        self.assertIn("P1 'Nov 4 diagonal'", dispatch(
+            linda, "query_trade_log", {"position": 1}))
 
 
 class TestStatementDrop(LogBase):

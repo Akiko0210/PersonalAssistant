@@ -3,16 +3,15 @@ import time
 import unittest
 from datetime import date, timedelta
 
-from trading import config as tcfg
 from pathlib import Path
 
 from tests.trading_fixtures import spx_chain
 from trading import config as tcfg
 from trading import orders as torders
+from trading import tastytrade
 from trading import ticket as tticket
-from trading.models import Leg
+from trading.models import BrokerError, Leg
 from trading.orders import OrderManager
-from trading.tasty_client import TastyError
 from trading.ticket import Ticket
 
 
@@ -23,10 +22,10 @@ class FakeClient:
         self.reject_dry_run = None
         self.account_id = "5WT00001"
 
-    def dry_run_order(self, payload):
-        self.dry_runs.append(payload)
+    def dry_run_order(self, account, payload):
+        self.dry_runs.append((account, payload))
         if self.reject_dry_run:
-            raise TastyError("preflight", status=422,
+            raise BrokerError("preflight", status=422,
                              errors=[{"message": self.reject_dry_run}])
         return {
             "order": {"id": "0", "status": "Received"},
@@ -42,8 +41,9 @@ class FakeClient:
                                 "total-fees-effect": "Debit"},
         }
 
-    def place_order(self, payload):
+    def place_order(self, account, payload):
         self.placed.append(payload)
+        self.placed_on = account
         return {"order": {"id": "123", "status": "Routed",
                           "underlying-symbol": "SPX", "price": "1.50",
                           "price-effect": "Credit", "time-in-force": "Day",
@@ -51,15 +51,15 @@ class FakeClient:
                           "legs": [{"symbol": "S", "action": "Sell to Open",
                                     "quantity": 1}]}}
 
-    def get_order(self, order_id):
+    def get_order(self, account, order_id):
         return {"id": order_id, "status": "Live", "underlying-symbol": "SPX"}
 
-    def list_orders(self, **kw):
+    def list_orders(self, account, **kw):
         return {"items": [
             {"id": "123", "status": "Live", "underlying-symbol": "SPX"},
             {"id": "99", "status": "Filled", "underlying-symbol": "SPX"}]}
 
-    def cancel_order(self, order_id):
+    def cancel_order(self, account, order_id):
         self.cancelled.append(order_id)
         return {"id": order_id, "status": "Cancel Requested",
                 "underlying-symbol": "SPX"}
@@ -68,24 +68,20 @@ class FakeClient:
 class OrdersBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = (tcfg.TRADING_DIR, tcfg.TICKET_PATH,
-                       tcfg.ORDERS_LOG_PATH)
-        tcfg.TRADING_DIR = Path(self.tmp.name)
-        tcfg.TICKET_PATH = Path(self.tmp.name) / "ticket.json"
-        tcfg.ORDERS_LOG_PATH = Path(self.tmp.name) / "orders_log.json"
+        self._saved = tcfg.TRADING_DIR
+        tcfg.TRADING_DIR = Path(self.tmp.name)   # per-broker paths derive from it
         self.chain = spx_chain()
         self.client = FakeClient()
-        self.mgr = OrderManager(self.client)
+        self.mgr = OrderManager(self.client, tastytrade)
 
     def tearDown(self):
-        (tcfg.TRADING_DIR, tcfg.TICKET_PATH,
-         tcfg.ORDERS_LOG_PATH) = self._saved
+        tcfg.TRADING_DIR = self._saved
         self.tmp.cleanup()
 
     def ticket(self):
         tk = Ticket(underlying="SPX", strategy="Bull Put Spread", legs=[
             Leg(6345.0, "Put", "2026-07-24", "Short"),
-            Leg(6340.0, "Put", "2026-07-24", "Long")])
+            Leg(6340.0, "Put", "2026-07-24", "Long")], account="5WT00001")
         tk.limit_price, tk.price_effect = 1.50, "Credit"
         return tk
 
@@ -100,7 +96,7 @@ class TestReview(OrdersBase):
         self.assertAlmostEqual(r.total_fees, 3.4)
         self.assertEqual(r.warnings, ["resulting position is a spread"])
         self.assertEqual(tk.review["fingerprint"], tk.fingerprint())
-        self.assertEqual(tticket.load().review["fingerprint"],
+        self.assertEqual(tticket.load("tastytrade").review["fingerprint"],
                          tk.fingerprint())
 
     def test_review_rejection_surfaces_broker_message(self):
@@ -160,6 +156,7 @@ class TestSubmitGate(OrdersBase):
         # One review authorizes one submit.
         self.assertIsNone(tk.review)
         payload = self.client.placed[0]
+        self.assertEqual(self.client.placed_on, "5WT00001")   # the ticket's account
         self.assertEqual(payload["price"], "1.50")
         self.assertEqual(payload["source"], "voice-agent")
 
@@ -167,19 +164,19 @@ class TestSubmitGate(OrdersBase):
         tk = self.ticket()
         self.mgr.review(tk, self.chain)
         self.mgr.submit(tk, self.chain, confirmed=True)
-        kinds = [e["kind"] for e in torders.read_log()]
+        kinds = [e["kind"] for e in torders.read_log("tastytrade")]
         self.assertEqual(kinds, ["dry-run", "submitted"])
 
 
 class TestCancelAndList(OrdersBase):
     def test_cancel(self):
-        order, reason = self.mgr.cancel("123")
+        order, reason = self.mgr.cancel("5WT00001", "123")
         self.assertIsNone(reason)
         self.assertEqual(order.status, "Cancel Requested")
         self.assertEqual(self.client.cancelled, ["123"])
 
     def test_working_orders_filter(self):
-        working = self.mgr.working_orders()
+        working = self.mgr.working_orders("5WT00001")
         self.assertEqual([o.id for o in working], ["123"])
 
 

@@ -648,6 +648,13 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .ac-tools-note { margin-left: auto; font-style: italic; }
 
 /* ---------- Trading ---------- */
+/* The broker chooser: two stacked big buttons, the active one filled. A
+   dimmed outline for the other so the page always says which account it is on. */
+.tr-broker { margin-bottom: 10px; background: transparent; color: var(--ink);
+             border: 2px solid var(--accent); text-align: left; }
+.tr-broker.tr-broker-on { background: var(--accent); color: #fff; }
+.tr-status { margin-top: 8px; }
+a.tr-stmt-upload { text-align: center; text-decoration: none; line-height: 30px; }
 .tr-stmt-pick { display: block; width: 100%; min-height: 54px; font-size: 18px; }
 .tr-stmt-upload { margin-top: 12px; }
 .tr-status { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 13.5px; color: var(--ink-2); }

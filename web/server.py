@@ -1078,19 +1078,27 @@ class Handler(BaseHTTPRequestHandler):
         # stdlib-only start; the requests/websocket deps load only when a
         # Trading page is actually used.
         from trading import web_api as tw
+        # Every per-account route names its broker: the page works on the
+        # one the user picked, and there is no default account to fall into.
+        broker = arg("broker", "") if arg else (body or {}).get("broker", "")
         get_routes = {
-            "/api/trading/status": lambda: tw.status(),
-            "/api/trading/quote-token": lambda: tw.quote_token(),
-            "/api/trading/chain": lambda: tw.chain(arg("symbol", "")),
-            "/api/trading/ticket": lambda: tw.ticket_get(),
-            "/api/trading/orders": lambda: tw.orders_list(arg("start")),
-            "/api/trading/positions": lambda: tw.positions(),
-            "/api/trading/pnl": lambda: tw.pnl(arg("start"), arg("end"),
+            "/api/trading/brokers": lambda: tw.brokers(),
+            "/api/trading/status": lambda: tw.status(broker),
+            "/api/trading/schwab/auth": lambda: tw.schwab_auth_get(),
+            "/api/trading/quote-token": lambda: tw.quote_token(broker),
+            "/api/trading/quotes": lambda: tw.quotes(broker, arg("symbols", "")),
+            "/api/trading/chain": lambda: tw.chain(broker, arg("symbol", "")),
+            "/api/trading/ticket": lambda: tw.ticket_get(broker),
+            "/api/trading/orders": lambda: tw.orders_list(broker, arg("start")),
+            "/api/trading/positions": lambda: tw.positions(broker),
+            "/api/trading/pnl": lambda: tw.pnl(broker, arg("start"), arg("end"),
                                                arg("underlying")),
         }
         post_routes = {
+            "/api/trading/schwab/auth": lambda: tw.schwab_auth_post(body),
+            "/api/trading/account": lambda: tw.account_post(body),
             "/api/trading/ticket": lambda: tw.ticket_post(body),
-            "/api/trading/dry-run": lambda: tw.dry_run(),
+            "/api/trading/dry-run": lambda: tw.dry_run(body),
             "/api/trading/submit": lambda: tw.submit(body),
             "/api/trading/cancel": lambda: tw.cancel(body),
         }
