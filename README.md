@@ -17,6 +17,23 @@ Piper on Linux), and semantic note
 search (Chroma + sentence-transformers) are all on-device. No UI — just your voice and hotkeys —
 but everything is logged to `logs/`.
 
+## Who this is for
+
+This assistant is designed for people with low vision. Its users aren't totally
+blind, but they have tunnel vision: a narrow field of view that makes reading
+dense screens, small text, and wide tables slow and error-prone. It helps them
+manage daily life (notes, email, reminders, to-dos) and trade options, mostly
+by voice. That design goal shapes everything:
+
+- **Voice comes first.** Every task can be done by speaking and listening;
+  the screen is optional.
+- **Spoken answers are accurate and current.** The user can't easily check a
+  number against a busy screen, so positions, prices, and fills come from the
+  live data, never from a remembered guess.
+- **The dashboard is built for a narrow field of view.** It uses one narrow
+  column, large text, big buttons, and puts each status message right next to
+  the control that produced it.
+
 For a detailed technical walkthrough — module map, data flows, the tool
 registry, and extension points — see **[PROJECT.md](docs/PROJECT.md)**. (You can also
 just ask the agent: "tell me about this project.")
