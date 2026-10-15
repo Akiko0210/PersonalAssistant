@@ -1,0 +1,20 @@
+# --- Tests on every PR ---
+# Windows + Python 3.13 mirrors the main machine. A Linux runner would also
+# need system portaudio for sounddevice. macOS/Linux variant files are not
+# exercised here (#4).
+name: tests
+
+on:
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - run: python -m unittest discover tests
