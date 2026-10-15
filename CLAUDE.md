@@ -59,6 +59,29 @@ yourself editing them, stop and reconsider.
   card, status text right next to the control that produced it. No wide
   tables.
 
+## Issue → branch → PR workflow (user-dictated — follow it)
+
+Every task that changes the repo is traceable: an issue says why, a PR says
+what. This is standing authorization to open issues, push feature branches,
+and open PRs on `origin` — merging stays with the user. Questions and
+read-only investigations need no issue.
+
+1. **Issue first**, before editing (`gh issue create`). Body: the problem or
+   request, acceptance criteria, and what is out of scope. Labels come from
+   `gh label list` — one type (`bug`, `enhancement`, `documentation`, …) plus
+   an area if one fits; create a new label only when none fits, and say so.
+2. **One branch per issue**, cut from `main`: `<type>/<issue#>-<slug>`
+   (e.g. `feat/42-upload-button`). Work that turns up mid-task and isn't
+   this issue gets its own issue — never fold it in silently.
+3. **One PR per issue** (`gh pr create`), body opening with `Closes #<n>`:
+   - **What changed and why** — per file/area, plain language.
+   - **Before / after** — behaviour, output, or UI, side by side.
+   - **Tests** — what was added, the exact command, and its result line;
+     say plainly what was *not* tested.
+   - **Visuals** where they help — a Mermaid diagram for flow/structure
+     changes (GitHub renders it), before/after screenshots for dashboard
+     changes. `gh` can't upload images; if one can't be attached, say so.
+
 ## Gotchas
 
 - **Variant-file convention.** The app is cross-platform (Windows / macOS /
