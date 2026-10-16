@@ -226,6 +226,23 @@ class TestCitations(unittest.TestCase):
         self.assertIn("[Scratch Notes]", out)
 
 
+class TestWholeChunks(unittest.TestCase):
+    """recall has no read-the-rest tool for reference material, so whatever
+    search() drops is unreachable. A 400-char cap once hid the back 60% of
+    every chunk — the Big Lizard's strikes and credit among it."""
+
+    def test_text_past_the_old_cap_reaches_recall(self):
+        chunk = "Intro words. " * 40 + "Total credit of $18.53."  # > 400 chars
+        cols = {cfg.KNOWLEDGE_COLLECTION: FakeCol(
+            [(chunk, {"title": "Big Lizard", "t": 42.93}, 0.1)])}
+        store = fake_store(cols)
+        with mock.patch.object(KnowledgeStore, "_load_manifest",
+                               return_value={"h": {"source": "x"}}):
+            out = store.search("credit")
+        self.assertGreater(len(chunk), 400)
+        self.assertIn("Total credit of $18.53.", out)
+
+
 class TestIngestTargeting(unittest.TestCase):
     """A targeted ingest routes NEW files into that agent's private collection
     and records the target in the manifest; a known hash is never re-embedded
