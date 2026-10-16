@@ -539,10 +539,16 @@ research: [TRADING_PLAN.md](docs/TRADING_PLAN.md),
 Tom keeps a log of your thinkorswim/Schwab fills in
 `data/trading/trade_log.db` (SQLite), and prices your positions from it.
 
+- **Straight from Schwab.** Ask *"Tom, update your trade log."* He pulls every
+  fill (with exact fees) and expiration since the log's last update from the
+  Schwab API, for every account you shared with the app — the same rows a
+  statement would give, so no CSV export is needed. Repeating it is harmless.
+  Needs the Schwab sign-in (see "Charles Schwab (Tom)" above).
 - **Fill alerts.** Ask *"Tom, log my latest thinkorswim fill."* He reads the
-  alert email and logs it. The cash is exact, but fees stay pending until a
-  statement arrives.
-- **Statements.** Export the account statement CSV from thinkorswim and drop
+  alert email and logs it. The cash is exact, but fees stay pending until the
+  next sync or statement.
+- **Statements** — now only for history older than a year, or an account
+  Schwab doesn't share with the app. Export the account statement CSV from thinkorswim and drop
   it on the **Statement for Tom** box on the dashboard's Trading page. The
   import result shows right under the box. A statement is the authoritative
   record: it adds exact fees and expirations, and it replaces the alert-logged

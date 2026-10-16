@@ -377,6 +377,94 @@ def import_statement_text(name, text):
     return True, reply
 
 
+@tool({
+    "name": "sync_trades",
+    "description": (
+        "Update the trade log straight from Charles Schwab: every fill (with "
+        "its exact fees) and expiration since the log's newest synced or "
+        "imported row, for each account shared with the app, or one. These "
+        "are the statement's own rows, so no CSV export is needed, and "
+        "alert-logged fills in the span are replaced by their exact rows. "
+        "Safe to repeat. Use it when the user asks to update the log, and "
+        "before answering from the log if it may be behind (today's fills "
+        "not in yet). A statement is still needed only for history older "
+        "than a year, or an account Schwab doesn't share with the app."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "account": {"type": "string", "description": (
+                "Nickname or last digits; omit for every shared account.")},
+            "start_date": {"type": "string", "description": (
+                "ISO date to re-sync from; omit to resume where the log ends.")},
+        },
+    },
+})
+def sync_trades(ctx, args):
+    try:
+        from trading.engine import get_engine
+        eng, err = get_engine("schwab")
+        if err:
+            return err
+        numbers = eng.accounts()
+    except Exception as e:
+        return f"Couldn't reach Schwab: {e}"
+    said = (args.get("account") or "").strip()
+    if said and said.lower() not in ("all", "all accounts"):
+        number, problem = taccounts.resolve("schwab", said, numbers)
+        if problem:
+            return problem
+        numbers = [number]
+    return " ".join(_sync_account(eng, n, args.get("start_date")) for n in numbers)
+
+
+def _sync_account(eng, number, start=None):
+    """One account's sync, as one spoken sentence. Each account is its own
+    save() transaction, so a failure leaves the others written and this one
+    untouched."""
+    from trading import schwab
+    acct, label = schwab.log_account(number), eng.label(number)
+    today = date.today()
+    floor = today - timedelta(days=tcfg.SCHWAB_TRANSACTIONS_MAX_DAYS)
+    logged = trade_log.query(account=acct)
+    if start:
+        begin = date.fromisoformat(start)
+    else:
+        newest = max((t["executed_at"] for t in logged if t["source"] != "email"),
+                     default=None)
+        begin = (date.fromisoformat(newest[:10]) - timedelta(days=1) if newest
+                 else today - timedelta(days=tcfg.SCHWAB_SYNC_FIRST_DAYS))
+    begin = max(begin, floor)
+    try:
+        rows, skipped = schwab.trade_log_rows(eng.client, number, begin.isoformat(),
+                                              today.isoformat())
+    except Exception as e:
+        return f"{label}: couldn't sync ({e})."
+    if not rows:
+        return f"{label}: nothing to sync since {begin}."
+    before = {t["ref"] for t in logged}
+    last = datetime.fromisoformat(max(r["executed_at"] for r in rows))
+    grace = last + timedelta(seconds=tcfg.SCHWAB_SYNC_ALERT_GRACE_S)
+    _, superseded = trade_log.save(rows, replace=True, supersede=(
+        acct, begin.isoformat(), grace.isoformat(timespec="seconds")))
+    new = [r for r in rows if r["ref"] not in before]
+    fills = [r for r in new if r["strategy"] != "expiration"]
+    reply = (f"{label}: synced {begin} to today — {len(new)} new rows "
+             f"({len(fills)} orders, {len(new) - len(fills)} expirations), "
+             f"{len(rows) - len(new)} already in the log.")
+    if superseded:
+        reply += f" Replaced {superseded} alert-logged fills with their exact rows."
+    if skipped:
+        reply += f" Skipped {skipped} stock orders (the log holds options)."
+    # _placed runs the one-match rule over the whole account (so synced
+    # expirations close their legs too) and says which fills need the user.
+    asks = [line for line in _placed(acct, [r["ref"] for r in fills])
+            if "ask the user" in line]
+    if asks:
+        reply += " Positions to settle: " + "; ".join(asks) + "."
+    return reply
+
+
 # --- Readers (Tom and Linda) ---------------------------------------------------
 
 @tool({

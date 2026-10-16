@@ -277,10 +277,11 @@ class Client:
     def balances(self, account):
         return self.account(account).get("currentBalances") or {}
 
-    def transactions_all(self, account, start, end):
-        """Every TRADE in [start, end] (ISO dates; at most one year)."""
+    def transactions_all(self, account, start, end, types="TRADE"):
+        """Every transaction of `types` in [start, end] (ISO dates; at most
+        one year). Expirations are RECEIVE_AND_DELIVER."""
         return self._request("GET", self._acct(account, "/transactions"), params={
-            "startDate": _iso(start), "endDate": _iso(end), "types": "TRADE"})
+            "startDate": _iso(start), "endDate": _iso(end), "types": types})
 
     # --- market data -------------------------------------------------------
 
@@ -613,3 +614,110 @@ def transactions(client, account, start, end, underlying=None):
         if n and (not underlying or n["underlying-symbol"] == underlying):
             out.append(n)
     return out
+
+
+# --- trade log rows (Tom's ledger, trading/trade_log.py) ----------------------
+#
+# Verified against the user's statements on 2026-10-15: a statement TRD row's
+# REF # is the transaction's orderId and a RAD row's is the expiration's
+# activityId; UTC times converted to local equal the statement's to the
+# second; option items' cost sums to AMOUNT and fee items' cost to the fees,
+# to the cent. So these rows are the statement's own rows, and the log's
+# (account, ref) key dedupes them against any import.
+
+_LOG_STRATEGY = {"NONE": "single", "VERTICAL": "vertical", "CALENDAR": "calendar",
+                 "DIAGONAL": "diagonal", "BUTTERFLY": "butterfly",
+                 "CONDOR": "condor", "DOUBLE_DIAGONAL": "double_diagonal"}
+
+
+def log_account(number):
+    """The trade log's account id: the broker's masked form ('*****699SCHW')."""
+    return f"*****{str(number)[-3:]}SCHW"
+
+
+def _local(ts):
+    """'2026-10-14T20:13:42+0000' -> '2026-10-14T13:13:42' in local time."""
+    utc = datetime.fromisoformat(ts.replace("+0000", "+00:00"))
+    return utc.astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def _option_items(tx):
+    return [i for i in tx.get("transferItems") or []
+            if (i.get("instrument") or {}).get("assetType") == "OPTION"]
+
+
+def _log_legs(items):
+    """Net (expiration, strike, 'C'|'P', signed contracts) over items."""
+    net = {}
+    for i in items:
+        occ = tsym.parse_occ((i.get("instrument") or {}).get("symbol", ""))
+        if not occ:
+            return None
+        key = (occ["expiration"], occ["strike"], occ["cp"])
+        net[key] = net.get(key, 0) + round(_f(i.get("amount"), 0.0))
+    return [(*k, q) for k, q in net.items() if q]
+
+
+def trade_log_rows(client, account, start, end):
+    """(rows, skipped) for [start, end]: one trade-log row per filled order
+    (its legs' transactions grouped by orderId) and per expiration, oldest
+    first, in trade_log's own shape with source 'api'. `skipped` counts
+    orders with a non-option leg (stock), which the option log can't hold."""
+    txs = client.transactions_all(account, start, end,
+                                  types="TRADE,RECEIVE_AND_DELIVER") or []
+    try:
+        kinds = {str(o.get("orderId")): o for o in client.list_orders(account, start_date=start) or []}
+    except BrokerError:
+        kinds = {}   # strategy names fall back to the legs' count
+    acct = log_account(account)
+    by_order, rows, skipped = {}, [], 0
+    for tx in txs:
+        if tx.get("type") == "RECEIVE_AND_DELIVER":
+            legs = _log_legs(_option_items(tx))
+            if not legs:
+                continue
+            root = (_option_items(tx)[0].get("instrument") or {}).get("underlyingSymbol", "")
+            rows.append({"account": acct, "ref": str(tx["activityId"]),
+                         "executed_at": _local(tx["time"]),
+                         "symbol": tsym.normalize_underlying(root),
+                         "strategy": "expiration", "quantity": None, "price": None,
+                         "amount": round(_f(tx.get("netAmount"), 0.0), 2), "fees": 0.0,
+                         "fills": 1, "description": tx.get("description") or "expiration",
+                         "source": "api", "legs": legs})
+        elif tx.get("type") == "TRADE" and tx.get("orderId"):
+            by_order.setdefault(str(tx["orderId"]), []).append(tx)
+    for ref, group in by_order.items():
+        items = [i for t in group for i in t.get("transferItems") or []]
+        if any((i.get("instrument") or {}).get("assetType") not in ("OPTION", "CURRENCY")
+               for i in items):
+            skipped += 1
+            continue
+        options = [i for i in items if not i.get("feeType")]
+        legs = _log_legs(options)
+        if not legs:
+            skipped += 1
+            continue
+        amount = round(sum(_f(i.get("cost"), 0.0) for i in options), 2)
+        fees = round(sum(_f(i.get("cost"), 0.0) for i in items if i.get("feeType")), 2)
+        order = kinds.get(ref) or {}
+        strategy = _LOG_STRATEGY.get(order.get("complexOrderStrategyType"),
+                                     "single" if len(legs) == 1 else "custom")
+        size = int(_f(order.get("filledQuantity"), 0.0)) or min(abs(q) for *_, q in legs)
+        qty = size if amount <= 0 else -size        # a debit is a buy, as on the statement
+        mult = _f((options[0].get("instrument") or {}).get("optionPremiumMultiplier"), 100.0)
+        price = round(abs(amount) / (size * mult), 2)
+        root = (options[0].get("instrument") or {}).get("underlyingSymbol", "")
+        symbol = tsym.normalize_underlying(root)
+        desc = (f"{'BOT' if qty > 0 else 'SOLD'} {qty:+d} "
+                f"{strategy.replace('_', ' ').upper()} {symbol} "
+                + "/".join(f"{e} {k:g}{cp}" for e, k, cp, _ in legs)
+                + f" @{price:.2f} (Schwab API)")
+        rows.append({"account": acct, "ref": ref,
+                     "executed_at": min(_local(t["time"]) for t in group),
+                     "symbol": symbol, "strategy": strategy, "quantity": qty,
+                     "price": price, "amount": amount, "fees": fees,
+                     # Each fill books one transaction per leg.
+                     "fills": max(1, len(group) // len(legs)),
+                     "description": desc, "source": "api", "legs": legs})
+    rows.sort(key=lambda r: (r["executed_at"], r["ref"]))
+    return rows, skipped

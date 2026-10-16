@@ -99,6 +99,16 @@ STATEMENTS_DIR = Path(os.getenv("TRADE_STATEMENTS_DIR")
 # statement whose last row is that fill must still supersede the alert's row,
 # or the fill counts twice (alert # and statement REF # are different series).
 STATEMENT_EMAIL_GRACE_MIN = 10
+# An API sync supersedes the alert-logged rows of its span. An alert is
+# stamped with the fill's own time (they matched the API to the second on
+# 2026-10-15), so a minute past the last synced fill is enough; a longer
+# grace would delete alerts for fills the API hasn't listed yet.
+SCHWAB_SYNC_ALERT_GRACE_S = 60
+# With nothing authoritative in the log yet, a sync reaches back this far
+# (Schwab's one-year cap on /transactions). After that it resumes a day
+# before the newest synced or imported row — the overlap is free, since a
+# re-synced order replaces itself.
+SCHWAB_SYNC_FIRST_DAYS = 365
 # Position grouping tries every subset of the open trades touching a new trade
 # (2^n). The statement's worst tangle is 6; past this the trades stay grouped
 # as one unresolved position rather than stall the turn.

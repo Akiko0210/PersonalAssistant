@@ -317,6 +317,18 @@ unit-tested without a microphone, speakers, or an API key.
       only after a successful import, so the voice tool's "latest statement"
       is never a refused file. That folder defaults to `data/` because a
       personal path doesn't belong in the repo.
+    - The Schwab API, via `sync_trades` (`schwab.trade_log_rows`). It
+      writes the statement's own rows: a TRD row's REF # is the
+      transaction's `orderId`, and a RAD (expiration) row's REF # is its
+      `activityId`. Local time equals the statement's to the second, and
+      the option items' `cost` sums to AMOUNT and the fee items' to the
+      fees, to the cent. Verified on 83 of 83 statement rows (2026-10-15),
+      so the `(account, ref)` key dedupes a sync against any import. It is
+      authoritative like a statement: it supersedes alert rows in its span,
+      up to a minute past its last fill, because alerts carry the fill's own
+      time. It resumes a day before the log's newest non-alert row.
+      Statements remain for history older than Schwab's one-year cap and
+      for accounts not shared with the app.
   - **Fill grammar:** thinkorswim's line format, proven on all 110 fills of
     the 2026-09-20 statement. Anything else (iron condors, /ES futures
     options) is refused, not guessed.
@@ -538,6 +550,8 @@ central list or dispatch chain.
 - **trade log** (`trade_log_tools.py`): `log_trade` (an email fill alert →
   one logged order), `import_statement` (a thinkorswim statement CSV →
   authoritative rows with fees; refused unless it ties out to its TOTAL row),
+  `sync_trades` (the same authoritative rows straight from the Schwab API,
+  every shared account, resuming where the log ends),
   `query_trade_log` (trades + exact totals + open legs, filtered by period,
   account, symbol, strategy, refs, `position`, or `record` — the positions
   serving a campaign), `trade_log_positions` (named positions, then
