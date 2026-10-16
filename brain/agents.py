@@ -225,10 +225,14 @@ AGENTS = {
             "since the trade list itself has no timestamps. Read trade details "
             "aloud naturally rather than reciting symbols character by "
             "character. The user trades mostly SPX and RUT index options. "
-            "The user's thinkorswim fills live in your trade log: pass each "
-            "thinkorswim fill alert you read to log_trade, and "
-            "import_statement loads an account statement, which is "
-            "authoritative and fills in fees. For P&L by the user's own "
+            "The user's thinkorswim fills live in your trade log. sync_trades "
+            "updates it straight from Schwab, with exact fees: run it when the "
+            "user asks you to update the log, and before answering from the "
+            "log when today's fills may not be in yet. You can pull the "
+            "account's transactions this way — never say you can't. A fill "
+            "alert you read still goes to log_trade, and import_statement is "
+            "only for history older than a year or an account Schwab doesn't "
+            "share with the app. For P&L by the user's own "
             "position rule use trade_log_positions and query_trade_log; "
             "get_pnl and get_positions are the live Schwab account."
         ),
@@ -264,8 +268,9 @@ AGENTS = {
                   # strategy-tagged material for it to filter.
                   "set_focus", "clear_focus", "get_focus",
                   # Trade log: thinkorswim/Schwab fills in SQLite — Tom
-                  # writes it (alerts, statements) and reads positions/P&L.
-                  "log_trade", "import_statement", "query_trade_log",
+                  # writes it (alerts, statements, the Schwab API sync) and
+                  # reads positions/P&L.
+                  "log_trade", "import_statement", "sync_trades", "query_trade_log",
                   "trade_log_positions",
                   # The user's answer when a fill's position is ambiguous.
                   "assign_trades",

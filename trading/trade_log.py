@@ -1,9 +1,11 @@
 """Tom's trade log: the user's thinkorswim/Schwab fills, in SQLite.
 
-Two writers feed it. Email fill alerts arrive one order at a time with no
+Three writers feed it. Email fill alerts arrive one order at a time with no
 fees (log_trade). Account statements are authoritative: they carry exact
 fees and expirations, and they replace the alert-logged rows of the span
-they cover (import_statement). There is one row per broker order, keyed
+they cover (import_statement). The Schwab API sync (sync_trades) writes the
+statement's own rows — same refs, times, cash and fees — straight from the
+broker, with the same authority. There is one row per broker order, keyed
 (account, ref); a statement's split fills of one order are merged before
 they get here. Legs live in their own table, as signed per-contract
 quantities, so no reader ever re-parses text.
@@ -38,7 +40,10 @@ _SPREADS = {
     "CONDOR": ("condor", (1, -1, -1, 1)),
     "DBL DIAG": ("double_diagonal", (1, 1, -1, -1)),
 }
-STRATEGIES = tuple(s for s, _ in _SPREADS.values())
+# "custom": an API-synced order of a shape the fill grammar has no word for
+# (an iron condor). Its legs come exact from the broker, so it is held, not
+# refused — the refusal above guards against misreading text, not shapes.
+STRATEGIES = tuple(s for s, _ in _SPREADS.values()) + ("custom",)
 
 _MONTHS = {m: i for i, m in enumerate(
     "JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC".split(), 1)}
@@ -121,7 +126,7 @@ CREATE TABLE IF NOT EXISTS trades (
     fees        REAL,               -- <= 0; NULL: not known yet (alert)
     fills       INTEGER NOT NULL DEFAULT 1,  -- broker rows merged in
     description TEXT NOT NULL,      -- the broker's line
-    source      TEXT NOT NULL,      -- 'statement' | 'email'
+    source      TEXT NOT NULL,      -- 'statement' | 'api' | 'email'
     position_id INTEGER,            -- positions.id; NULL: not assigned
     PRIMARY KEY (account, ref));
 -- An explicit position: what the user means by "the diagonal". Its legs are
