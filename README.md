@@ -99,6 +99,17 @@ Useful arguments (any launcher, or `python voice_agent.py` directly):
 ./run.sh --kb-list    # list ingested knowledge sources, then exit
 ```
 
+When a plain launch exits, the launcher starts
+`python -m scripts.analyze_session` in the background: it hands the session
+that just ended to the [Claude Code CLI](https://docs.claude.com/en/docs/claude-code)
+and writes `logs/session_<date>_<HHMM>_analyzed.md` — the issues the user hit,
+what worked, what didn't (by subsystem), the accuracy of every number the agent
+stated, and ranked fixes with code references. Needs `claude` on PATH and logged
+in (`npm install -g @anthropic-ai/claude-code`, then run `claude` once); if it
+isn't, the file says so. Run it by hand on any log with
+`python -m scripts.analyze_session logs/session_2026-10-15.log` (it takes the
+last session in that file).
+
 Per-environment notes:
 
 - **Windows** — everything works out of the box: SAPI speech (pause/resume for
@@ -337,6 +348,7 @@ data/index.json      ordered record of every note (title, date, category)
 data/working_state.db  each persona's working record (Tom's journal, Linda's notebook, Alice's list)
 knowledge/           reference PDFs/text/video you ingest + manifest.json (see below)
 logs/                dated session logs of everything that happened
+logs/*_analyzed.md   per-session write-ups (see Run)
 ```
 
 When a note-taking session ends, the agent suggests the best-fitting category and
