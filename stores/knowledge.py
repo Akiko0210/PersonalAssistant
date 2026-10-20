@@ -487,7 +487,10 @@ class KnowledgeStore:
         rows = self.query_rows(query, n, caller, focus)
         if not rows:
             return ""
-        return "\n\n".join(f"[{cite(meta)}] {' '.join(doc.split())[:400]}"
+        # Whole chunks, never a preview: unlike notes there is no read_note to
+        # fetch the rest, so a cut here is text recall can never reach (a
+        # 400-char cap hid the Big Lizard's strikes and credit for a week).
+        return "\n\n".join(f"[{cite(meta)}] {' '.join(doc.split())}"
                            for _, doc, meta, *_ in rows)
 
     def list_sources(self) -> str:
