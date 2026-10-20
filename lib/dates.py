@@ -39,6 +39,15 @@ def period_range(period=None, start=None, end=None, today=None):
     return today.isoformat(), today.isoformat()
 
 
+def zone_name(dt):
+    """The short zone name of an aware local datetime, e.g. "PDT". Windows
+    names zones in full ("Pacific Daylight Time"), so a spaced name becomes
+    its initials; macOS/Linux already say "PDT". A clock time with no zone got
+    read as Eastern (2026-10-16, "market closed just now")."""
+    name = dt.tzname() or ""
+    return "".join(w[0] for w in name.split()) if " " in name else name
+
+
 def _epoch(text, *, end):
     """Local epoch seconds for an ISO date or datetime. A bare date is a whole
     day, so its `end` is 23:59:59; a naive datetime is local time, which is

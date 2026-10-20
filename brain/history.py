@@ -15,6 +15,7 @@ import logging
 from datetime import datetime
 
 from lib.atomic_io import read_json, write_json_atomic
+from lib.dates import zone_name
 
 log = logging.getLogger("history")
 
@@ -27,25 +28,27 @@ def now_iso():
 
 
 def time_label(ts):
-    """A stored `ts` as spoken-style local time, e.g. "1:47pm 8/20/2026".
-    Built by hand because strftime has no portable no-leading-zero directive.
+    """A stored `ts` as spoken-style local time, e.g. "1:47pm PDT 8/20/2026".
+    Converted to local and zone-named so no reader guesses the zone (Tom read
+    a bare "4:37" as Eastern, 2026-10-16). Built by hand because strftime has
+    no portable no-leading-zero directive.
     Empty or unparseable stamps give "" — "time unknown" stays silent rather
     than inventing a moment. Shared by the user-message prefix below and the
     Background's item labels (brain/context.py)."""
     if not ts:
         return ""
     try:
-        dt = datetime.fromisoformat(ts)
+        dt = datetime.fromisoformat(ts).astimezone()
     except ValueError:
         return ""
     hour = dt.hour % 12 or 12
     ampm = "am" if dt.hour < 12 else "pm"
-    return f"{hour}:{dt.minute:02d}{ampm} {dt.month}/{dt.day}/{dt.year}"
+    return f"{hour}:{dt.minute:02d}{ampm} {zone_name(dt)} {dt.month}/{dt.day}/{dt.year}"
 
 
 def time_prefix(ts):
     """time_label wrapped as the prefix the model sees on user messages,
-    "(1:47pm 8/20/2026) " — or "" when the stamp is unknown."""
+    "(1:47pm PDT 8/20/2026) " — or "" when the stamp is unknown."""
     label = time_label(ts)
     return f"({label}) " if label else ""
 

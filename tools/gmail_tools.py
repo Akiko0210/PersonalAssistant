@@ -12,9 +12,11 @@ the default the descriptions steer toward.
 import base64
 import json
 from email.message import EmailMessage
+from email.utils import parsedate_to_datetime
 
 import requests
 
+from lib.dates import zone_name
 from tools import tool
 
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -22,6 +24,18 @@ TIMEOUT = 30.0
 
 
 # --- helpers -----------------------------------------------------------------
+def _local_date(header):
+    """An email Date header in local time, e.g. "Tue Oct 13, 3:27 PM PDT".
+    Raw headers carry the sender's zone, and agents read them aloud as local:
+    all 10 clock-time misses in the 2026-10-13..20 log audit. Unparseable
+    headers pass through as-is."""
+    try:
+        dt = parsedate_to_datetime(header).astimezone()
+    except (TypeError, ValueError):
+        return header or "?"
+    return f"{dt:%a %b} {dt.day}, {dt.hour % 12 or 12}:{dt:%M %p} {zone_name(dt)}"
+
+
 def _auth():
     """(headers, None) or (None, spoken-problem). Imports inside the call so
     missing google-auth deps or a missing token degrade to a sentence instead
@@ -110,7 +124,7 @@ def search_email_threads(ctx, args):
             "thread_id": t["id"],
             "subject": h.get("subject", "(no subject)"),
             "from": h.get("from", "?"),
-            "date": h.get("date", "?"),
+            "date": _local_date(h.get("date")),
             "messages": len(msgs),
             "snippet": t.get("snippet", "")[:200],
         })
@@ -148,7 +162,7 @@ def get_email_thread(ctx, args):
             "message_id": m.get("id"),
             "from": h.get("from", "?"),
             "to": h.get("to", "?"),
-            "date": h.get("date", "?"),
+            "date": _local_date(h.get("date")),
             "subject": h.get("subject", ""),
             "body": _plain_text(m.get("payload", {})),
         })

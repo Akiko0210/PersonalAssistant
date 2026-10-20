@@ -12,7 +12,7 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 
 import config as cfg
-from brain import agents, context
+from brain import agents, context, history
 from brain.memory import ConversationMemory, exchange_id
 from lib.dates import period_range, window_epochs
 from tests.store_fixtures import FakeCol, memory_over
@@ -148,7 +148,7 @@ class TestRetrieval(unittest.TestCase):
         out = self.mem.fetch([exchange_id("alice", b), exchange_id("alice", a), "xc_nope"],
                              caller="alice")
         self.assertLess(out.index("first thing"), out.index("second thing"))
-        self.assertIn("[9:24am 9/18/2026]", out)
+        self.assertIn(f"[{history.time_label(a['ts'])}]", out)
         self.assertIn("(1 id(s) not found.)", out)
         self.assertIn("None of those", self.mem.fetch(["xc_nope"], caller="alice"))
 

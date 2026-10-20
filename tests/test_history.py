@@ -8,8 +8,10 @@ launch. Run with:  python -m unittest discover tests
 import os
 import tempfile
 import unittest
+from datetime import datetime, timezone
 
 from brain import history
+from lib.dates import zone_name
 
 
 def user(text):
@@ -92,16 +94,30 @@ class TestTrim(unittest.TestCase):
         self.assertEqual(history.trim(h, 40), h)
 
 
+def local(*args):
+    """A wall time in this machine's zone, as now_iso stamps it — so the pinned
+    hours hold wherever the tests run."""
+    return datetime(*args).astimezone()
+
+
 class TestTimePrefix(unittest.TestCase):
-    def test_renders_without_leading_zeros(self):
-        self.assertEqual(history.time_prefix("2026-08-20T13:47:12-04:00"),
-                         "(1:47pm 8/20/2026) ")
+    def test_renders_without_leading_zeros_and_names_the_zone(self):
+        dt = local(2026, 8, 20, 13, 47, 12)
+        self.assertEqual(history.time_prefix(dt.isoformat()),
+                         f"(1:47pm {zone_name(dt)} 8/20/2026) ")
 
     def test_noon_and_midnight_are_twelve(self):
-        self.assertEqual(history.time_prefix("2026-08-20T12:05:00-04:00"),
-                         "(12:05pm 8/20/2026) ")
-        self.assertEqual(history.time_prefix("2026-08-20T00:05:00-04:00"),
-                         "(12:05am 8/20/2026) ")
+        self.assertTrue(history.time_label(
+            local(2026, 8, 20, 12, 5).isoformat()).startswith("12:05pm "))
+        self.assertTrue(history.time_label(
+            local(2026, 8, 20, 0, 5).isoformat()).startswith("12:05am "))
+
+    def test_a_stamp_from_another_zone_reads_in_local_time(self):
+        # A label is spoken to a user in their own zone; the stamp's offset
+        # must not leak through as its wall time.
+        utc = datetime(2026, 8, 20, 20, 47, tzinfo=timezone.utc)
+        self.assertEqual(history.time_label(utc.isoformat()),
+                         history.time_label(utc.astimezone().isoformat()))
 
     def test_unknown_time_renders_silent(self):
         # "" is the pre-feature "time unknown" convention; junk must not crash

@@ -2,6 +2,7 @@
 
 from datetime import datetime
 
+from lib.dates import zone_name
 from tools import tool
 
 
@@ -15,4 +16,5 @@ from tools import tool
     "input_schema": {"type": "object", "properties": {}},
 })
 def get_current_time(ctx, args):
-    return datetime.now().strftime("%A, %B %d, %Y at %I:%M %p")
+    now = datetime.now().astimezone()
+    return now.strftime("%A, %B %d, %Y at %I:%M %p ") + zone_name(now)

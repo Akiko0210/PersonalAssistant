@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import config as cfg
+from brain.history import time_label
 from brain.llm.main import Claude, cached
 from brain.llm import deepseek
 
@@ -79,7 +80,7 @@ class TestCached(unittest.TestCase):
         # the model can see time pass between messages (the 9am "nothing to do
         # tonight" failure, session_2026-08-11.log 2026-08-20 09:04).
         wire = cached(self.HISTORY)
-        self.assertEqual(wire[0]["content"], "(9:00am 8/11/2026) hi")
+        self.assertEqual(wire[0]["content"], f"({time_label(self.HISTORY[0]['ts'])}) hi")
 
     def test_assistant_and_unstamped_messages_stay_bare(self):
         wire = cached([
