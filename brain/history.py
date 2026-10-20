@@ -28,10 +28,12 @@ def now_iso():
 
 
 def time_label(ts):
-    """A stored `ts` as spoken-style local time, e.g. "1:47pm PDT 8/20/2026".
-    Converted to local and zone-named so no reader guesses the zone (Tom read
-    a bare "4:37" as Eastern, 2026-10-16). Built by hand because strftime has
-    no portable no-leading-zero directive.
+    """A stored `ts` as spoken-style local time, e.g. "Thu 1:47pm PDT
+    8/20/2026". Converted to local and zone-named so no reader guesses the
+    zone (Tom read a bare "4:37" as Eastern, 2026-10-16), and weekday-named
+    so none works the day out (Tom said "Sunday afternoon" on a Monday,
+    2026-10-19). Built by hand because strftime has no portable
+    no-leading-zero directive.
     Empty or unparseable stamps give "" — "time unknown" stays silent rather
     than inventing a moment. Shared by the user-message prefix below and the
     Background's item labels (brain/context.py)."""
@@ -43,12 +45,13 @@ def time_label(ts):
         return ""
     hour = dt.hour % 12 or 12
     ampm = "am" if dt.hour < 12 else "pm"
-    return f"{hour}:{dt.minute:02d}{ampm} {zone_name(dt)} {dt.month}/{dt.day}/{dt.year}"
+    return (f"{dt:%a} {hour}:{dt.minute:02d}{ampm} {zone_name(dt)} "
+            f"{dt.month}/{dt.day}/{dt.year}")
 
 
 def time_prefix(ts):
     """time_label wrapped as the prefix the model sees on user messages,
-    "(1:47pm PDT 8/20/2026) " — or "" when the stamp is unknown."""
+    "(Thu 1:47pm PDT 8/20/2026) " — or "" when the stamp is unknown."""
     label = time_label(ts)
     return f"({label}) " if label else ""
 

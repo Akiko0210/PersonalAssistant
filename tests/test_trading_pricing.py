@@ -92,7 +92,7 @@ class TestPriceOrderTool(unittest.TestCase):
         out = self.price({
             "2026-07-24": quote(20.1, 20.5, iv=0.14, delta=0.5, gamma=0.004, theta=-6.0, vega=2.0),
             "2026-08-07": quote(30.1, 30.5, iv=0.15, delta=0.52, gamma=0.002, theta=-3.0, vega=5.0)})
-        self.assertIn("STO 2 2026-07-24 6350 Call: bid 20.10, ask 20.50, mid 20.30", out)
+        self.assertIn("STO 2 2026-07-24 Fri 6350 Call: bid 20.10, ask 20.50, mid 20.30", out)
         self.assertIn("IV 14.0%, delta +0.500", out)
         self.assertIn("Net mid 20.00 debit", out)
         self.assertIn("theta +6.00 a day", out)

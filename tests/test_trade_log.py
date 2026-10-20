@@ -238,7 +238,7 @@ class TestPositions(LogBase):
             self.assertIn(f"#{ref} is in P1 'Nov 4 diagonal'",
                           self.log(ref, line, hour))
         legs = self.open_legs(position=1)
-        self.assertIn("+1 SPX 2026-11-04 7750P", legs)
+        self.assertIn("+1 SPX 2026-11-04 Wed 7750P", legs)
         self.assertNotIn("2026-10-15", legs)       # no phantom short leg
         self.assertEqual(self.open_legs(record=self.rid), legs)
 
