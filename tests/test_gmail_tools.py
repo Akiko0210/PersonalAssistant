@@ -6,11 +6,13 @@ import json
 import logging
 import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 import config as cfg
 from brain import agents
+from lib.dates import zone_name
 from tools import ToolContext, api_tools, dispatch
 from tools import gmail_tools
 
@@ -152,7 +154,7 @@ class TestSearchThreads(unittest.TestCase):
                 {"payload": {"headers": [
                     {"name": "Subject", "value": "Lunch"},
                     {"name": "From", "value": "dana@x.com"},
-                    {"name": "Date", "value": "Mon"},
+                    {"name": "Date", "value": "Tue, 13 Oct 2026 18:27:00 -0400"},
                 ]}},
                 {"payload": {"headers": []}},
             ]}),
@@ -166,6 +168,33 @@ class TestSearchThreads(unittest.TestCase):
         t = out["threads"][0]
         self.assertEqual((t["thread_id"], t["subject"], t["from"], t["messages"]),
                          ("t1", "Lunch", "dana@x.com", 2))
+        self.assertEqual(t["date"],
+                         gmail_tools._local_date("Tue, 13 Oct 2026 18:27:00 -0400"))
+
+
+# The audit's own case only reads as a literal in the user's zone.
+PACIFIC = zone_name(datetime(2026, 10, 13, 12).astimezone()) == "PDT"
+
+
+class TestLocalDate(unittest.TestCase):
+    """Raw Date headers carry the sender's zone and agents read them aloud as
+    local: "5:27pm" for an email sent at 3:27 PM Pacific — all 10 clock-time
+    misses in the 2026-10-13..20 log audit."""
+
+    def test_one_instant_reads_the_same_whatever_the_senders_zone(self):
+        east = gmail_tools._local_date("Tue, 13 Oct 2026 18:27:00 -0400")
+        self.assertEqual(east, gmail_tools._local_date("Tue, 13 Oct 2026 22:27:00 +0000"))
+        here = datetime(2026, 10, 13, 22, 27, tzinfo=timezone.utc).astimezone()
+        self.assertTrue(east.endswith(f":27 {here:%p} {zone_name(here)}"), east)
+
+    @unittest.skipUnless(PACIFIC, "the literal holds only in Pacific time")
+    def test_audit_example_reads_in_pacific(self):
+        self.assertEqual(gmail_tools._local_date("Tue, 13 Oct 2026 18:27:00 -0400"),
+                         "Tue Oct 13, 3:27 PM PDT")
+
+    def test_an_unparseable_header_passes_through(self):
+        self.assertEqual(gmail_tools._local_date("Mon"), "Mon")
+        self.assertEqual(gmail_tools._local_date(None), "?")
 
 
 class TestGetThread(unittest.TestCase):

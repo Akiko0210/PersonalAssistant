@@ -6,6 +6,7 @@ before: the raw utterance."""
 import json
 import unittest
 
+from brain.history import time_label
 from brain.query import Query, understand
 from lib.dates import window_epochs
 
@@ -53,8 +54,9 @@ class TestUnderstand(unittest.TestCase):
         q = understand(ask, "tell me about my list", [], now=NOW,
                        known_entities={"todo:list-2026-09-17": "2026-09-17T09:45:23-07:00",
                                        "todo:list": "2026-09-15T09:06:00-07:00"})
-        self.assertIn("todo:list-2026-09-17 (as of 9:45am 9/17/2026), "
-                      "todo:list (as of 9:06am 9/15/2026)", seen["prompt"])
+        self.assertIn(f"todo:list-2026-09-17 (as of {time_label('2026-09-17T09:45:23-07:00')}), "
+                      f"todo:list (as of {time_label('2026-09-15T09:06:00-07:00')})",
+                      seen["prompt"])
         self.assertEqual(q.entities, ("todo:list-2026-09-17",))
 
     def test_the_prompt_carries_the_recent_turns_time_and_keys(self):

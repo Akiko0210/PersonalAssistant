@@ -14,6 +14,7 @@ from unittest import mock
 
 import config as cfg
 from brain import context
+from brain.history import time_label
 from brain.memory import Rows, exchange_id
 from brain.query import Query
 from stores import chroma_store
@@ -182,8 +183,9 @@ class TestFacts(unittest.TestCase):
                                      owner="alice", memory=memory, facts=facts,
                                      kb=fake_kb(), now=NOW)
         self.assertEqual(facts.calls, [("todo:2026-09-18",)])
-        self.assertIn('<item source="fact" entity="todo:2026-09-18" as_of="9:34am '
-                      '9/18/2026" age="2 hours ago" from="xc_1,xc_2">\nItems: one, two.',
+        as_of = time_label("2026-09-18T09:34:37-07:00")
+        self.assertIn(f'<item source="fact" entity="todo:2026-09-18" as_of="{as_of}" '
+                      'age="2 hours ago" from="xc_1,xc_2">\nItems: one, two.',
                       pull.block)
         self.assertLess(pull.block.index('source="fact"'),
                         pull.block.index('source="conversation"'))
@@ -352,8 +354,10 @@ class TestRender(unittest.TestCase):
                        ts="2026-09-17T09:43:11", approx=True)
         pull = context.build_context("q", owner="alice", kb=fake_kb(), now=NOW,
                                      memory=fake_memory([exact, approx]))
-        self.assertIn('when="9:43am 9/17/2026" age="2 hours ago"', pull.block)
-        self.assertIn('when="on or before 9:43am 9/17/2026">', pull.block)
+        self.assertIn(f'when="{time_label("2026-09-17T09:43:11-07:00")}" '
+                      'age="2 hours ago"', pull.block)
+        self.assertIn(f'when="on or before {time_label("2026-09-17T09:43:11")}">',
+                      pull.block)
 
 
 class TestRedundancy(unittest.TestCase):
