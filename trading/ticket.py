@@ -24,6 +24,7 @@ import time
 from dataclasses import dataclass, field, asdict
 
 from lib.atomic_io import write_json_atomic
+from lib.dates import with_weekday
 from trading import config as tcfg
 from trading import strategies as tstrat
 from trading.models import Leg
@@ -194,7 +195,7 @@ class Ticket:
         if not self.legs:
             return f"Empty ticket on {self.underlying}."
         legs = "; ".join(
-            f"{l.code} {l.size} {l.expiration} {l.strike:g} {l.cp}"
+            f"{l.code} {l.size} {with_weekday(l.expiration)} {l.strike:g} {l.cp}"
             for l in self.legs)
         price = (f" at {self.limit_price:.2f} {self.price_effect}"
                  if self.limit_price else ", no price set")

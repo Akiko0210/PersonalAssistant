@@ -28,7 +28,7 @@ Design rules:
 from datetime import date, timedelta
 
 from brain import agents
-from lib.dates import PERIODS, period_range
+from lib.dates import PERIODS, period_range, with_weekday
 from tools import tool
 from trading import accounts as taccounts
 from trading import config as tcfg
@@ -397,7 +397,8 @@ def list_expirations(ctx, args):
         return f"Couldn't load the {symbol} chain: {e}"
     n = max(1, min(int(args.get("count") or 6), 20))
     exps = chain.expirations[:n]
-    return (f"Nearest {symbol} expirations: " + ", ".join(exps) +
+    return (f"Nearest {symbol} expirations: " +
+            ", ".join(map(with_weekday, exps)) +
             f". ({len(chain.expirations)} total.)")
 
 
@@ -618,7 +619,8 @@ def price_order(ctx, args):
         return format(x, spec) if x is not None else "n/a"
     lines = []
     for leg, q in quotes:
-        name = f"{leg.code} {leg.size} {leg.expiration} {leg.strike:g} {leg.cp}"
+        name = (f"{leg.code} {leg.size} {with_weekday(leg.expiration)} "
+                f"{leg.strike:g} {leg.cp}")
         if q is None or q.mid is None:
             lines.append(f"{name}: no live quote")
             continue

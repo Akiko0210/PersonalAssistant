@@ -39,6 +39,18 @@ def period_range(period=None, start=None, end=None, today=None):
     return today.isoformat(), today.isoformat()
 
 
+def with_weekday(iso):
+    """An ISO date with its short weekday, "2026-10-20 Tue", for any date a
+    tool writes out for the model. Given a bare date the model works the
+    weekday out itself and gets it wrong ("Oct 20 ... expires Monday", a
+    Tuesday — five times, 2026-10-13..20). Anything unparseable comes back
+    unchanged rather than with an invented weekday."""
+    try:
+        return f"{iso} {date.fromisoformat(iso):%a}"
+    except (TypeError, ValueError):
+        return iso
+
+
 def zone_name(dt):
     """The short zone name of an aware local datetime, e.g. "PDT". Windows
     names zones in full ("Pacific Daylight Time"), so a spaced name becomes

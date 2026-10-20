@@ -101,16 +101,18 @@ def local(*args):
 
 
 class TestTimePrefix(unittest.TestCase):
-    def test_renders_without_leading_zeros_and_names_the_zone(self):
-        dt = local(2026, 8, 20, 13, 47, 12)
+    def test_renders_weekday_without_leading_zeros_and_names_the_zone(self):
+        # The weekday is spelled out: Tom said "Sunday afternoon" at this
+        # very moment, a Monday, from a stamp without one (2026-10-19).
+        dt = local(2026, 10, 19, 15, 48, 12)
         self.assertEqual(history.time_prefix(dt.isoformat()),
-                         f"(1:47pm {zone_name(dt)} 8/20/2026) ")
+                         f"(Mon 3:48pm {zone_name(dt)} 10/19/2026) ")
 
     def test_noon_and_midnight_are_twelve(self):
         self.assertTrue(history.time_label(
-            local(2026, 8, 20, 12, 5).isoformat()).startswith("12:05pm "))
+            local(2026, 8, 20, 12, 5).isoformat()).startswith("Thu 12:05pm "))
         self.assertTrue(history.time_label(
-            local(2026, 8, 20, 0, 5).isoformat()).startswith("12:05am "))
+            local(2026, 8, 20, 0, 5).isoformat()).startswith("Thu 12:05am "))
 
     def test_a_stamp_from_another_zone_reads_in_local_time(self):
         # A label is spoken to a user in their own zone; the stamp's offset

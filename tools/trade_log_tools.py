@@ -21,7 +21,7 @@ from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from lib.dates import PERIODS, period_range
+from lib.dates import PERIODS, period_range, with_weekday
 from stores import working_state
 from tools import tool
 from trading import accounts as taccounts
@@ -59,13 +59,14 @@ def _legs(legs):
     """Net legs {(symbol, exp, strike, type): qty} as one phrase. An expired
     leftover says so: unmarked, it was read aloud as a live short leg."""
     today = date.today().isoformat()
-    return ", ".join(f"{q:+d} {s} {e} {k:g}{cp}"
+    return ", ".join(f"{q:+d} {s} {with_weekday(e)} {k:g}{cp}"
                      + (" (expired, not yet cleared)" if e < today else "")
                      for (s, e, k, cp), q in sorted(legs.items()))
 
 
 def _trade_line(t, with_account=False):
-    parts = [t["ref"], t["executed_at"][:16].replace("T", " "),
+    when = t["executed_at"]
+    parts = [t["ref"], f"{with_weekday(when[:10])} {when[11:16]}",
              t["symbol"], t["strategy"]]
     if t["quantity"] is not None:
         parts.append(f"{t['quantity']:+d} @{t['price']:.2f}")
@@ -76,7 +77,8 @@ def _trade_line(t, with_account=False):
         parts.append(f"cash {t['amount']:+,.2f} fees {fees}")
     if with_account:
         parts.insert(0, t["account"])
-    legs = ", ".join(f"{q:+d} {e} {k:g}{cp}" for e, k, cp, q in t["legs"])
+    legs = ", ".join(f"{q:+d} {with_weekday(e)} {k:g}{cp}"
+                     for e, k, cp, q in t["legs"])
     return " ".join(parts) + " | " + legs
 
 
