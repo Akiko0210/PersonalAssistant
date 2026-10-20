@@ -387,7 +387,14 @@ unit-tested without a microphone, speakers, or an API key.
 5. `say()` speaks the reply. While speaking, every mic frame is fed to a
    `BargeInDetector`; if it fires, TTS stops, the captured speech is pushed back
    for the next turn, and (optionally) the unsaid tail is remembered for a
-   "continue" command.
+   "continue" command. Every exit records how much was actually spoken
+   (`last_heard`): SAPI reports the word it is on (`Speaker.spoken_chars`);
+   the other backends are estimated from speaking time, pauses excluded. A
+   reply held because the user was already talking was heard not at all.
+   `llm.settle_reply` then rewrites the reply in history to that heard part,
+   marked `REPLY_CUT_MARK` / `REPLY_UNHEARD_MARK` — the agent once argued
+   from an answer it never said aloud (113 unspoken replies in two weeks,
+   issue #26). A "continue" resume settles again with the longer part.
 6. `_after_reply` drains, in fixed order, everything the reply's tool calls
    deferred: background delegations start (`ask_agent`), a prepared note runs
    the folder-choice dialogue and is filed (`save_conversation_note`), and a
@@ -396,10 +403,11 @@ unit-tested without a microphone, speakers, or an API key.
    drained right there — deferred work must never outlive the turn that
    created it (that leak once ate a "switch me back" command).
 7. The transcript is saved to `data/history_<key>.json` after the turn. The
-   exchange that just ended is handed to the memory worker (`_remember`),
-   which — while the reply is being spoken — embeds it into the persona's
-   index and runs the fact extractor over it (`brain/facts.py`). Nothing
-   after the reply blocks speech.
+   exchange is handed to the memory worker (`_remember`) once settled —
+   so memory holds what the user heard — and the worker embeds it into the
+   persona's index and runs the fact extractor over it (`brain/facts.py`)
+   on its own thread; nothing blocks the next turn. A turn nobody settles
+   (a script, a turn that raised) is remembered whole at the next one.
 
 ### Personas and background delegation
 

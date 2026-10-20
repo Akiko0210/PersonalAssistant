@@ -38,6 +38,10 @@ class FakeTTS:
         self.on_poll = on_poll    # fires mid-reply: a click landing
         self.click_at = click_at
         self.stopped = False
+        self.at = 0               # spoken_chars: where the voice has got to
+
+    def spoken_chars(self):
+        return self.at
 
     def begin(self, text):
         self.spoken.append(text)

@@ -92,6 +92,11 @@ class SapiSpeaker:
             self._voice.Resume()
             self._paused = False
 
+    def spoken_chars(self) -> int:
+        """Character offset of the word SAPI is saying now, from the voice's
+        own status — exact, where a timing estimate drifts with the voice."""
+        return self._voice.Status.InputWordPosition
+
     def stop(self):
         # Purge the current + pending speech, ending playback immediately.
         # Resume first: a purge issued to a paused voice isn't acted on until

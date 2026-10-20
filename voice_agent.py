@@ -170,6 +170,13 @@ class Agent:
         self.running = True
         self._interrupted_reply = None   # full text of the last interrupted reply
         self._interrupted_remaining = None  # unsaid portion after barge-in
+        self._resume_from = 0            # where _interrupted_remaining starts in it
+        self._interrupted_heard = 0      # characters of it the user had heard
+        # What the last say() actually got out: the spoken prefix of its text
+        # (all of it unless a barge-in, a typed message or a gesture cut it,
+        # "" when it was held unspoken). The reply sites hand it to
+        # llm.settle_reply so memory keeps only what the user heard (#26).
+        self.last_heard = ""
         # Background delegation (ask_agent): finished tasks queue their spoken
         # result here; it is delivered only at utterance boundaries, in the
         # working persona's own voice (see _deliver_interjections). The event
@@ -297,6 +304,7 @@ class Agent:
         reply = (self._converse_with_followups(text) if followups
                  else self.llm.converse(text))
         if not reply:
+            self.llm.settle_reply("", "")  # nothing to say; the turn still counts
             # Expected only when note-taking or quit cut the turn short. An
             # empty reply with nothing silencing it means the model produced
             # nothing — that must never pass silently again (a truncated tool
@@ -309,6 +317,7 @@ class Agent:
             return
         self.log.info("agent: %s", reply)
         interrupted = self.say(reply, save_resume=True)
+        self.llm.settle_reply(reply, self.last_heard)
         self._after_reply(interrupted)
 
     def _toggle_note(self):
@@ -420,7 +429,20 @@ class Agent:
                 self.log.info("resuming interrupted reply"
                               if asked else
                               "(just an acknowledgement — carrying on)")
+                full, start = self._interrupted_reply, self._resume_from
+                before = self._interrupted_heard
                 interrupted = self.say(self._interrupted_remaining, save_resume=True)
+                # The resumed text is full[start:]; what it got out extends
+                # what the user had already heard of the reply.
+                heard = max(before, start + len(self.last_heard))
+                self.llm.settle_reply(full, full[:heard])
+                if interrupted and self._interrupted_reply is not None:
+                    # Cut again: say() saved the tail relative to the resumed
+                    # text — re-base it on the whole reply, so a second
+                    # "continue" still accounts against it.
+                    self._resume_from += start
+                    self._interrupted_heard = heard
+                    self._interrupted_reply = full
                 if not interrupted:
                     self._interrupted_reply = None
                     self._interrupted_remaining = None
@@ -478,6 +500,8 @@ class Agent:
                 if forwarded:
                     self.log.info("agent: %s", forwarded)
                     interrupted = self.say(forwarded, save_resume=True)
+                self.llm.settle_reply(forwarded,
+                                      self.last_heard if forwarded else "")
             # The forwarded turn ran INSIDE this one — past the pending-note
             # check above. Drain whatever it queued here, where it happened,
             # instead of letting it leak into the next turn.
@@ -744,9 +768,12 @@ class Agent:
                   prepared note) — voice barge-in still works there.
         save_resume: remember the unsaid tail for the "continue" command.
 
+        Every exit records the spoken part of `text` in self.last_heard.
+
         Falls back to plain blocking speech for short status acks (voice=False) or
         when the TTS backend can't speak asynchronously."""
         self.idle.stop()  # never let the thinking cue overlap spoken output
+        self.last_heard = text
         if not (voice and cfg.BARGE_IN and self.tts.supports_async):
             self.tts.speak(text)
             return False
@@ -762,15 +789,13 @@ class Agent:
         onset = self._drain_buffered_speech()
         if onset is not None:
             self.audio.pushback(onset)
-            if save_resume:
-                self._save_interrupted(text, 0.0)
+            self._cut(text, 0, save_resume)
             self.log.info("(you were already talking — holding the reply)")
             return True
         # Only clicks during *this* utterance may act on it, and a verdict left
         # over from an earlier one must not release the first pause of this one.
         self.hush.clear()
         self.resume_speech.clear()
-        start = time.monotonic()
         self.tts.begin(text)
         detector = BargeInDetector()
 
@@ -782,12 +807,15 @@ class Agent:
             # depends on which gesture it turns out to be.
             if commands and self.hush.is_set():
                 self.hush.clear()
+                at = self.tts.spoken_chars()  # before the pause: what was heard
                 if not self._hold_for_gesture():
+                    self._cut(text, at, save_resume=False)
                     return False
                 continue
             if commands and self.silence.is_set():
                 # A silencing command with no click behind it — an AirPods
                 # Next/Previous, already decoded in firmware.
+                self._cut(text, self.tts.spoken_chars(), save_resume=False)
                 self.tts.stop()
                 return False
             if commands and not self.typed.empty():
@@ -796,19 +824,17 @@ class Agent:
                 # answer it. Not gated on `voice`: no microphone is involved,
                 # and it returns False for the same reason — nothing is
                 # buffered for capture, the message is already queued.
+                self._cut(text, self.tts.spoken_chars(), save_resume)
                 self.tts.stop()
-                if save_resume:
-                    self._save_interrupted(text, time.monotonic() - start)
                 self.log.info("(message typed — stopping the reply)")
                 return False
             res = self.audio.poll_speech(timeout=0.1, return_frame=True)
             if res is None:
                 continue
             if detector.feed(*res):
+                self._cut(text, self.tts.spoken_chars(), save_resume)
                 self.tts.stop()
                 self.audio.pushback(detector.run)  # give the words back to capture
-                if save_resume:
-                    self._save_interrupted(text, time.monotonic() - start)
                 self.log.info("(interrupted — listening)")
                 return True
 
@@ -882,16 +908,28 @@ class Agent:
             if voiced > cfg.TRIGGER_RATIO * ring.maxlen:
                 return [f for f, _ in ring]
 
-    def _save_interrupted(self, full_text: str, elapsed_s: float):
-        words = full_text.split()
-        words_spoken = int(elapsed_s * cfg.TTS_RATE / 60)
-        remaining_words = words[max(0, words_spoken - 2):]  # overlap a couple for context
-        if remaining_words:
-            self._interrupted_reply = full_text
-            self._interrupted_remaining = " ".join(remaining_words)
-        else:
+    def _cut(self, text: str, at: int, save_resume: bool):
+        """Speech of `text` stopped with the voice at character `at` (from
+        tts.spoken_chars, read before the stop — a purge resets it). The word
+        in progress was cut, so the user heard everything before it."""
+        self.last_heard = text[:at].rstrip()
+        if save_resume:
+            self._save_interrupted(text, len(self.last_heard))
+
+    def _save_interrupted(self, full_text: str, heard: int):
+        """Keep the unheard tail of `full_text` (the first `heard` characters
+        reached the user) for "continue" and filler resumes, starting a
+        couple of words back for context."""
+        starts = [m.start() for m in re.finditer(r"\S+", full_text)]
+        done = sum(1 for s in starts if s < heard)  # whole words heard
+        if done >= len(starts):
             self._interrupted_reply = None
             self._interrupted_remaining = None
+            return
+        self._resume_from = starts[max(0, done - 2)]
+        self._interrupted_heard = heard
+        self._interrupted_reply = full_text
+        self._interrupted_remaining = full_text[self._resume_from:]
 
     def run_notetaking(self):
         note_id = self.store.new_session()

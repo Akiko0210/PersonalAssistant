@@ -168,6 +168,7 @@ class _Shell:
             take_pending_delegations=lambda: [],
             take_pending_note=lambda: None,
             take_pending_switch=lambda: None,
+            settle_reply=lambda reply, heard: None,
         )
         self.audio = SimpleNamespace(
             muted=threading.Event(),
@@ -188,6 +189,7 @@ class _Shell:
 
     def say(self, text, **kw):
         self.spoken.append((text, kw))
+        self.last_heard = text
         return False
 
     def _save_pending_note(self, pending, saver=None, excerpt=None):

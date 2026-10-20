@@ -72,6 +72,7 @@ class FakeLLM:
     def __init__(self):
         self.calls = []
         self.unanswered = []
+        self.settled = []     # (reply, heard) per settle_reply
 
     def converse(self, text):
         self.calls.append(text)
@@ -79,6 +80,9 @@ class FakeLLM:
 
     def record_unanswered(self, text):
         self.unanswered.append(text)
+
+    def settle_reply(self, reply, heard):
+        self.settled.append((reply, heard))
 
     def take_pending_note(self):
         return None
@@ -112,12 +116,16 @@ def make_agent(*, heard=(), utterances=None, poll_frames=None, await_seq=None,
     agent.stt = FakeSTT(heard)
     agent.llm = FakeLLM()
     agent._speaking_voice = ""
-    agent._interrupted_reply = "the full reply" if interrupted_remaining else None
+    # A pending resume as _save_interrupted leaves it: the tail is the whole
+    # reply, nothing heard yet.
+    agent._interrupted_reply = interrupted_remaining
     agent._interrupted_remaining = interrupted_remaining
+    agent._resume_from = agent._interrupted_heard = 0
     agent.spoken = []
 
     def fake_say(text, **kwargs):
         agent.spoken.append(text)
+        agent.last_heard = text
         return False  # finishes uninterrupted
 
     agent.say = fake_say
