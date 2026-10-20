@@ -278,13 +278,14 @@ class Agent:
         self.typed.put((text, target))
         self.interject.set()
 
-    def show_card(self, heading, text):
-        """Put a tool's answer on the display window, from the tool dispatch
-        on the turn thread. The dashboard's handler threads only ever read
-        the whole dict, which is replaced, never edited. Reopens the window
-        if the user closed it or it crashed (#28)."""
+    def show_card(self, heading, content):
+        """Put a tool's answer (its card, or its text) on the display
+        window, from the tool dispatch on the turn thread. The dashboard's
+        handler threads only ever read the whole dict, which is replaced,
+        never edited. Reopens the window if the user closed it or it crashed
+        (#28)."""
         version = (self.card or {}).get("version", 0) + 1
-        self.card = display.make_card(heading, text, version)
+        self.card = display.make_card(heading, content, version)
         if self.display is not None:
             self.display.open()
 

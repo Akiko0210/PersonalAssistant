@@ -77,11 +77,15 @@ class ToolContext:
     # recorded here. Claude.flush_tool_events folds these into the conversation
     # so the next turn knows what its tools actually did.
     events: list = field(default_factory=list)
-    # (heading, result_text) -> None: the live Agent's show_card, which puts
+    # (heading, card-or-text) -> None: the live Agent's show_card, which puts
     # a tool's answer on the display window (display/). Only the conversation
     # has one; a delegated task's fresh ToolContext leaves it None, so a
     # background answer never swaps out what the user is looking at.
     show: object = None
+    # The card a display= tool built for this call (display/card.py), from
+    # the same figures as its returned sentence. Reset by dispatch before
+    # every call; a tool that sets none (a refusal, an error) is shown as text.
+    card: dict = field(default=None)
 
     def record_event(self, text):
         """Record what a tool actually did, for the model to see next turn.
@@ -98,8 +102,9 @@ def tool(schema, display=None):
     """Register a tool. `schema` is the full Anthropic tool dict (name,
     description, input_schema); the decorated function is its handler.
     `display`, a (ctx, args) -> heading function, puts every answer the tool
-    gives on the display window under that heading — the result string
-    itself, so the screen can never disagree with what is spoken from it."""
+    gives on the display window under that heading: the card it left in
+    ctx.card, built from the same figures as its returned string, or that
+    string itself when it built none."""
     def deco(fn):
         _REGISTRY[schema["name"]] = (schema, fn)
         if display:
@@ -125,6 +130,7 @@ def dispatch(ctx, name, args):
         return f"Unknown tool: {name}"
     _, handler = entry
     args = args or {}
+    ctx.card = None
     try:
         out = handler(ctx, args)
     except Exception as e:  # surface tool errors back to the model
@@ -132,7 +138,7 @@ def dispatch(ctx, name, args):
     heading = _DISPLAY.get(name)
     if heading and ctx.show:
         try:
-            ctx.show(heading(ctx, args), out)
+            ctx.show(heading(ctx, args), ctx.card or out)
         except Exception:  # the window is an aid; it must never cost the answer
             log.exception("display card for %s failed", name)
     return out

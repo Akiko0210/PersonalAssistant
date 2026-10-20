@@ -78,7 +78,11 @@ DISPLAY_WINDOW = True
 # FindWindow looks the window up by this title to bring it forward, so it must
 # not collide with any other window's.
 DISPLAY_TITLE = "Voice Agent Display"
-DISPLAY_SIZE = (560, 820)
+DISPLAY_WIDTH = 560
+# The window is as tall as the screen less this, which clears the taskbar
+# and the title bar: a fixed 820 ran under the taskbar on a 1080p screen at
+# 125% scaling (864 logical pixels), hiding a card's bottom lines.
+DISPLAY_SCREEN_MARGIN = 110
 # The window polls this often; a new card appears within a poll of the tool
 # result, well inside the "within about a second" the issue asks for.
 DISPLAY_POLL_S = 0.5

@@ -5,19 +5,31 @@
 <title>Voice Agent Display</title>
 <style>
   /* For a tunnel-vision user: one narrow column, big bold type, white on
-     black. Three colours, each with one meaning, and never the only signal:
-     a gain keeps its "+", a loss its "-", stale data says so in words. */
-  :root { --bg: #000; --fg: #fff; --dim: #c8c8c8; --gain: #7dffa0;
-          --loss: #ff9a8a; --warn: #ffd84a; }
+     black, the same blocks in the same places on every card
+     (display/card.py). Colour means one thing: a P&L gain or loss, and the
+     sign stays. Cash, prices and quantities are white; badges are words. */
+  :root { --bg: #000; --fg: #fff; --soft: #e2e2e2; --rule: #5a5a5a;
+          --gain: #7dffa0; --loss: #ff9a8a; --warn: #ffd84a; }
   html, body { margin: 0; background: var(--bg); color: var(--fg); }
-  body { font: 700 26px/1.35 "Segoe UI", system-ui, sans-serif;
-         padding: 20px 18px; max-width: 560px; box-sizing: border-box; }
-  h1 { font-size: 32px; line-height: 1.2; margin: 0 0 8px; }
-  .asof { color: var(--dim); font-size: 22px; margin: 0 0 14px; }
+  body { font: 700 26px/1.3 "Segoe UI", system-ui, sans-serif;
+         padding: 18px 18px 40px; max-width: 560px; box-sizing: border-box; }
+  h1 { font-size: 30px; line-height: 1.2; margin: 0 0 6px; }
+  .asof { color: var(--soft); font-size: 21px; font-weight: 600; margin: 0 0 14px; }
   .stale { color: var(--warn); border: 3px solid var(--warn);
            padding: 8px 12px; margin: 0 0 16px; }
+  .total { border: 3px solid var(--fg); padding: 10px 14px; margin: 0 0 18px; }
+  .total .label { display: block; font-size: 22px; color: var(--soft); }
+  .total .value { display: block; font-size: 46px; line-height: 1.15; }
+  h2 { font-size: 23px; margin: 22px 0 0; padding-top: 10px;
+       border-top: 4px solid var(--fg); }
   ul { list-style: none; margin: 0; padding: 0; }
-  li { padding: 12px 0; border-top: 2px solid #444; overflow-wrap: anywhere; }
+  .row { padding: 12px 0; border-bottom: 2px solid var(--rule); }
+  .head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+  .value { margin-left: auto; white-space: nowrap; }
+  .badge { font-size: 19px; letter-spacing: .06em; border: 2px solid var(--fg);
+           padding: 0 7px; border-radius: 4px; }
+  .lines li { font-size: 21px; font-weight: 600; color: var(--soft); margin-top: 3px; }
+  .note { font-size: 22px; font-weight: 600; margin: 10px 0 0; }
   .gain { color: var(--gain); }
   .loss { color: var(--loss); }
   p { margin: 0 0 12px; }
@@ -26,31 +38,51 @@
 <body>
 <main id="card"><h1>Connecting to the voice agent…</h1></main>
 <script>
+// One scope with only render() global: pywebview's evaluate_js wrapper has
+// globals of its own, and its `value` once replaced the function below.
+(() => {
   let state = null;
 
   // Called by the window process (display/main.py) whenever the state changes.
-  function render(s) { state = s; draw(); }
+  window.render = s => { state = s; draw(); };
 
+  // Text nodes only: everything on a card is data, never markup.
   function el(tag, cls, text) {
     const e = document.createElement(tag);
     if (cls) e.className = cls;
-    if (text !== undefined) e.textContent = text;
+    if (text !== undefined && text !== null) e.textContent = text;
     return e;
   }
 
-  // Signed figures ("+45.00", "-1,234.50") keep their sign and gain a colour.
-  // Text nodes only: a tool result is data, never markup.
-  function withSigns(text) {
-    const li = el("li");
-    let at = 0;
-    for (const m of text.matchAll(/(^|[\s(])([+-]\d[\d,]*(?:\.\d+)?)/g)) {
-      const start = m.index + m[1].length;
-      li.append(text.slice(at, start));
-      li.append(el("span", m[2][0] === "+" ? "gain" : "loss", m[2]));
-      at = start + m[2].length;
+  // Only a P&L figure is coloured, by its own sign; the sign stays.
+  function value(text, kind, cls) {
+    const tone = kind === "pnl" && /^[+-]/.test(text)
+      ? (text[0] === "+" ? " gain" : " loss") : "";
+    return el("span", cls + tone, text);
+  }
+
+  function total(t) {
+    const box = el("div", "total");
+    box.append(el("span", "label", t.label), value(t.value, t.kind, "value"));
+    return box;
+  }
+
+  function row(r) {
+    const li = el("li", "row"), head = el("div", "head");
+    if (r.badge) head.append(el("span", "badge", r.badge));
+    head.append(el("span", "label", r.label));
+    if (r.value) head.append(value(r.value, r.kind, "value"));
+    li.append(head);
+    if (r.lines.length) {
+      const lines = el("ul", "lines");
+      for (const line of r.lines) lines.append(el("li", "", line));
+      li.append(lines);
     }
-    li.append(text.slice(at));
     return li;
+  }
+
+  function notes(list, into) {
+    for (const n of list || []) into.append(el("p", "note", n));
   }
 
   function ago(seconds) {
@@ -74,19 +106,26 @@
       const when = new Date(c.as_of);
       const age = (Date.now() - when) / 1000;
       const time = when.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
-      root.append(el("h1", "", c.title),
-                  el("p", "asof", `As of ${time}, ${ago(age)}`));
+      root.append(el("h1", "", c.title), el("p", "asof", `As of ${time}, ${ago(age)}`));
       if (age > state.stale_after_s)
         root.append(el("p", "stale",
           `Not current: these numbers are from ${ago(age)}. Ask again for fresh ones.`));
-      const list = el("ul");
-      for (const line of c.lines) list.append(withSigns(line));
-      root.append(list);
+      if (c.total) root.append(total(c.total));
+      notes(c.notes, root);
+      for (const s of c.sections) {
+        if (s.heading) root.append(el("h2", "", s.heading));
+        if (s.total) root.append(total(s.total));
+        const list = el("ul");
+        for (const r of s.rows) list.append(row(r));
+        root.append(list);
+        notes(s.notes, root);
+      }
     }
   }
 
   // The age and the stale warning move with the clock, not with the agent.
   setInterval(draw, 15000);
+})();
 </script>
 </body>
 </html>

@@ -249,10 +249,16 @@ unit-tested without a microphone, speakers, or an API key.
   `pywebview` window in its **own process** (pywebview must own a main
   thread, and `Agent().run()` holds the agent's), launched by `Agent.run()`
   and polling the embedded dashboard's read-only `/api/display`. The card is
-  set from `tools.dispatch`: a tool registered with `display=` hands its
-  result string to `ctx.show` (the Agent's `show_card`), so the screen shows
-  exactly what the model spoke from. A new card bumps a version; the window
-  comes forward only on a version change, via the variant files
+  set from `tools.dispatch`: a tool registered with `display=` leaves a card
+  in `ctx.card`, built from the fixed blocks in `display/card.py` (a total
+  first, sections per account, rows with a word badge, a label, a value and
+  detail lines) in the same loop and from the same formatted figures as its
+  returned sentence; dispatch hands it to `ctx.show` (the Agent's
+  `show_card`). A tool that leaves none — a refusal, an error — is shown as
+  its text. A value's kind decides colour: only `pnl` is coloured, by sign.
+  `display/page.html` renders the blocks and nothing else; a new kind of
+  answer picks from them rather than adding layout. A new card bumps a
+  version; the window comes forward only on a version change, via the variant files
   (`windows.py`: SetWindowPos topmost-then-not with SWP_NOACTIVATE;
   `posix.py`: pywebview's `on_top`), and is created non-activating so it
   never takes the keyboard. It outlives the agent to say "not running", so a
@@ -494,7 +500,8 @@ def my_tool(ctx, args):
 - The return string becomes the `tool_result` fed back to the model.
 
 `@tool(schema, display=heading_fn)` also puts every answer the tool gives on
-the display window (§3, Display window), under `heading_fn(ctx, args)`.
+the display window (§3, Display window), under `heading_fn(ctx, args)`: the
+card the handler left in `ctx.card` (`display/card.py` blocks), or its text.
 Trading's are `trading_tools.display_heading("Open positions")`; a future
 domain (notes, email) needs only its own `display=`.
 

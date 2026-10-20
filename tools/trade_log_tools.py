@@ -21,6 +21,7 @@ from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+from display import card as blocks
 from lib.dates import PERIODS, period_range, with_weekday
 from stores import working_state
 from tools import tool
@@ -56,31 +57,74 @@ _FILTERS = {
 
 # --- Formatting --------------------------------------------------------------
 
+_EXPIRED = "expired, not yet cleared"
+
+
 def _legs(legs):
     """Net legs {(symbol, exp, strike, type): qty} as one phrase. An expired
     leftover says so: unmarked, it was read aloud as a live short leg."""
     today = date.today().isoformat()
     return ", ".join(f"{q:+d} {s} {with_weekday(e)} {k:g}{cp}"
-                     + (" (expired, not yet cleared)" if e < today else "")
+                     + (f" ({_EXPIRED})" if e < today else "")
                      for (s, e, k, cp), q in sorted(legs.items()))
 
 
-def _trade_line(t, with_account=False):
+def _leg_names(legs):
+    """The same net legs for the display: (side word, quantity, contract
+    name, expired?) — the side and the expiry in words, not signs."""
+    today = date.today().isoformat()
+    return [("LONG" if q > 0 else "SHORT", abs(q), blocks.contract(s, e, k, cp),
+             e < today) for (s, e, k, cp), q in sorted(legs.items())]
+
+
+def _leg_rows(legs):
+    return [blocks.row(name, badge=side, lines=[
+                f"Quantity {n}", _EXPIRED.capitalize() if expired else ""])
+            for side, n, name, expired in _leg_names(legs)]
+
+
+def _trade_bits(t):
+    """One trade's figures, formatted once for both its line and its row."""
     when = t["executed_at"]
-    parts = [t["ref"], f"{with_weekday(when[:10])} {when[11:16]}",
-             t["symbol"], t["strategy"]]
-    if t["quantity"] is not None:
-        parts.append(f"{t['quantity']:+d} @{t['price']:.2f}")
+    return {
+        "when": f"{with_weekday(when[:10])} {when[11:16]}",
+        "fill": (f"{t['quantity']:+d} @{t['price']:.2f}"
+                 if t["quantity"] is not None else None),
+        "cash": (None if t["strategy"] == "expiration" else
+                 f"{t['amount']:+,.2f}"),
+        "fees": "pending" if t["fees"] is None else f"{t['fees']:,.2f}",
+        "legs": [(f"{q:+d}", e, k, cp) for e, k, cp, q in t["legs"]],
+    }
+
+
+def _trade_line(t, with_account=False):
+    b = _trade_bits(t)
+    parts = [t["ref"], b["when"], t["symbol"], t["strategy"]]
+    if b["fill"]:
+        parts.append(b["fill"])
     if t["fills"] > 1:
         parts.append(f"({t['fills']} fills)")
-    if t["strategy"] != "expiration":
-        fees = "pending" if t["fees"] is None else f"{t['fees']:,.2f}"
-        parts.append(f"cash {t['amount']:+,.2f} fees {fees}")
+    if b["cash"]:
+        parts.append(f"cash {b['cash']} fees {b['fees']}")
     if with_account:
         parts.insert(0, t["account"])
-    legs = ", ".join(f"{q:+d} {with_weekday(e)} {k:g}{cp}"
-                     for e, k, cp, q in t["legs"])
+    legs = ", ".join(f"{q} {with_weekday(e)} {k:g}{cp}"
+                     for q, e, k, cp in b["legs"])
     return " ".join(parts) + " | " + legs
+
+
+def _trade_row(t, with_account=False):
+    b = _trade_bits(t)
+    q = t["quantity"]
+    return blocks.row(
+        f"{t['strategy'].capitalize()} {b['fill'] or ''}".strip(), b["cash"],
+        blocks.MONEY,
+        badge="BOUGHT" if q and q > 0 else "SOLD" if q else t["strategy"].upper(),
+        lines=[(f"{t['account']} · " if with_account else "") + b["when"]
+               + f" · ref {t['ref']}",
+               f"Fees {b['fees']}" if b["cash"] else "",
+               *(f"{q} {blocks.contract(t['symbol'], e, k, cp)}"
+                 for q, e, k, cp in b["legs"])])
 
 
 def _totals_line(what, t):
@@ -525,16 +569,35 @@ def query_trade_log(ctx, args):
         return "No trades in the log match that."
     shown = trades[-tcfg.TRADE_QUERY_MAX_ROWS:]
     lines = [_trade_line(t, with_account=account is None) for t in shown]
+    named = chosen and ", ".join(f"{_label(p)} on {p['account']}" for p in chosen)
     if chosen:
-        lines.insert(0, "Positions: " + ", ".join(
-            f"{_label(p)} on {p['account']}" for p in chosen))
-    if len(shown) < len(trades):
-        lines.insert(0, f"(The latest {len(shown)} of {len(trades)} trades; "
-                        "narrow the dates for the rest. Totals cover all.)")
-    lines.append(_totals_line(f"{len(trades)} trades", tpos.totals(trades)))
+        lines.insert(0, "Positions: " + named)
+    cut = (f"The latest {len(shown)} of {len(trades)} trades; narrow the "
+           "dates for the rest. Totals cover all." if len(shown) < len(trades)
+           else "")
+    if cut:
+        lines.insert(0, f"({cut})")
+    totals = tpos.totals(trades)
+    lines.append(_totals_line(f"{len(trades)} trades", totals))
     legs = tpos.net_legs(trades)
     lines.append("Open legs of this selection: "
                  + (_legs(legs) if legs else "none; every leg nets to zero."))
+    # Closed out, the net is the exact P&L; with legs left it is only cash.
+    net = (blocks.total(f"Net cash so far, {len(trades)} trades (not P&L: "
+                        "legs remain)", f"{totals['net']:+,.2f}", blocks.MONEY)
+           if legs else
+           blocks.total(f"P&L, {len(trades)} trades, every leg closed",
+                        f"{totals['net']:+,.2f}"))
+    ctx.card = blocks.card(
+        [blocks.section("Open legs", _leg_rows(legs),
+                        notes=[] if legs else ["None: every leg nets to zero."]),
+         blocks.section(named or "Trades",
+                        [_trade_row(t, account is None) for t in shown],
+                        notes=[cut])],
+        total=net,
+        notes=[f"Cash {totals['cash']:+,.2f}, fees {totals['fees']:,.2f}"
+               + (f", fees pending on {totals['pending']} fills"
+                  if totals["pending"] else "")])
     return "\n".join(lines)
 
 
@@ -558,25 +621,36 @@ def _all_positions(account):
 
 
 def _position_line(p, account=None):
+    """(sentence, display row) for one position, from the same figures."""
     ts = p["trades"]
     first, last = ts[0]["executed_at"][:10], ts[-1]["executed_at"][:10]
     kinds = list(dict.fromkeys(t["strategy"] for t in ts))
+    trades = f"{len(ts)} trade{'s' * (len(ts) > 1)}"
     head = (f"{p['label']} {p['status']} {first} to {last} {ts[0]['symbol']} "
-            f"{'/'.join(kinds)}, {len(ts)} trade{'s' * (len(ts) > 1)} "
+            f"{'/'.join(kinds)}, {trades} "
             f"[{' '.join(t['ref'] for t in ts)}]")
     if account:
         head = f"{account} {head}"
+    net = f"{p['net']:+,.2f}"
+    extra = [f"fees pending on {p['pending']} fills" if p["pending"] else "",
+             "too tangled to split exactly, shown as one group"
+             if p["tangled"] else ""]
     if p["status"] == "closed":
-        body = (f"P&L {p['net']:+,.2f} (cash {p['cash']:+,.2f}, "
-                f"fees {p['fees']:,.2f})")
+        body = f"P&L {net} (cash {p['cash']:+,.2f}, fees {p['fees']:,.2f})"
+        value, kind, about = net, blocks.PNL, ["P&L, closed"]
+        legs = []
     else:
-        body = (f"net cash so far {p['net']:+,.2f}; "
-                f"open legs {_legs(p['open_legs'])}")
-    if p["pending"]:
-        body += f"; fees pending on {p['pending']} fills"
-    if p["tangled"]:
-        body += "; too tangled to split exactly, shown as one group"
-    return f"{head}: {body}"
+        body = f"net cash so far {net}; open legs {_legs(p['open_legs'])}"
+        value, kind, about = net, blocks.MONEY, ["Net cash so far, not P&L"]
+        legs = [f"{side.capitalize()} {n} {name}"
+                + (f" ({_EXPIRED})" if expired else "")
+                for side, n, name, expired in _leg_names(p["open_legs"])]
+    body += "".join(f"; {x}" for x in extra if x)
+    row = blocks.row(f"{p['label']} {ts[0]['symbol']} {'/'.join(kinds)}",
+                     value, kind, badge=p["status"].upper(),
+                     lines=[*about, (f"{account} · " if account else "")
+                            + f"{first} to {last}, {trades}", *legs, *extra])
+    return f"{head}: {body}", row
 
 
 @tool({
@@ -630,23 +704,33 @@ def trade_log_positions(ctx, args):
     if not picked:
         return "No positions in the log match that."
     shown = picked[-tcfg.TRADE_QUERY_MAX_ROWS:]
-    lines = [_position_line(p, name if account is None else None)
-             for name, p in shown]
-    if len(shown) < len(picked):
-        lines.insert(0, f"(The latest {len(shown)} of {len(picked)} "
-                        "positions; narrow the dates for the rest. Totals "
-                        "cover all.)")
+    lines, rows = zip(*[_position_line(p, name if account is None else None)
+                        for name, p in shown])
+    lines = list(lines)
+    cut = (f"The latest {len(shown)} of {len(picked)} positions; narrow the "
+           "dates for the rest. Totals cover all." if len(shown) < len(picked)
+           else "")
+    if cut:
+        lines.insert(0, f"({cut})")
+    summary, net = [], None
     closed = [p for _, p in picked if p["status"] == "closed"]
     if closed:
         won = sum(p["net"] > 0 for p in closed)
         lost = sum(p["net"] < 0 for p in closed)
-        lines.append(f"Closed: {len(closed)} positions, P&L "
-                     f"{sum(p['net'] for p in closed):+,.2f} ({won} winners, "
-                     f"{lost} losers)")
+        pnl = f"{sum(p['net'] for p in closed):+,.2f}"
+        lines.append(f"Closed: {len(closed)} positions, P&L {pnl} "
+                     f"({won} winners, {lost} losers)")
+        net = blocks.total(f"P&L of {len(closed)} closed positions "
+                           f"({won} winners, {lost} losers)", pnl)
     for kind in ("open", "unresolved"):
         some = [p for _, p in picked if p["status"] == kind]
         if some:
+            cash = f"{sum(p['net'] for p in some):+,.2f}"
             lines.append(f"{kind.capitalize()}: {len(some)} positions, net "
-                         f"cash so far {sum(p['net'] for p in some):+,.2f} "
-                         "(not P&L: legs remain)")
+                         f"cash so far {cash} (not P&L: legs remain)")
+            summary.append(blocks.row(f"{kind.capitalize()}: {len(some)} "
+                                      "positions", cash, blocks.MONEY,
+                                      lines=["Net cash so far, not P&L"]))
+    ctx.card = blocks.card([blocks.section(rows=summary + list(rows),
+                                           notes=[cut])], total=net)
     return "\n".join(lines)

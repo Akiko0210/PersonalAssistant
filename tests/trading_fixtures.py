@@ -3,6 +3,8 @@ and a synthetic /ES futures chain, built directly as ChainData (the tests
 for API-shape parsing build raw payloads separately in test_trading_chains).
 """
 
+from types import SimpleNamespace
+
 from trading import symbols as tsym
 from trading.models import ChainData, OptionInfo, Quote
 
@@ -105,12 +107,18 @@ class FakeEngine:
     P&L (also its net liquidating value), and every call records which
     account it reached."""
 
-    def __init__(self, key, realized=0.0, accounts=None):
+    def __init__(self, key, realized=0.0, accounts=None, positions=(),
+                 marks=None, orders=()):
         from trading import accounts as taccounts
         self.key = key
         self._acc = taccounts
         self.by_account = accounts or {f"{key}-1": realized}
         self.calls = []
+        # Held in every account alike: positions (with marks by symbol) and
+        # orders, for the tools that read them.
+        self.held, self.marks = list(positions), marks or {}
+        self.orders = SimpleNamespace(
+            list_orders=lambda account, start_date=None: list(orders))
 
     def accounts(self):
         return list(self.by_account)
@@ -126,7 +134,10 @@ class FakeEngine:
 
     def positions(self, account, underlying=None):
         self.calls.append(("positions", account, underlying))
-        return []
+        return self.held
+
+    def mark(self, p):
+        return self.marks.get(p.symbol)
 
     def balance(self, account):
         from trading.models import Balance

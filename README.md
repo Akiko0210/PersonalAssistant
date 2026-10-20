@@ -478,12 +478,18 @@ ticket as the voice, review/submit/cancel, P&L reports).
 
 **The display window** shows what the latest trading answer was about —
 positions, orders, P&L, the trades behind a position, the ticket being
-built or reviewed — in large white-on-black type, one statement per line, so
-you needn't hold every leg in your head while listening. It is the same text
-the agent answered from, with a heading ("Open positions — Tom, Charles
-Schwab") and an "as of" time; after two minutes it says in words that the
-numbers aren't current. Gains keep their "+" and losses their "-", whatever
-the colour. The agent opens it at start (it needs `pip install pywebview`;
+built or reviewed — in large white-on-black type, so you needn't hold every
+leg in your head while listening. Every card has the same shape: a heading
+("Open positions — Tom, Charles Schwab"), an "as of" time, the one figure
+that matters in a big box at the top (total unrealized, realized P&L, the
+limit price), then one row per position, leg, order or trade — a word badge
+(LONG, SHORT, WORKING, FILLED), a readable contract ("SPX 7750 Put · Fri
+Nov 6"), its value on the right, and small detail lines. The figures are the
+ones the agent answered from. Only profit and loss is coloured, and it keeps
+its "+" or "-"; cash, prices and quantities stay white. After two minutes
+the card says in words that the numbers aren't current. The window sits at
+the top-right, as tall as the screen allows. The agent opens it at start
+(it needs `pip install pywebview`;
 `DISPLAY_WINDOW = False` turns it off). It comes to the front only when a new
 answer arrives, never takes the keyboard, and if you close it the next
 trading answer reopens it. When the agent stops, the window says so.

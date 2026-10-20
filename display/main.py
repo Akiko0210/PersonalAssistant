@@ -4,9 +4,10 @@ answer was about, in large high-contrast type (#28).
 Holding four legs and their P&L in your head while listening takes a lot of
 working memory, and the user can't scan the dashboard for them. So every
 answer from a tool registered with `display=` (tools/__init__.py) becomes a
-"card" on the live Agent: a heading, an "as of" time, and the result string
-itself, split one statement per line. It is the very string the model speaks
-from, never a separate fetch that could disagree with the spoken answer.
+"card" on the live Agent: a heading, an "as of" time, and the blocks the
+tool built (display/card.py) in the same loop as its spoken sentence, from
+the same figures — never a separate fetch that could disagree with the
+spoken answer.
 
 Two halves live here:
 - Agent side (make_card, Window): build the card, and launch or relaunch
@@ -38,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 
 import config as cfg
+from display import card as blocks
 from lib.single_instance.main import AlreadyRunning, SingleInstance
 
 if os.name == "nt":
@@ -56,12 +58,16 @@ _SENTENCE_END = re.compile(r"(?<=[.?!])\s+")
 
 # --- Agent side ---------------------------------------------------------------
 
-def make_card(heading, text, version):
-    """The display state for one tool answer."""
-    lines = [s.strip() for line in str(text).splitlines()
-             for s in _SENTENCE_END.split(line) if s.strip()]
-    return {"version": version, "title": heading, "lines": lines,
-            "as_of": datetime.now().isoformat(timespec="seconds")}
+def make_card(heading, content, version):
+    """The display state for one tool answer. `content` is the card the tool
+    built (display/card.py); a bare string — a refusal, a "which account?",
+    a broker error — is shown as plain notes, one statement per line."""
+    if not isinstance(content, dict):
+        content = blocks.card(notes=[
+            s.strip() for line in str(content).splitlines()
+            for s in _SENTENCE_END.split(line) if s.strip()])
+    return {"version": version, "title": heading,
+            "as_of": datetime.now().isoformat(timespec="seconds"), **content}
 
 
 class Window:
@@ -120,7 +126,12 @@ def _follow(window, port):
     while True:
         state = fetch(port)
         if state != shown:
-            window.evaluate_js(f"render({json.dumps(state)})")
+            # A page error must not end this loop: the window would freeze
+            # on its last card, looking current.
+            try:
+                window.evaluate_js(f"render({json.dumps(state)})")
+            except Exception:
+                log.exception("display render failed")
             shown = state
         version = (state.get("card") or {}).get("version")
         if last is not _OPENING and is_new(version, last):
@@ -135,10 +146,15 @@ def run(port):
     except AlreadyRunning:
         return  # one window already follows the same port
     import webview
-    width, height = cfg.DISPLAY_SIZE
+    # Placed, not left to the OS: Windows cascades new windows down the
+    # screen, which pushed the bottom under the taskbar. Top-right, every
+    # time, so the eye learns where to look.
+    screen = webview.screens[0]
     window = webview.create_window(
         cfg.DISPLAY_TITLE, html=PAGE.read_text(encoding="utf-8"),
-        width=width, height=height, focus=False, background_color="#000000")
+        width=cfg.DISPLAY_WIDTH, height=screen.height - cfg.DISPLAY_SCREEN_MARGIN,
+        x=screen.x + screen.width - cfg.DISPLAY_WIDTH, y=screen.y,
+        focus=False, background_color="#000000")
     # Daemon, so closing the window ends the process; pywebview's own func
     # thread would keep it alive.
     threading.Thread(target=_follow, args=(window, port), daemon=True,
