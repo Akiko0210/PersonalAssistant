@@ -98,7 +98,7 @@ class TestTools(AccountsBase):
         out = self.run_tool("get_pnl", {"period": "today", "account": "all"})
         self.assertIn("IRA (…699): from", out)
         self.assertIn("red (…868): from", out)
-        self.assertIn("All of them together, added here only: realized 70.00", out)
+        self.assertIn("All of them together, added here only: realized +70.00", out)
         self.assertEqual(taccounts.focus("schwab", "tom"), IRA)
 
     def test_naming_an_account_does_not_switch_to_it(self):

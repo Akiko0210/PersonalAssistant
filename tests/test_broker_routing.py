@@ -92,9 +92,9 @@ class TestLindaReadsBoth(unittest.TestCase):
         out = run("linda", "get_pnl", {"period": "today"}, engines=engines)
         self.assertIn("Charles Schwab, account ", out)   # broker, then account
         self.assertIn("tastytrade, account ", out)
-        self.assertIn("realized 100.00", out)
+        self.assertIn("realized +100.00", out)
         self.assertIn("realized -30.00", out)
-        self.assertIn("All of them together, added here only: realized 70.00", out)
+        self.assertIn("All of them together, added here only: realized +70.00", out)
         for eng in engines.values():
             self.assertEqual(len(eng.calls), 1)   # each account asked once, separately
 

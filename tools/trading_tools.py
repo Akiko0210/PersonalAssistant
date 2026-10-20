@@ -52,6 +52,27 @@ def _fmt(x, none="unknown"):
     return f"{x:,.2f}" if isinstance(x, (int, float)) else none
 
 
+def _pnl(x, none="unknown"):
+    """A P&L figure, always signed: the display window colours it, and the
+    sign is what says gain or loss to someone who can't tell the colours."""
+    return f"{x:+,.2f}" if isinstance(x, (int, float)) else none
+
+
+def display_heading(what, broker=None):
+    """A tool's display= heading: `what`, then who answered on which broker
+    ('Open positions — Tom, Schwab'). `broker` pins a fixed one (the trade
+    log is Schwab's); otherwise the one asked for, or the persona's own."""
+    def heading(ctx, args):
+        hat = agents.AGENTS.get(ctx.active_agent or "") or {}
+        keys = ([broker] if broker else
+                [tmain.normalize(args["broker"])] if args.get("broker") else
+                _mine(ctx))
+        brokers = " and ".join(tmain.label(k) for k in keys if k)
+        who = ", ".join(x for x in (hat.get("name"), brokers) if x)
+        return f"{what} — {who}" if who else what
+    return heading
+
+
 # --- which broker ----------------------------------------------------------
 
 def _mine(ctx):
@@ -433,7 +454,7 @@ def list_expirations(ctx, args):
         },
         "required": ["strategy", "symbol"],
     },
-})
+}, display=display_heading("Order ticket"))
 def build_strategy(ctx, args):
     eng, err = _engine(ctx, args)
     if err:
@@ -495,7 +516,7 @@ def build_strategy(ctx, args):
         },
         "required": ["leg_number"],
     },
-})
+}, display=display_heading("Order ticket"))
 def adjust_leg(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -559,7 +580,7 @@ def adjust_leg(ctx, args):
             "tif": {"type": "string", "enum": ["Day", "GTC"]},
         },
     },
-})
+}, display=display_heading("Order ticket"))
 def set_order_terms(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -605,7 +626,7 @@ def set_order_terms(ctx, args):
         "price check."
     ),
     "input_schema": {"type": "object", "properties": {}},
-})
+}, display=display_heading("Ticket pricing"))
 def price_order(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -657,7 +678,7 @@ def price_order(ctx, args):
         "price_order, which works even when this dry run is rejected."
     ),
     "input_schema": {"type": "object", "properties": {}},
-})
+}, display=display_heading("Order review"))
 def review_order(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -722,7 +743,7 @@ def review_order(ctx, args):
         },
         "required": ["confirmed"],
     },
-})
+}, display=display_heading("Order submission"))
 def submit_order(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -767,7 +788,7 @@ def submit_order(ctx, args):
             "broker": BROKER_ARG,
         },
     },
-})
+}, display=display_heading("Orders"))
 def list_orders(ctx, args):
     # Defaulting to today made "any working orders?" answer "no" while orders
     # were live at the broker — they were simply older than midnight.
@@ -852,7 +873,7 @@ def cancel_order(ctx, args):
             "broker": BROKER_ARG,
         },
     },
-})
+}, display=display_heading("Open positions"))
 def get_positions(ctx, args):
     def one(eng, account):
         try:
@@ -868,19 +889,19 @@ def get_positions(ctx, args):
             mark = eng.mark(p)
             u = p.unrealized(mark)
             side = "long" if p.quantity > 0 else "short"
-            upnl = f"unrealized {_fmt(u)}" if u is not None else "no mark"
+            upnl = f"unrealized {_pnl(u)}" if u is not None else "no mark"
             if u is None:
                 unmarked += 1
             else:
                 total += u
             lines.append(f"{side} {abs(p.quantity):g} {p.symbol} "
                          f"(avg {_fmt(p.average_open_price)}, {upnl})")
-        summary = f"Total unrealized {_fmt(total)}"
+        summary = f"Total unrealized {_pnl(total)}"
         if unmarked:
             summary += f" ({unmarked} position(s) unmarked)"
         return ". ".join(lines) + f". {summary}.", total
     return _per_account(ctx, args, one, total=lambda v: (
-        f"All of them together, added here only: unrealized {_fmt(sum(v))}."))
+        f"All of them together, added here only: unrealized {_pnl(sum(v))}."))
 
 
 @tool({
@@ -906,7 +927,7 @@ def get_positions(ctx, args):
             "broker": BROKER_ARG,
         },
     },
-})
+}, display=display_heading("Profit and loss"))
 def get_pnl(ctx, args):
     start, end = period_range(args.get("period"), args.get("start_date"),
                               args.get("end_date"))
@@ -919,19 +940,19 @@ def get_pnl(ctx, args):
         except Exception as e:
             return f"couldn't build the P&L report: {e}.", None
         parts = [f"from {rep.start} to {rep.end}{scope}: realized "
-                 f"{_fmt(rep.realized)} net of {_fmt(rep.fees)} in fees "
+                 f"{_pnl(rep.realized)} net of {_fmt(rep.fees)} in fees "
                  f"across {len(rep.events)} closed trades"]
         if rep.by_underlying and not args.get("underlying"):
             tops = sorted(rep.by_underlying.items(), key=lambda kv: -abs(kv[1]))[:4]
             parts.append("by underlying: " +
-                         ", ".join(f"{u} {_fmt(v)}" for u, v in tops))
+                         ", ".join(f"{u} {_pnl(v)}" for u, v in tops))
         if rep.unrealized is not None:
-            parts.append(f"current unrealized {_fmt(rep.unrealized)}")
+            parts.append(f"current unrealized {_pnl(rep.unrealized)}")
         if rep.note:
             parts.append(rep.note.strip())
         return ". ".join(parts) + ".", rep.realized
     return _per_account(ctx, args, one, total=lambda v: (
-        f"All of them together, added here only: realized {_fmt(sum(v))}."))
+        f"All of them together, added here only: realized {_pnl(sum(v))}."))
 
 
 @tool({
@@ -942,7 +963,7 @@ def get_pnl(ctx, args):
         "submitted orders."
     ),
     "input_schema": {"type": "object", "properties": {}},
-})
+}, display=display_heading("Order ticket"))
 def clear_ticket(ctx, args):
     broker, problem = _broker(ctx, args)
     if problem:

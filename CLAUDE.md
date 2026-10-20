@@ -38,7 +38,8 @@ by `main.py`), `brain/` (llm/ — the engine in `main.py`, providers in
 `anthropic.py`/`deepseek.py` — plus agents, history, memory, facts, query,
 context), `stores/`
 (notes, knowledge, categories), `lib/` (leaf utilities), `web/` (server +
-static), `tools/` (the tool registry), and `trading/`. Entry points and
+static), `tools/` (the tool registry), `trading/`, and `display/` (the
+trading display window, its own process). Entry points and
 `config.py` stay at root.
 
 **To add a live dashboard control**: one handler in `web/server.py`'s
@@ -114,7 +115,7 @@ read-only investigations need no issue.
   `sys.platform`/provider checks elsewhere. Current variant packages:
   `media_control/`, `speech/tts/`, `speech/sound/`, `lib/single_instance/`,
   `brain/llm/`, `trading/` (`schwab.py`/`tastytrade.py`, keyed by the
-  persona's `brokers` in `brain/agents.py`).
+  persona's `brokers` in `brain/agents.py`), `display/`.
 - Several Pythons per machine, only one with the deps: `.claude/launch.json`
   pins it (Windows Store Python on the PC, `.venv` on the Mac) — keep the pin
   pointed at whichever interpreter has the deps on the machine you're on.

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Voice Agent Display</title>
+<style>
+  /* For a tunnel-vision user: one narrow column, big bold type, white on
+     black. Three colours, each with one meaning, and never the only signal:
+     a gain keeps its "+", a loss its "-", stale data says so in words. */
+  :root { --bg: #000; --fg: #fff; --dim: #c8c8c8; --gain: #7dffa0;
+          --loss: #ff9a8a; --warn: #ffd84a; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body { font: 700 26px/1.35 "Segoe UI", system-ui, sans-serif;
+         padding: 20px 18px; max-width: 560px; box-sizing: border-box; }
+  h1 { font-size: 32px; line-height: 1.2; margin: 0 0 8px; }
+  .asof { color: var(--dim); font-size: 22px; margin: 0 0 14px; }
+  .stale { color: var(--warn); border: 3px solid var(--warn);
+           padding: 8px 12px; margin: 0 0 16px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 12px 0; border-top: 2px solid #444; overflow-wrap: anywhere; }
+  .gain { color: var(--gain); }
+  .loss { color: var(--loss); }
+  p { margin: 0 0 12px; }
+</style>
+</head>
+<body>
+<main id="card"><h1>Connecting to the voice agent…</h1></main>
+<script>
+  let state = null;
+
+  // Called by the window process (display/main.py) whenever the state changes.
+  function render(s) { state = s; draw(); }
+
+  function el(tag, cls, text) {
+    const e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  // Signed figures ("+45.00", "-1,234.50") keep their sign and gain a colour.
+  // Text nodes only: a tool result is data, never markup.
+  function withSigns(text) {
+    const li = el("li");
+    let at = 0;
+    for (const m of text.matchAll(/(^|[\s(])([+-]\d[\d,]*(?:\.\d+)?)/g)) {
+      const start = m.index + m[1].length;
+      li.append(text.slice(at, start));
+      li.append(el("span", m[2][0] === "+" ? "gain" : "loss", m[2]));
+      at = start + m[2].length;
+    }
+    li.append(text.slice(at));
+    return li;
+  }
+
+  function ago(seconds) {
+    const m = Math.round(seconds / 60);
+    return m < 1 ? "just now" : m === 1 ? "1 minute ago" : `${m} minutes ago`;
+  }
+
+  function draw() {
+    const root = document.getElementById("card");
+    root.replaceChildren();
+    if (!state) {
+      root.append(el("h1", "", "Connecting to the voice agent…"));
+    } else if (!state.agent_running) {
+      root.append(el("h1", "", "The voice agent isn't running."),
+                  el("p", "", "This window updates when it starts again."));
+    } else if (!state.card) {
+      root.append(el("h1", "", "Nothing to show yet."),
+                  el("p", "", "Ask about positions, orders, or P&L, and the answer appears here."));
+    } else {
+      const c = state.card;
+      const when = new Date(c.as_of);
+      const age = (Date.now() - when) / 1000;
+      const time = when.toLocaleTimeString([], {hour: "numeric", minute: "2-digit"});
+      root.append(el("h1", "", c.title),
+                  el("p", "asof", `As of ${time}, ${ago(age)}`));
+      if (age > state.stale_after_s)
+        root.append(el("p", "stale",
+          `Not current: these numbers are from ${ago(age)}. Ask again for fresh ones.`));
+      const list = el("ul");
+      for (const line of c.lines) list.append(withSigns(line));
+      root.append(list);
+    }
+  }
+
+  // The age and the stale warning move with the clock, not with the agent.
+  setInterval(draw, 15000);
+</script>
+</body>
+</html>

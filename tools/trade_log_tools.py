@@ -24,6 +24,7 @@ from pathlib import Path
 from lib.dates import PERIODS, period_range, with_weekday
 from stores import working_state
 from tools import tool
+from tools.trading_tools import display_heading
 from trading import accounts as taccounts
 from trading import config as tcfg
 from trading import statement as tstatement
@@ -493,7 +494,7 @@ def _sync_account(eng, number, start=None):
                        "record": {"type": "integer",
                                   "description": "A campaign record's id."}},
     },
-})
+}, display=display_heading("Trades from the trade log", broker="schwab"))
 def query_trade_log(ctx, args):
     chosen = None       # the positions selected, when a position/record is
     rid, err = _record(ctx, args)
@@ -600,7 +601,7 @@ def _position_line(p, account=None):
                                   "enum": ["all", "closed", "open"],
                                   "description": "'open' includes unresolved."}},
     },
-})
+}, display=display_heading("Positions from the trade log", broker="schwab"))
 def trade_log_positions(ctx, args):
     account, ask = _account(args.get("account"), ctx.active_agent)
     if ask:

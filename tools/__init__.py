@@ -14,7 +14,10 @@ kept as explicit dicts — they are prompt engineering, not boilerplate, so
 they stay reviewable next to their handler.
 """
 
+import logging
 from dataclasses import dataclass, field
+
+log = logging.getLogger("tools")
 
 
 @dataclass
@@ -74,6 +77,11 @@ class ToolContext:
     # recorded here. Claude.flush_tool_events folds these into the conversation
     # so the next turn knows what its tools actually did.
     events: list = field(default_factory=list)
+    # (heading, result_text) -> None: the live Agent's show_card, which puts
+    # a tool's answer on the display window (display/). Only the conversation
+    # has one; a delegated task's fresh ToolContext leaves it None, so a
+    # background answer never swaps out what the user is looking at.
+    show: object = None
 
     def record_event(self, text):
         """Record what a tool actually did, for the model to see next turn.
@@ -83,13 +91,19 @@ class ToolContext:
 
 
 _REGISTRY = {}  # name -> (schema, handler); insertion-ordered
+_DISPLAY = {}   # name -> (ctx, args) -> heading, for tools shown on the display
 
 
-def tool(schema):
+def tool(schema, display=None):
     """Register a tool. `schema` is the full Anthropic tool dict (name,
-    description, input_schema); the decorated function is its handler."""
+    description, input_schema); the decorated function is its handler.
+    `display`, a (ctx, args) -> heading function, puts every answer the tool
+    gives on the display window under that heading — the result string
+    itself, so the screen can never disagree with what is spoken from it."""
     def deco(fn):
         _REGISTRY[schema["name"]] = (schema, fn)
+        if display:
+            _DISPLAY[schema["name"]] = display
         return fn
     return deco
 
@@ -110,10 +124,18 @@ def dispatch(ctx, name, args):
     if entry is None:
         return f"Unknown tool: {name}"
     _, handler = entry
+    args = args or {}
     try:
-        return handler(ctx, args or {})
+        out = handler(ctx, args)
     except Exception as e:  # surface tool errors back to the model
         return f"Tool error: {e}"
+    heading = _DISPLAY.get(name)
+    if heading and ctx.show:
+        try:
+            ctx.show(heading(ctx, args), out)
+        except Exception:  # the window is an aid; it must never cost the answer
+            log.exception("display card for %s failed", name)
+    return out
 
 
 # Importing the tool modules populates the registry. Order sets the order the

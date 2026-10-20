@@ -28,6 +28,7 @@ from brain import agents
 from stores import categories
 import config as cfg
 from web import server as dashboard
+from display import main as display
 from speech.audio import AudioEngine
 from speech.barge_in import BargeInDetector
 from media_control.gestures import ClickGestureDecoder
@@ -135,7 +136,12 @@ class Agent:
         self.log.info("scanning knowledge base...")
         self.log.info(self.kb.ingest_folder(include_media=False))
         self.idle = IdleSound()  # "thinking" cue, looped during model calls
-        self.llm = Claude(self.store, self.idle, self.kb)
+        # What the display window shows (display/): the latest trading
+        # answer, set from tool dispatch via show_card. The window process is
+        # started in run(), once the dashboard port it reads is known.
+        self.card = None
+        self.display = None
+        self.llm = Claude(self.store, self.idle, self.kb, show=self.show_card)
         # Make sure every saved thread is in the exchange index (idempotent;
         # a no-op after the first boot) and hand the fact extractor whatever it
         # has not read yet (it runs on the memory worker, in the background).
@@ -271,6 +277,16 @@ class Agent:
         floor."""
         self.typed.put((text, target))
         self.interject.set()
+
+    def show_card(self, heading, text):
+        """Put a tool's answer on the display window, from the tool dispatch
+        on the turn thread. The dashboard's handler threads only ever read
+        the whole dict, which is replaced, never edited. Reopens the window
+        if the user closed it or it crashed (#28)."""
+        version = (self.card or {}).get("version", 0) + 1
+        self.card = display.make_card(heading, text, version)
+        if self.display is not None:
+            self.display.open()
 
     def _handle_typed_message(self, text: str, target=None):
         """Answer one typed message as a spoken turn. Same tail as a spoken
@@ -1100,6 +1116,9 @@ class Agent:
         # state. Fails soft if the port is taken: a web page must never stop
         # the voice agent from starting.
         self._web = dashboard.serve_embedded(self)
+        # The display window reads that same server; without it (port taken)
+        # there's nothing for the window to show, so it isn't started.
+        self.display = display.Window(self._web.port).open()
         self.log.info(
             "Ready. Headset button: 1-click=mute  2-click=note  3-click=quit"
         )
