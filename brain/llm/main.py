@@ -127,6 +127,12 @@ def cached(history):
     return wire
 
 
+def _text_of(resp):
+    """A response's text blocks joined — the model's words, before any
+    honesty notice _final_text adds."""
+    return "".join(b.text for b in resp.content if b.type == "text").strip()
+
+
 def system_blocks(static, background="", record=""):
     """The system prompt as the API's block list: the static part carries a
     cache breakpoint (tools render before system, so the marker caches both),
@@ -179,8 +185,8 @@ class Claude:
         # facts derived from it (brain/facts.py).
         self.memory = ConversationMemory()
         self.facts = FactStore()
-        # The memory worker: indexing and fact extraction run here, after the
-        # reply is already being spoken. One thread, in order — "add item
+        # The memory worker: indexing and fact extraction run here, once the
+        # reply has been spoken (settle_reply). One thread, in order — "add item
         # four" only reads as an update to a list the extractor has already
         # seen. Live exchanges queue ahead of any boot backlog. Nothing here
         # is precious: an exchange the process died on is still in history,
@@ -188,6 +194,11 @@ class Claude:
         self._jobs = queue.PriorityQueue()
         self._seq = 0
         threading.Thread(target=self._work, daemon=True, name="memory").start()
+        # The last reply converse() returned, until the agent reports how much
+        # of it was spoken (settle_reply) — only then does the turn go to the
+        # memory worker, so memory holds what the user heard (#26).
+        self._unsettled = False
+        self._reply = None
         # Personas: per-agent system prompt, tools, model, voice — and since
         # the memory split, each keeps its OWN history thread (self.history is
         # always the ACTIVE persona's; switch_to swaps files). The registry
@@ -444,7 +455,7 @@ class Claude:
         away, so the model won't even remember trying. Say so out loud; a
         silent empty return here cost a whole note save while the model kept
         announcing "saving now" (2026-07-19 log)."""
-        text = "".join(b.text for b in resp.content if b.type == "text").strip()
+        text = _text_of(resp)
         if resp.stop_reason == "max_tokens":
             truncated_tool = any(b.type == "tool_use" for b in resp.content)
             log.warning("reply truncated at CONVO_MAX_TOKENS "
@@ -570,6 +581,7 @@ class Claude:
         the feature, not a limitation."""
         if key == self.active:
             return
+        self._settle_pending()  # the departing thread's last turn, while it is still self.history
         # Save the departing thread BEFORE flipping self.active — after the
         # flip, _save_history would write it over the target's file.
         self._save_history()
@@ -725,6 +737,12 @@ class Claude:
         hist.save(cfg.history_path(self.active), self.history)
 
     def converse(self, user_text: str) -> str:
+        """One turn: the reply to `user_text`, written to history in full.
+        The turn reaches memory (the exchange index, the facts) only through
+        settle_reply, once the caller knows how much of the reply was spoken;
+        a caller that never reports is settled here at the next turn."""
+        self._settle_pending()
+        self._reply = None
         # Trim the transcript in memory too, so a long session doesn't grow
         # unbounded. Nothing is lost: every exchange was indexed when it ended.
         self.history = self._trim(self.history)
@@ -781,7 +799,10 @@ class Claude:
                         "Could you ask that again, maybe more specifically?")
             # Failover news first — this turn's, a delegation's, or the memory
             # worker's since the last reply — then the answer.
-            return " ".join([*self._take_notices(), self._final_text(resp)])
+            reply = " ".join([*self._take_notices(), self._final_text(resp)])
+            text = _text_of(resp)
+            self._reply = {"said": reply, "text": text, "written": text}
+            return reply
         finally:
             self.idle.stop()
             # Fold in anything a synchronous tool recorded this turn, then save.
@@ -794,7 +815,7 @@ class Claude:
             # moment the user says "switch to DeepSeek". One atomic write a
             # turn, next to the history save that already happens here.
             self._write_agent_state()
-            self._remember()
+            self._unsettled = True
 
     def _pull_context(self, user_text, wire_from):
         """The Background for this turn. The utterance is first read against
@@ -819,15 +840,73 @@ class Claude:
                                      facts=self.facts, kb=self.kb,
                                      exclude_ids=in_tail, focus=self._ctx.focus)
 
+    # --- what the user heard -------------------------------------------------
+    def settle_reply(self, reply, heard):
+        """The agent has spoken `reply` (what converse returned) and the user
+        heard its first part, `heard`. History keeps only that part, marked
+        when the rest was cut (config.REPLY_CUT_MARK / REPLY_UNHEARD_MARK),
+        and the turn goes to memory. Called again after a "continue" resume
+        with the longer heard part, it rewrites again — the exchange index
+        overwrites the same record. Tool calls and results are never touched:
+        those actions happened whether or not the user heard about them."""
+        rewritten = (self._reply is not None and reply
+                     and reply == self._reply["said"] and self._rewrite_reply(heard))
+        if rewritten:
+            self._save_history()
+        if rewritten or self._unsettled:
+            self._unsettled = False
+            self._remember()
+
+    def _settle_pending(self):
+        """A turn nobody reported on (a script, a turn that raised) counts as
+        heard in full, as every turn did before #26."""
+        if self._unsettled:
+            self._unsettled = False
+            self._remember()
+
+    def _rewrite_reply(self, heard):
+        """Put the heard part of the last reply in its history text block.
+        `heard` is a prefix of what was said, which is the model's text plus
+        any failover notice in front; only the model's text is in history."""
+        said, text, written = (self._reply[k] for k in ("said", "text", "written"))
+        start = said.find(text)
+        if not text or start < 0:
+            return False
+        got = len(heard) - start
+        part = text[:max(0, got)].rstrip()
+        new = (text if got >= len(text) else
+               f"{part} {cfg.REPLY_CUT_MARK}" if part else cfg.REPLY_UNHEARD_MARK)
+        if new == written:
+            return False
+        last = next((m for m in reversed(self.history)
+                     if m.get("role") == "assistant"), None)
+        blocks = last and last.get("content")
+        if isinstance(blocks, list):
+            for i, b in enumerate(blocks):
+                if (isinstance(b, dict) and b.get("type") == "text"
+                        and b.get("text", "").strip() == written):
+                    last["content"] = [*blocks[:i], {**b, "text": new}, *blocks[i + 1:]]
+                    break
+            else:
+                blocks = None
+        if not isinstance(blocks, list):
+            log.warning("could not find the reply in history to keep only "
+                        "its heard part; kept in full")
+            return False
+        self._reply["written"] = new
+        log.info("reply heard %d of %d chars — history keeps the heard part",
+                 max(0, min(got, len(text))), len(text))
+        return True
+
     # --- the memory worker ----------------------------------------------------
     def _remember(self):
         """Hand the exchange that just ended to the memory worker: index it,
         then learn its facts. Re-derived from history rather than remembered,
         so it is right after a persona switch too, and a deferred self-note
-        (flush_tool_events(persist=True)) overwrites the same record. Runs
-        after converse() has returned, so the reply is spoken meanwhile; the
-        next turn sees this exchange verbatim in its tail before retrieval
-        could need it."""
+        (flush_tool_events(persist=True)) or a settle_reply rewrite overwrites
+        the same record. Runs once the reply is settled — memory holds what
+        the user heard; the next turn sees this exchange verbatim in its tail
+        before retrieval could need it."""
         owner = self.active
         msgs = list(self.history[hist.tail_start(self.history, 0):])
         self._enqueue(lambda: self._learn_exchange(owner, msgs))

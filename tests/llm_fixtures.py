@@ -85,6 +85,7 @@ def make_claude(responses=None, *, active=None, convo_model=_UNSET,
     # back to the raw utterance, the extractor finds nothing durable; a test
     # that wants either binds its own callable.
     c._jobs = None
+    c._unsettled, c._reply = False, None  # settle_reply's bookkeeping
     c._rewriter = lambda: (lambda system, prompt: "")
     c._extractor = lambda: (lambda system, prompt: '{"ops": []}')
     c._record_block = lambda owner: ""  # no working record unless a test installs one

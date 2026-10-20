@@ -17,13 +17,24 @@ be heard *while* the main voice is talking — see its docstring.
 """
 
 import logging
+import re
 import sys
 import threading
+import time
 
 import config as cfg  # noqa: F401 - variants read it; kept for parity/tunables
 from speech.tts import fallback, linux, macos, windows
 
 log = logging.getLogger("tts")
+
+
+def estimate_chars(text, seconds, wpm):
+    """Where an utterance said for `seconds` at `wpm` words a minute has got
+    to: the offset of the first word not yet reached (len(text) once every
+    word has been). Whole words only — a word in progress was not heard."""
+    starts = [m.start() for m in re.finditer(r"\S+", text)]
+    reached = int(max(0.0, seconds) * wpm / 60)
+    return starts[reached] if reached < len(starts) else len(text)
 
 
 def _select_backend(platform=None):
@@ -55,6 +66,10 @@ class Speaker:
             log.warning("native TTS unavailable; falling back to pyttsx3")
             self._backend = fallback.Pyttsx3Speaker()
         log.info("TTS backend: %s", type(self._backend).__name__)
+        # The utterance in flight, for spoken_chars(): its text, the rate it
+        # is said at, when it began, and how long it has sat paused.
+        self._text, self._wpm = "", cfg.TTS_RATE
+        self._began, self._paused_at, self._paused_s = 0.0, None, 0.0
 
     @property
     def supports_async(self) -> bool:
@@ -63,6 +78,7 @@ class Speaker:
     def set_voice(self, substring, rate_wpm=None):
         """Per-persona voice switching (see agents.py). No-op on the pyttsx3
         fallback — there the personas share the one system voice."""
+        self._wpm = rate_wpm or cfg.TTS_RATE
         backend_set = getattr(self._backend, "set_voice", None)
         if backend_set is None:
             return
@@ -85,6 +101,8 @@ class Speaker:
     # --- async / interruptible API (native backends only) --------------------
     def begin(self, text: str):
         log.info("speaking: %s", text)
+        self._text, self._began = text, time.monotonic()
+        self._paused_at, self._paused_s = None, 0.0
         self._backend.begin(text)
 
     def is_busy(self) -> bool:
@@ -99,12 +117,17 @@ class Speaker:
             return False
         try:
             fn()
+            if self._paused_at is None:
+                self._paused_at = time.monotonic()
             return True
         except Exception:  # noqa: BLE001 - a failed pause must not kill the reply
             log.exception("TTS pause failed")
             return False
 
     def resume(self):
+        if self._paused_at is not None:
+            self._paused_s += time.monotonic() - self._paused_at
+            self._paused_at = None
         fn = getattr(self._backend, "resume", None)
         if fn is None:
             return
@@ -115,6 +138,23 @@ class Speaker:
 
     def stop(self):
         self._backend.stop()
+
+    def spoken_chars(self) -> int:
+        """How far the current utterance has got: the character offset where
+        the word being said right now begins, so text[:offset] is what the
+        user has heard. Read it BEFORE stop() — a purge resets the voice.
+        A backend that can report its position (SAPI) is exact; the rest are
+        estimated from speaking time at the voice's rate, pauses excluded —
+        a mute click can hold a reply paused for seconds."""
+        exact = getattr(self._backend, "spoken_chars", None)
+        if exact is not None:
+            try:
+                return max(0, min(len(self._text), int(exact())))
+            except Exception:  # noqa: BLE001 - an estimate beats no answer
+                log.exception("TTS position read failed; estimating instead")
+        now = self._paused_at or time.monotonic()
+        return estimate_chars(self._text, now - self._began - self._paused_s,
+                              self._wpm)
 
     def current_voice(self) -> str:
         fn = getattr(self._backend, "current_voice", None)

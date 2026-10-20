@@ -326,7 +326,7 @@ class TestConverseSeams(unittest.TestCase):
         c.converse("hello")
         self.assertEqual(c.memory.calls[0][2], "tom")
 
-    def test_the_exchange_is_indexed_and_learned_after_the_turn(self):
+    def test_the_exchange_is_indexed_and_learned_once_the_reply_is_spoken(self):
         c = make_claude([text_reply("noted")])
         written, learned = [], []
         c.memory = SimpleNamespace(
@@ -338,6 +338,8 @@ class TestConverseSeams(unittest.TestCase):
                         lambda ask, mem, facts, owner, xid, doc, meta:
                         learned.append((owner, xid)) or (0, 0, 0)):
             c.converse("remember this")
+            self.assertEqual(written, [])  # not before the reply is spoken
+            c.settle_reply("noted", "noted")
         (msgs, owner, skip), = written
         self.assertEqual((owner, skip, msgs[0]["content"]), ("alice", False, "remember this"))
         self.assertEqual(learned, [("alice", "xc_1")])

@@ -168,6 +168,15 @@ MEMORY_COLLECTION = "conversations"  # legacy shared archive, read-only
 # The "look deeper" tool must never look shallower than the Background it goes
 # beyond: it returned 3 while the block weighed 12 candidates (2026-09-17).
 MEMORY_SEARCH_RESULTS = 8            # exchanges the recall tool returns
+# Memory holds what the user HEARD, not what the model wrote (issue #26): a
+# reply cut off by a barge-in, or held unspoken because the user was already
+# talking, is kept as its spoken part plus one of these marks. Without the
+# mark the model argues from words never said aloud — asked why a question
+# went unanswered, it replied "I just said you're welcome" (2026-10-09 16:02);
+# 113 replies in two weeks were never spoken at all.
+REPLY_CUT_MARK = "[The user cut in here and did not hear the rest of this reply.]"
+REPLY_UNHEARD_MARK = ("[Not heard: the user was already talking when this reply "
+                      "was ready, so none of it was spoken.]")
 
 # --- Retrieval-first context ---------------------------------------------------
 # What the model sees about the past, every turn: the last few exchanges
