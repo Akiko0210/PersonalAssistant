@@ -89,6 +89,11 @@ def _iso(d):
         if d.tzinfo else d.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
+def _local_day(d):
+    """The local midnight that starts ISO date `d`, timezone-aware."""
+    return datetime.fromisoformat(str(d)[:10]).astimezone()
+
+
 # --- client -----------------------------------------------------------------
 
 class Client:
@@ -278,10 +283,18 @@ class Client:
         return self.account(account).get("currentBalances") or {}
 
     def transactions_all(self, account, start, end, types="TRADE"):
-        """Every transaction of `types` in [start, end] (ISO dates; at most
-        one year). Expirations are RECEIVE_AND_DELIVER."""
+        """Every transaction of `types` over the local days start..end (ISO
+        dates, both inclusive; at most one year). Expirations are
+        RECEIVE_AND_DELIVER."""
+        # A bare end date used to go out as its own 00:00Z — the evening
+        # before, here — so no sync saw the day's fills (2026-10-19). Cap at
+        # now and trim to the one-year limit, which counts hours too.
+        now = datetime.fromtimestamp(self._clock(), timezone.utc)
+        stop = min(_local_day(end) + timedelta(days=1), now)
+        begin = max(_local_day(start),
+                    stop - timedelta(days=tcfg.SCHWAB_TRANSACTIONS_MAX_DAYS))
         return self._request("GET", self._acct(account, "/transactions"), params={
-            "startDate": _iso(start), "endDate": _iso(end), "types": types})
+            "startDate": _iso(begin), "endDate": _iso(stop), "types": types})
 
     # --- market data -------------------------------------------------------
 

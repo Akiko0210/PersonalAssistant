@@ -5,6 +5,7 @@ Schwab's shapes into the package's dataclasses (so pnl.py stays one copy).
 
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from tests.trading_fixtures import FakeHTTP, FakeResponse, spx_chain
@@ -153,6 +154,31 @@ class TestAccountsAndOrders(SchwabBase):
         self.assertEqual((order.id, order.status, order.underlying), ("987", "Working", "SPX"))
         self.assertTrue(order.is_working)
         self.assertEqual(order.price_effect, "Credit")
+
+    def test_transactions_window_covers_today_up_to_now(self):
+        # A bare end date used to go out as its 00:00Z — the evening before
+        # in Pacific time — so every sync on 2026-10-19 missed that day's fills.
+        self.http.script["GET /accounts/accountNumbers"] = FakeResponse(
+            200, [{"accountNumber": "1", "hashValue": "H"}])
+        self.http.script["GET /accounts/H/transactions"] = FakeResponse(200, [])
+        now = datetime(2026, 10, 19, 12, 20, 49).astimezone()   # a local midday fill
+        self.now = now.timestamp()
+        c = self.signed_in()
+
+        def window(start, end):
+            c.transactions_all("1", start, end)
+            p = self.http.calls[-1][2]["params"]
+            return p["startDate"], p["endDate"]
+
+        def midnight(day):
+            return schwab._iso(datetime.fromisoformat(day).astimezone())
+        self.assertEqual(window("2026-10-18", "2026-10-19"),
+                         (midnight("2026-10-18"), schwab._iso(now)))
+        # A past end day is covered through its last second.
+        self.assertEqual(window("2026-10-15", "2026-10-16")[1], midnight("2026-10-17"))
+        # Schwab's one-year cap counts hours, so the span is trimmed to it.
+        self.assertEqual(window("2020-01-01", "2026-10-19")[0], schwab._iso(
+            now - timedelta(days=tcfg.SCHWAB_TRANSACTIONS_MAX_DAYS)))
 
 
 class TestParsers(unittest.TestCase):
