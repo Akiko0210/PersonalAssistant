@@ -40,6 +40,10 @@ class TradingEngine:
     def chain(self, underlying, force=False):
         return tchains.fetch_chain(self.broker, self.client, underlying, force=force)
 
+    def extend_chain(self, chain, start, end, every_strike=False):
+        return tchains.extend_chain(self.broker, self.client, chain, start, end,
+                                    every_strike=every_strike)
+
     def underlying_quote(self, underlying, wait_s=2.5):
         """Live Quote for an underlying ('SPX', '/ES', 'AAPL')."""
         underlying = tsym.normalize_underlying(underlying)

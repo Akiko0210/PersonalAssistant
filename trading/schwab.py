@@ -302,9 +302,18 @@ class Client:
         return self._request("GET", "/marketdata/v1/quotes", params={
             "symbols": ",".join(symbols), "fields": "quote"})
 
-    def option_chain(self, symbol):
-        return self._request("GET", "/marketdata/v1/chains", params={
-            "symbol": symbol, "contractType": "ALL", "strategy": "SINGLE"})
+    def option_chain(self, symbol, start, end, strikes=None):
+        """Expirations start..end (ISO dates); `strikes` around the money,
+        or every one. Never the whole chain: past ~10 MB Schwab answers 502
+        (see SCHWAB_CHAIN_DAYS)."""
+        params = {"symbol": symbol, "contractType": "ALL", "strategy": "SINGLE",
+                  "fromDate": start, "toDate": end}
+        if strikes:
+            params["strikeCount"] = strikes
+        return self._request("GET", "/marketdata/v1/chains", params=params)
+
+    def today(self):
+        return date.fromtimestamp(self._clock())
 
     # --- orders ------------------------------------------------------------
 
@@ -456,12 +465,21 @@ def _normalize_chain(underlying, data):
     return chain
 
 
-def fetch_chain(client, underlying):
+def fetch_chain(client, underlying, start=None, end=None, every_strike=False):
+    """The next SCHWAB_CHAIN_DAYS at SCHWAB_CHAIN_STRIKES strikes, or the
+    expirations start..end that chains.extend_chain asks for — every strike
+    of them with every_strike (one expiration's worth is ~1 MB)."""
     if tsym.is_futures(underlying):
         raise ValueError(f"Schwab's API doesn't trade futures or their options, "
                          f"so {underlying} isn't available here — that's "
                          "tastytrade's, with Bonny.")
-    return _normalize_chain(underlying, client.option_chain(quote_symbol(underlying)))
+    if start is None:
+        today = client.today()
+        start, end = today.isoformat(), (
+            today + timedelta(days=tcfg.SCHWAB_CHAIN_DAYS)).isoformat()
+    data = client.option_chain(quote_symbol(underlying), start, end,
+                               None if every_strike else tcfg.SCHWAB_CHAIN_STRIKES)
+    return _normalize_chain(underlying, data)
 
 
 def underlying_api_symbol(chain):
