@@ -36,6 +36,22 @@ def fetch_chain(broker, client, underlying, force=False):
     return chain
 
 
+def extend_chain(broker, client, chain, start, end, every_strike=False):
+    """Fetch the expirations start..end (every strike of them with
+    every_strike) and merge them into `chain` — the cached object, so the
+    stretch stays for the cache's life. Schwab's normal load is one week at
+    80 strikes (#32); this is how a later date or a far strike is reached."""
+    extra = broker.fetch_chain(client, chain.underlying, start=start, end=end,
+                               every_strike=every_strike)
+    with _cache_lock:
+        for exp, strikes in extra.strikes.items():
+            chain.strikes[exp] = sorted(set(chain.strikes.get(exp, [])) | set(strikes))
+        chain.options.update(extra.options)
+        chain.expiration_contract.update(extra.expiration_contract)
+        chain.expirations = sorted(chain.strikes)
+    return chain
+
+
 def clear_cache():
     with _cache_lock:
         _cache.clear()

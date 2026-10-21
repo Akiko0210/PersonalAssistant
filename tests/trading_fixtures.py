@@ -3,6 +3,9 @@ and a synthetic /ES futures chain, built directly as ChainData (the tests
 for API-shape parsing build raw payloads separately in test_trading_chains).
 """
 
+import time
+
+from trading import chains as tchains
 from trading import symbols as tsym
 from trading.models import ChainData, OptionInfo, Quote
 
@@ -11,13 +14,13 @@ SPX_EXPIRATIONS = ["2026-07-24", "2026-07-27", "2026-07-31",
 SPX_STRIKES = [6300 + 5 * i for i in range(21)]        # 6300..6400, 5 wide
 
 
-def spx_chain():
+def spx_chain(expirations=SPX_EXPIRATIONS, strikes=SPX_STRIKES):
     chain = ChainData(underlying="SPX", underlying_streamer="SPX",
-                      expirations=list(SPX_EXPIRATIONS), strikes={},
+                      expirations=list(expirations), strikes={},
                       options={}, fetched_at=0.0)
-    for exp in SPX_EXPIRATIONS:
-        chain.strikes[exp] = [float(s) for s in SPX_STRIKES]
-        for s in SPX_STRIKES:
+    for exp in expirations:
+        chain.strikes[exp] = [float(s) for s in strikes]
+        for s in strikes:
             for cp in "CP":
                 occ = tsym.build_occ("SPXW", exp, cp, s)
                 chain.options[(exp, float(s), cp)] = OptionInfo(
@@ -55,6 +58,36 @@ def quotes_for(chain, bid=10.0, ask=10.4):
             return Quote(symbol=streamer, bid=bid, ask=ask, updated_at=1.0)
         return None
     return get_quote
+
+
+class WindowedBroker:
+    """A broker variant serving `listed` the way Schwab does since #32: a
+    normal load of its first `loaded` expirations at the middle `strikes`
+    strikes, and any start..end window on request (every strike with
+    every_strike). `asked` records each window, None for the normal load."""
+    KEY = "schwab"
+
+    def __init__(self, listed, loaded=2, strikes=5):
+        self.listed, self.loaded, self.strikes = listed, loaded, strikes
+        self.asked = []
+
+    def fetch_chain(self, client, underlying, start=None, end=None,
+                    every_strike=False):
+        self.asked.append((start, end, every_strike) if start else None)
+        exps = (self.listed.expirations[:self.loaded] if start is None else
+                [e for e in self.listed.expirations if start <= e <= end])
+        part = ChainData(underlying=underlying, underlying_streamer=underlying,
+                         expirations=exps, strikes={}, options={},
+                         fetched_at=time.time())
+        for e in exps:
+            ks = self.listed.strikes[e]
+            if not every_strike:
+                mid = len(ks) // 2
+                ks = ks[mid - self.strikes // 2: mid + self.strikes // 2 + 1]
+            part.strikes[e] = list(ks)
+            part.options.update({k: v for k, v in self.listed.options.items()
+                                 if k[0] == e and k[1] in ks})
+        return part
 
 
 # --- HTTP fake for the broker clients ---------------------------------------
@@ -105,9 +138,12 @@ class FakeEngine:
     P&L (also its net liquidating value), and every call records which
     account it reached."""
 
-    def __init__(self, key, realized=0.0, accounts=None):
+    def __init__(self, key, realized=0.0, accounts=None, variant=None, price=None):
         from trading import accounts as taccounts
         self.key = key
+        # For the ticket tools: a broker variant (WindowedBroker) serving the
+        # chain through the real chains.py cache, and the underlying's price.
+        self.variant, self.price = variant, price
         self._acc = taccounts
         self.by_account = accounts or {f"{key}-1": realized}
         self.calls = []
@@ -133,6 +169,16 @@ class FakeEngine:
         self.calls.append(("balance", account))
         v = self.by_account[account]
         return Balance(net_liq=v, cash=v / 2, buying_power=v / 4)
+
+    def chain(self, underlying, force=False):
+        return tchains.fetch_chain(self.variant, None, underlying, force=force)
+
+    def extend_chain(self, chain, start, end, every_strike=False):
+        return tchains.extend_chain(self.variant, None, chain, start, end,
+                                    every_strike=every_strike)
+
+    def underlying_quote(self, underlying):
+        return Quote(symbol=underlying, bid=self.price, ask=self.price)
 
     def pnl_report(self, account, start, end, underlying=None):
         from trading.models import PnLReport

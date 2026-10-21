@@ -100,15 +100,18 @@ class Ticket:
 
     # --- editing ---------------------------------------------------------
 
+    def locked_with(self, leg_index):
+        """The legs that move with this one's strike: its strike-locked
+        group, or itself."""
+        for group in tstrat.STRIKE_LOCKED_GROUPS.get(self.strategy, []):
+            if leg_index in group:
+                return list(group)
+        return [leg_index]
+
     def set_strike(self, leg_index, strike, chain):
         """Set a leg's strike (snapped to its expiration's chain), moving
         any strike-locked partners with it. Returns the affected indices."""
-        groups = tstrat.STRIKE_LOCKED_GROUPS.get(self.strategy, [])
-        moved = [leg_index]
-        for group in groups:
-            if leg_index in group:
-                moved = list(group)
-                break
+        moved = self.locked_with(leg_index)
         for i in moved:
             leg = self.legs[i]
             strikes = chain.strikes.get(leg.expiration) or []

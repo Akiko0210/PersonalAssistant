@@ -61,6 +61,14 @@ SCHWAB_QUOTE_TTL_S = 5.0
 # /transactions takes at most one year per call; the P&L lookback (370 days
 # below) is clamped to it rather than paged.
 SCHWAB_TRANSACTIONS_MAX_DAYS = 365
+# /marketdata/v1/chains answers 502 "Body buffer overflow" (TooBigBody) past
+# about 10 MB, and the whole SPX chain — daily expirations years out — is far
+# over it: every SPX chain load failed (2026-10-16, 2026-10-20; #32). So the
+# normal load is the next week at this many strikes around the money: six
+# expirations, 1.15 MB, 0.6 s (measured 2026-10-20 — no slower than today's
+# alone). Anything past it is fetched when asked for (chains.extend_chain).
+SCHWAB_CHAIN_DAYS = 7
+SCHWAB_CHAIN_STRIKES = 80
 
 # --- Files ---------------------------------------------------------------
 
@@ -128,6 +136,11 @@ UNDERLYING_QUOTE_SYMBOL = {"/ES": "/ES:XCME", "/MES": "/MES:XCME"}
 # How long a normalized option chain stays cached (strikes/expirations do
 # not change intraday; new expirations appear overnight).
 CHAIN_CACHE_TTL_S = 15 * 60
+# A date the user names snaps to the closest listed expiration only this
+# close; nothing nearer is refused, not snapped to whatever exists (a loaded
+# week once made "December" into next Tuesday, #32). A date past the loaded
+# chain is fetched this far either side of it.
+CHAIN_REACH_DAYS = 14
 
 # Realized-P&L transaction fetch reaches back this far before the requested
 # period start so opens that precede the period are matched (see pnl.py).
