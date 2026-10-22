@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import config as cfg
+from brain import agents
 from brain.facts import catch_up, extract, learn
 from brain.llm.plain import ask
 from stores.chroma_store import Hit
@@ -159,6 +160,47 @@ class TestExtract(unittest.TestCase):
         self.assertIn("[f_1] todo:2026-09-18 — Items: one.", seen["prompt"])
         self.assertIn("person:tom", seen["prompt"])
         self.assertIn("user: add milk", seen["prompt"])
+
+
+class TestTradeStateIsNotAFact(unittest.TestCase):
+    """Tom's position state belongs to the trade log: kept as facts it went
+    stale and wrong ("the 7650 leg stays open", 2026-10-19) and was fed back
+    as memory. Dropped on write whatever the extractor says, and on read."""
+
+    HOLDING = add("holding:blue-diagonal-legs", "Short the Oct 22 7650 put.")
+    NICKNAME = add("account:blue", "The user calls account 839 'blue'.")
+
+    def setUp(self):
+        self.cols = {}
+        self.memory = memory_over(self.cols)
+        self.facts = facts_over(self.cols)
+
+    def test_learn_gives_tom_the_rule_and_drops_trade_state(self):
+        msgs = [{"role": "user", "content": "what's open on blue", "ts": T1},
+                {"role": "assistant", "content": [{"type": "text", "text": "x"}]}]
+        self.memory.index_exchanges(msgs, "tom")
+        ((xid, doc, meta),) = self.memory.exchanges_of(msgs, "tom")
+        seen = {}
+
+        def ask(system, prompt):
+            seen["system"] = system
+            return json.dumps({"ops": [self.HOLDING, self.NICKNAME]})
+        self.assertEqual(learn(ask, self.memory, self.facts, "tom", xid, doc, meta),
+                         (1, 0, 0))
+        self.assertIn(agents.TRADE_STATE_RULE, seen["system"])
+        self.assertEqual(list(self.facts.entities("tom")), ["account:blue"])
+
+    def test_old_trade_state_facts_stop_reaching_tom(self):
+        with mock.patch.dict(agents.AGENTS["tom"], {"fact_skip": ()}):
+            self.facts.apply("tom", [self.HOLDING, self.NICKNAME],
+                             xid="xc_1", ts=T1, epoch=1.0)     # written before the rule
+        rows = self.facts.query_rows("blue 7650 put", owner="tom")
+        self.assertEqual({h.meta["entity"] for h in rows.dense + rows.lexical},
+                         {"account:blue"})
+        self.assertEqual(self.facts.current("tom", ["holding:blue-diagonal-legs"]), [])
+        # Alice keeps every kind: the rule is Tom's alone.
+        self.facts.apply("alice", [self.HOLDING], xid="xc_2", ts=T2, epoch=2.0)
+        self.assertEqual(len(self.facts.current("alice", ["holding:blue-diagonal-legs"])), 1)
 
 
 class TestPlainAsk(unittest.TestCase):

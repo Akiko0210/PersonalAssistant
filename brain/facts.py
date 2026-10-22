@@ -49,6 +49,15 @@ def slug(key) -> str:
     return _SLUG.sub("-", str(key or "").strip().lower()).strip("-")
 
 
+def skipped(meta) -> bool:
+    """A fact of a kind its persona never keeps (agents' fact_skip): Tom's
+    position state, which the trade log owns. Dropped on write, whatever the
+    extractor returns, and on read, so facts written before the rule stop
+    reaching the model at once."""
+    kinds = agents.AGENTS.get(meta.get("agent"), {}).get("fact_skip", ())
+    return (meta.get("entity") or "").split(":")[0] in kinds
+
+
 def fact_id(owner, xid, entity, value) -> str:
     """Deterministic, so re-learning an exchange (a rebuild, a boot that
     repeats one the worker had not marked) overwrites instead of duplicating."""
@@ -105,7 +114,10 @@ class FactStore(HybridStore):
             return self._is_current(meta) and (window is None or in_window(meta, window))
         sources = [(cfg.agent_facts_collection(k), False, 1)
                    for k in agents.readable_owners(owner)]
-        return self._collect(sources, query, n, where, keep)
+        rows = self._collect(sources, query, n, where, keep)
+        return rows._replace(
+            dense=[h for h in rows.dense if not skipped(h.meta)],
+            lexical=[h for h in rows.lexical if not skipped(h.meta)])
 
     def current(self, owner, entities) -> list:
         """The facts in force about `entities`, oldest first, as Hit rows —
@@ -131,7 +143,8 @@ class FactStore(HybridStore):
             vecs = self._vectors(name, ids)
             out += [chroma_store.Hit(0.0, d, m or {}, i, vecs.get(i))
                     for i, d, m in zip(ids, got.get("documents") or [],
-                                       got.get("metadatas") or [])]
+                                       got.get("metadatas") or [])
+                    if not skipped(m or {})]
         out.sort(key=lambda h: h.meta.get("epoch") or 0)
         return out
 
@@ -214,7 +227,7 @@ class FactStore(HybridStore):
                 sources = f"{prev.get('source_ids', '')},{xid}".strip(",")
             else:
                 entity, sources = slug(op.get("entity")), xid
-            if not entity:
+            if not entity or skipped({"agent": owner, "entity": entity}):
                 continue
             fid = fact_id(owner, xid, entity, op["value"])
             ids.append(fid)
@@ -284,11 +297,13 @@ SYSTEM = (
 )
 
 
-def extract(ask, doc, ts, candidates, known, *, assistant="the assistant"):
+def extract(ask, doc, ts, candidates, known, *, assistant="the assistant",
+            rule=""):
     """The extractor's operations for one exchange, validated: an update or
     supersede must name a candidate id, an add needs an entity and a value.
     `assistant` is the persona's name, so the extractor never takes it for
-    the user's (a round of extraction once named the user "Alice"). None
+    the user's (a round of extraction once named the user "Alice"); `rule`
+    is the persona's own limit (agents' fact_rule). None
     when the model could not be asked or gave no ops list at all — that is
     "not done", and the exchange stays unmarked for a later pass; [] is
     "nothing durable", which is done."""
@@ -301,7 +316,7 @@ def extract(ask, doc, ts, candidates, known, *, assistant="the assistant"):
               f"Known facts that may be related:\n{shown}\n\n"
               f"Other entity keys in use: {', '.join(known) or '(none)'}")
     try:
-        text = ask(SYSTEM, prompt)
+        text = ask(SYSTEM + (f"\n\nFor {assistant}: {rule}" if rule else ""), prompt)
     except Exception as e:  # noqa: BLE001
         log.warning("fact extraction failed: %s", e)
         return None
@@ -342,9 +357,10 @@ def learn(ask, memory, facts, owner, xid, doc, meta):
     for h in facts.current(owner, {h.meta.get("entity") for h in candidates.values()
                                    if h.meta.get("entity")}):
         candidates.setdefault(h.id, h)
+    hat = agents.AGENTS.get(owner, {})
     ops = extract(ask, doc, meta.get("ts"), list(candidates.values()),
-                  facts.entities(owner),
-                  assistant=agents.AGENTS.get(owner, {}).get("name", owner))
+                  facts.entities(owner), assistant=hat.get("name", owner),
+                  rule=hat.get("fact_rule", ""))
     if ops is None:
         return None
     counts = facts.apply(owner, ops, xid=xid, ts=meta.get("ts") or "",

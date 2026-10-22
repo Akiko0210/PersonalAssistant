@@ -105,6 +105,18 @@ CAMPAIGN_RECORD_RULES = (
     "campaign is finished, close it with its outcome. "
 )
 
+# Position state belongs to the trade log, which nets it from the fills on
+# every read. Kept as facts it went stale and wrong and was fed back as
+# memory: "the 7650 leg stays open" outlived the leg (2026-10-19), five
+# versions of one diagonal's legs reached a single answer (2026-10-21).
+# brain/facts.py drops these kinds on write and read, and gives the
+# extractor the rule for the same state filed under any other key.
+TRADE_STATE_KINDS = ("holding", "trade", "trade-log", "calc")
+TRADE_STATE_RULE = (
+    "Never record positions, legs, fills, rolls, what is open or closed, "
+    "or P&L, under any key: the trade log holds them, computed fresh. "
+    "Plans, decisions and campaign rules are still facts.")
+
 AGENTS = {
     "alice": {
         "name": "Alice",
@@ -284,6 +296,8 @@ AGENTS = {
                   *RECORD_TOOLS},
         "reads": (),
         "brokers": ("schwab",),
+        "fact_skip": TRADE_STATE_KINDS,
+        "fact_rule": TRADE_STATE_RULE,
         "model": "sonnet",      # analysis benefits from the stronger model
         # Only Zira + David are installed on this machine, so Tom shares
         # David's voice at a slower, more deliberate rate; the spoken
