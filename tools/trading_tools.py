@@ -130,15 +130,66 @@ def _load_ticket(broker):
 
 
 def _ticket_chain(eng):
-    """(ticket, chain, None) or (None, None, spoken-problem)."""
+    """(ticket, chain, None) or (None, None, spoken-problem). The chain
+    reaches every leg: one built on a fetched stretch outlives the cache."""
     tk = _load_ticket(eng.key)
     if tk is None:
         return None, None, ("There is no order ticket yet — build a "
                             "strategy first.")
     try:
-        return tk, eng.chain(tk.underlying), None
+        chain = eng.chain(tk.underlying)
     except Exception as e:
         return None, None, f"Couldn't load the {tk.underlying} chain: {e}"
+    for leg in tk.legs:
+        if leg.strike not in (chain.strikes.get(leg.expiration) or []):
+            _strike_listed(eng, chain, leg.expiration, leg.strike)  # validate() says what's off
+    return tk, chain, None
+
+
+# --- reaching past the loaded chain ------------------------------------------
+# Schwab's chain is loaded a week deep at 80 strikes (#32): the whole one is
+# too big for its API. A later date or a far strike is fetched when asked
+# for; only one that isn't listed at all is refused — never snapped to the
+# edge of whatever happens to be loaded.
+
+def _expiration(eng, chain, said):
+    """(expiration, None) or (None, spoken-problem): the listed expiration
+    closest to the ISO date `said`, no further than CHAIN_REACH_DAYS."""
+    target = date.fromisoformat(said)
+    reach = timedelta(days=tcfg.CHAIN_REACH_DAYS)
+    if not chain.expirations or said > chain.expirations[-1]:
+        try:
+            eng.extend_chain(chain, (target - reach).isoformat(),
+                             (target + reach).isoformat())
+        except Exception as e:
+            return None, f"Couldn't load {chain.underlying} expirations near {said}: {e}"
+    near = min(chain.expirations, default=None,
+               key=lambda d: abs(date.fromisoformat(d) - target))
+    # No "nearest" offered: only the loaded week and this stretch were
+    # looked at, so a listed date between them would go unmentioned.
+    if near is None or abs(date.fromisoformat(near) - target) > reach:
+        return None, (f"{chain.underlying} has no expiration listed within "
+                      f"{tcfg.CHAIN_REACH_DAYS} days of {with_weekday(said)}. "
+                      "Name another date.")
+    return near, None
+
+
+def _strike_listed(eng, chain, expiration, strike):
+    """None, or why `strike` can't be had on `expiration`. Outside the
+    loaded strikes, that expiration's every strike is fetched first."""
+    strikes = chain.strikes.get(expiration) or []
+    if not strikes or not strikes[0] <= strike <= strikes[-1]:
+        try:
+            eng.extend_chain(chain, expiration, expiration, every_strike=True)
+        except Exception as e:
+            return f"Couldn't load the {chain.underlying} {expiration} strikes: {e}"
+        strikes = chain.strikes.get(expiration) or []
+    if not strikes:
+        return f"{chain.underlying} has no expiration on {with_weekday(expiration)}."
+    if not strikes[0] <= strike <= strikes[-1]:
+        return (f"{chain.underlying} {with_weekday(expiration)} strikes run from "
+                f"{strikes[0]:g} to {strikes[-1]:g}; {strike:g} isn't listed.")
+    return None
 
 
 def _engine_and_ticket(ctx, args=None):
@@ -397,9 +448,10 @@ def list_expirations(ctx, args):
         return f"Couldn't load the {symbol} chain: {e}"
     n = max(1, min(int(args.get("count") or 6), 20))
     exps = chain.expirations[:n]
+    # Not a total: Schwab's chain is loaded a week deep (#32).
     return (f"Nearest {symbol} expirations: " +
             ", ".join(map(with_weekday, exps)) +
-            f". ({len(chain.expirations)} total.)")
+            ". Later ones are looked up when the user names a date.")
 
 
 @tool({
@@ -449,9 +501,9 @@ def build_strategy(ctx, args):
         return f"Couldn't load the {symbol} option chain: {e}"
     expiration = None
     if args.get("expiration"):
-        expiration = min(chain.expirations,
-                         key=lambda d: abs(date.fromisoformat(d).toordinal() -
-                                           date.fromisoformat(args["expiration"]).toordinal()))
+        expiration, problem = _expiration(eng, chain, args["expiration"])
+        if problem:
+            return problem
     q = eng.underlying_quote(symbol)
     price = q.mid if q and q.mid is not None else (q.last if q else None)
     size = max(1, int(args.get("size") or 1))
@@ -506,17 +558,22 @@ def adjust_leg(ctx, args):
     leg = tk.legs[i]
     changes = []
     if args.get("expiration"):
-        target = args["expiration"]
-        snapped = min(chain.expirations,
-                      key=lambda d: abs(date.fromisoformat(d).toordinal() -
-                                        date.fromisoformat(target).toordinal()))
+        snapped, problem = _expiration(eng, chain, args["expiration"])
+        problem = problem or _strike_listed(eng, chain, snapped, leg.strike)
+        if problem:
+            return problem
         leg.expiration = snapped
         strikes = chain.strikes.get(snapped) or []
         if strikes and leg.strike not in strikes:
             leg.strike = tstrat.closest(strikes, leg.strike)
         changes.append(f"expiration {snapped}")
     if args.get("strike") is not None:
-        moved = tk.set_strike(i, float(args["strike"]), chain)
+        strike = float(args["strike"])
+        for j in tk.locked_with(i):
+            problem = _strike_listed(eng, chain, tk.legs[j].expiration, strike)
+            if problem:
+                return problem
+        moved = tk.set_strike(i, strike, chain)
         changes.append(f"strike {leg.strike:g}" +
                        (f" (moved legs {', '.join(str(m + 1) for m in moved)} "
                         "together)" if len(moved) > 1 else ""))

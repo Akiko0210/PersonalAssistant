@@ -7,7 +7,7 @@ of the package (ticket, orders gate, engine, P&L math) sees only the
 broker-neutral dataclasses in models.py and this module's uniform surface:
 
     KEY, LABEL, credentials_problem(), Client(), make_quotes(client),
-    fetch_chain(client, underlying), order_payload(ticket, chain),
+    fetch_chain(client, underlying, ...), order_payload(ticket, chain),
     parse_dry_run(data), parse_order(data), parse_positions(items),
     parse_balance(raw), transactions(client, account, start, end, underlying),
     env_label(), status(client)
@@ -362,9 +362,10 @@ def _normalize_futures(underlying, data, futures_items):
     return chain
 
 
-def fetch_chain(client, underlying):
+def fetch_chain(client, underlying, start=None, end=None, every_strike=False):
     """ChainData for an underlying ('SPX', 'AAPL', '/ES'); the cache is
-    chains.py's."""
+    chains.py's. tastytrade's nested chain is always whole, so the window
+    chains.extend_chain asks Schwab for (#32) has nothing to add here."""
     if tsym.is_futures(underlying):
         code = tsym.product_code(underlying)
         data = client.nested_futures_option_chain(code)
