@@ -166,14 +166,16 @@ def _label(p):
     return f"P{p['id']} '{p['name']}'"
 
 
-def _placed(account, refs, new=()):
+def _placed(account, refs):
     """One line per ref after the one-match rule has run: where it joined,
-    or what Tom must settle. `new` are fills just logged, which always land
-    in a position when they close something (trade_log.auto_assign)."""
-    result = trade_log.auto_assign(account, new)
+    or what Tom must settle (those lines name assign_trades)."""
+    result = trade_log.auto_assign(account)
     names = {p["id"]: _label(p) for p in trade_log.positions(account=account)}
+    trades = trade_log.query(account=account)
+    closes = {ref for ref, fx in tpos.leg_effects(trades).items()
+              if any(closed for _, closed, _ in fx)}
     by_position = {}
-    for t in trade_log.query(account=account):
+    for t in trades:
         if t["position_id"] is not None:
             by_position.setdefault(t["position_id"], []).append(t)
     open_ones = [names[pid] for pid, ts in by_position.items()
@@ -187,6 +189,12 @@ def _placed(account, refs, new=()):
             out.append(f"#{ref} closes legs of " + " and ".join(
                 names[h] for h in hits) + ": ask the user which it belongs "
                 "to, then assign_trades")
+        elif ref in closes:
+            # 2026-10-21: a 7660 buyback of a standalone short was reported
+            # as closing nothing, and Tom called it a new trade.
+            out.append(f"#{ref} closes legs no named position holds: the "
+                       "user's zero-net rule already pairs it with the "
+                       "trades it closes, nothing to settle")
         else:
             # The user's choice (2026-10-22): Tom guesses and says so, rather
             # than asking first — an opening fill is rarely ambiguous to him.
@@ -259,8 +267,8 @@ def log_trade(ctx, args):
     if logged:
         out.append("Fees stay pending until the next statement import")
         for account in dict.fromkeys(t["account"] for t in logged):
-            refs = [t["ref"] for t in logged if t["account"] == account]
-            out += _placed(account, refs, new=refs)
+            out += _placed(account, [t["ref"] for t in logged
+                                     if t["account"] == account])
     return ". ".join(out) + "."
 
 
@@ -493,9 +501,8 @@ def _sync_account(eng, number, start=None):
         reply += f" Skipped {skipped} stock orders (the log holds options)."
     # _placed runs the one-match rule over the whole account (so synced
     # expirations close their legs too) and says which fills need settling.
-    refs = [r["ref"] for r in fills]
-    asks = [line for line in _placed(acct, refs, new=refs)
-            if " is in " not in line]
+    asks = [line for line in _placed(acct, [r["ref"] for r in fills])
+            if "assign_trades" in line]
     if asks:
         reply += " Positions to settle: " + "; ".join(asks) + "."
     return reply

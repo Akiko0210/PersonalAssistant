@@ -278,15 +278,11 @@ def query(account=None, start=None, end=None, symbol=None, strategy=None,
 
 def create_position(account, name, record_id=None):
     with _db() as db:
-        return _insert_position(db, account, name, record_id)
-
-
-def _insert_position(db, account, name, record_id=None):
-    return db.execute(
-        "INSERT INTO positions (account, name, record_id, created) "
-        "VALUES (?, ?, ?, ?)", (account, name.strip(), record_id,
-                                datetime.now().isoformat(timespec="seconds"))
-    ).lastrowid
+        return db.execute(
+            "INSERT INTO positions (account, name, record_id, created) "
+            "VALUES (?, ?, ?, ?)", (account, name.strip(), record_id,
+                                    datetime.now().isoformat(timespec="seconds"))
+        ).lastrowid
 
 
 def positions(account=None, ids=None, record_id=None):
@@ -323,18 +319,14 @@ def assign(account, refs, position_id):
             (position_id, account, *refs)).rowcount
 
 
-def auto_assign(account, new=()):
+def auto_assign(account):
     """Apply the one-match rule to `account`'s unassigned trades, oldest
     first: each joins the one position holding the contracts it closes.
-    Holders are found across the whole account, so a fill that closes an
-    unnamed trade's leg is seen to close it (2026-10-21: a 7660 buyback was
-    reported as closing nothing). When those holders have no position and
-    the fill is one of `new` (just logged), they and it become one, named
-    for the contract — every new fill lands somewhere; old history is left
-    alone. Returns {ref: [position ids]}: one id means it is in that
-    position, none means it only opens legs, several mean the user must say.
-    Walking the whole account makes the order fills were logged in
-    irrelevant — alerts arrive out of order."""
+    Returns {ref: [position ids]}: one id means it joined that position now
+    (or earlier), none means no named position holds what it closes (the
+    zero-net rule pairs it), several mean the user must say. Walking the
+    whole account makes the order fills were logged in irrelevant — alerts
+    arrive out of order."""
     with _db() as db:
         trades = _read(db, "t.account = ?", (account,))
         effects = tpos.leg_effects(trades)
@@ -343,16 +335,8 @@ def auto_assign(account, new=()):
         for t in trades:
             ref = t["ref"]
             if pos[ref] is None:
-                holders = {h for _, closed, hs in effects[ref] if closed
-                           for h in hs}
-                hits = sorted({pos[h] for h in holders} - {None})
-                if not hits and holders and ref in new:
-                    e, k, cp, _ = next(leg for leg, closed, _ in effects[ref]
-                                       if closed)
-                    hits = [_insert_position(
-                        db, account, f"{t['symbol']} {e} {k:g}{cp}")]
-                    joined += [(hits[0], h) for h in holders]
-                    pos.update(dict.fromkeys(holders, hits[0]))
+                hits = sorted({pos[h] for _, closed, hs in effects[ref]
+                               if closed for h in hs} - {None})
                 if len(hits) == 1:
                     pos[ref] = hits[0]
                     joined.append((hits[0], ref))

@@ -341,25 +341,17 @@ class TestFillDirection(LogBase):
         self.assertIn("(whole history): none", alone)
         self.assertNotIn("close each other out", alone)    # one leg is no P&L
 
-    def test_a_new_buyback_of_an_unnamed_short_gets_a_position(self):
+    def test_a_buyback_of_an_unnamed_short_is_already_paired(self):
+        """Not "closes no open position's leg", which Tom read as a new
+        trade (2026-10-21) — and no position is made for it: the zero-net
+        rule pairs the two on its own."""
         self.assertIn("only opens new legs", self.log("1", self.SELL, "Mon, 19"))
         reply = self.log("2", self.BUY, "Wed, 21")
-        self.assertIn("#2 is in P1 'SPX 2026-10-22 7650P'", reply)
         self.assertIn("(to close)", reply)
-        self.assertEqual(["1", "2"], [t["ref"] for t in trade_log.query(
-            positions=[1])])
-
-    def test_old_history_is_left_unassigned(self):
-        """Only a just-logged fill creates a position: a sync or import walks
-        the whole account and must not turn months of rows into positions."""
-        for ref, line, day in (("1", self.SELL, "19"), ("2", self.BUY, "21")):
-            fill = trade_log.parse_fill(line)
-            trade_log.save([trade_log.order(
-                fill, account=self.BLUE, ref=ref, amount=fill["amount"],
-                executed_at=f"2026-10-{day}T10:00:00", fees=None,
-                description=line, source="email")])
-        self.assertEqual(trade_log.auto_assign(self.BLUE)["2"], [])
+        self.assertIn("nothing to settle", reply)
+        self.assertNotIn("assign_trades", reply)
         self.assertEqual(trade_log.positions(account=self.BLUE), [])
+        self.assertIn("closed", self.call("trade_log_positions", account="839"))
 
 
 class TestStatementDrop(LogBase):
