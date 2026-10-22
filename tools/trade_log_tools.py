@@ -64,7 +64,19 @@ def _legs(legs):
                      for (s, e, k, cp), q in sorted(legs.items()))
 
 
-def _trade_line(t, with_account=False):
+def _direction(q, closed):
+    """'to close', 'to open', or the split of a leg that does both."""
+    if closed == q:
+        return "to close"
+    if not closed:
+        return "to open"
+    return f"{abs(closed)} to close, {abs(q - closed)} to open"
+
+
+def _trade_line(t, with_account=False, effects=None):
+    """One trade as a line. With `effects` (tpos.leg_effects over its
+    account) each leg says whether it opened or closed: a bare "+1 7640P"
+    was read aloud as a new long when it bought back a short (2026-10-21)."""
     when = t["executed_at"]
     parts = [t["ref"], f"{with_weekday(when[:10])} {when[11:16]}",
              t["symbol"], t["strategy"]]
@@ -77,9 +89,24 @@ def _trade_line(t, with_account=False):
         parts.append(f"cash {t['amount']:+,.2f} fees {fees}")
     if with_account:
         parts.insert(0, t["account"])
-    legs = ", ".join(f"{q:+d} {with_weekday(e)} {k:g}{cp}"
-                     for e, k, cp, q in t["legs"])
+    labels = ([f" ({_direction(q, closed)})" for (*_, q), closed, _ in effects]
+              if effects and t["strategy"] != "expiration"
+              else [""] * len(t["legs"]))
+    legs = ", ".join(f"{q:+d} {with_weekday(e)} {k:g}{cp}{label}"
+                     for (e, k, cp, q), label in zip(t["legs"], labels))
     return " ".join(parts) + " | " + legs
+
+
+def _history(accounts):
+    """{account: its whole log, oldest first} — what open/close and "still
+    open" are measured against, never just the rows a lookup returned."""
+    return {a: trade_log.query(account=a) for a in dict.fromkeys(accounts)}
+
+
+def _effects(history):
+    """{(account, ref): leg effects} over each account's whole log."""
+    return {(a, ref): fx for a, ts in history.items()
+            for ref, fx in tpos.leg_effects(ts).items()}
 
 
 def _totals_line(what, t):
@@ -141,11 +168,14 @@ def _label(p):
 
 def _placed(account, refs):
     """One line per ref after the one-match rule has run: where it joined,
-    or what to ask the user."""
+    or what Tom must settle (those lines name assign_trades)."""
     result = trade_log.auto_assign(account)
     names = {p["id"]: _label(p) for p in trade_log.positions(account=account)}
+    trades = trade_log.query(account=account)
+    closes = {ref for ref, fx in tpos.leg_effects(trades).items()
+              if any(closed for _, closed, _ in fx)}
     by_position = {}
-    for t in trade_log.query(account=account):
+    for t in trades:
         if t["position_id"] is not None:
             by_position.setdefault(t["position_id"], []).append(t)
     open_ones = [names[pid] for pid, ts in by_position.items()
@@ -159,12 +189,21 @@ def _placed(account, refs):
             out.append(f"#{ref} closes legs of " + " and ".join(
                 names[h] for h in hits) + ": ask the user which it belongs "
                 "to, then assign_trades")
+        elif ref in closes:
+            # 2026-10-21: a 7660 buyback of a standalone short was reported
+            # as closing nothing, and Tom called it a new trade.
+            out.append(f"#{ref} closes legs no named position holds: the "
+                       "user's zero-net rule already pairs it with the "
+                       "trades it closes, nothing to settle")
         else:
-            out.append(f"#{ref} closes no open position's leg: ask the user "
-                       "whether it starts a new position (and its name) or "
-                       "adds to one ("
-                       + (", ".join(open_ones) or "none open") + "), then "
-                       "assign_trades")
+            # The user's choice (2026-10-22): Tom guesses and says so, rather
+            # than asking first — an opening fill is rarely ambiguous to him.
+            out.append(f"#{ref} only opens new legs: assign_trades it to the "
+                       "position it most likely serves (a new short against "
+                       "a diagonal's long joins that diagonal) or a new one, "
+                       "and tell the user which in one sentence so they can "
+                       "correct it. Open positions: "
+                       + (", ".join(open_ones) or "none"))
     return out
 
 
@@ -223,7 +262,8 @@ def log_trade(ctx, args):
         if written:
             logged.append(trade)
         verb = "Logged" if written else "Already in the log"
-        out.append(f"{verb} on {m['account']}: {_trade_line(trade)}")
+        fx = _effects(_history([m["account"]])).get((m["account"], m["ref"]))
+        out.append(f"{verb} on {m['account']}: {_trade_line(trade, effects=fx)}")
     if logged:
         out.append("Fees stay pending until the next statement import")
         for account in dict.fromkeys(t["account"] for t in logged):
@@ -245,11 +285,12 @@ def _record(ctx, args):
 @tool({
     "name": "assign_trades",
     "description": (
-        "Put trade-log fills in a position: the user's answer when log_trade "
-        "says a fill closes no open position's leg, or legs of several. Pass "
-        "the refs and either position=<id> (an existing one) or "
-        "new_position=<the name the user gives it>; record=<campaign id> "
-        "ties the position to its campaign record. Only on the user's yes. "
+        "Put trade-log fills in a position: your best guess when log_trade "
+        "or sync_trades says a fill only opens new legs (then tell the user "
+        "which position you chose), the user's answer when it closes legs "
+        "of several, or a move the user asks for. Pass the refs and either "
+        "position=<id> (an existing one) or new_position=<a name>; "
+        "record=<campaign id> ties the position to its campaign record. "
         "Fills that roll this position's legs afterwards join it by "
         "themselves."
     ),
@@ -459,9 +500,9 @@ def _sync_account(eng, number, start=None):
     if skipped:
         reply += f" Skipped {skipped} stock orders (the log holds options)."
     # _placed runs the one-match rule over the whole account (so synced
-    # expirations close their legs too) and says which fills need the user.
+    # expirations close their legs too) and says which fills need settling.
     asks = [line for line in _placed(acct, [r["ref"] for r in fills])
-            if "ask the user" in line]
+            if "assign_trades" in line]
     if asks:
         reply += " Positions to settle: " + "; ".join(asks) + "."
     return reply
@@ -473,11 +514,13 @@ def _sync_account(eng, number, start=None):
     "name": "query_trade_log",
     "description": (
         "The user's thinkorswim/Schwab trades from the trade log, one line "
-        "each (ref, time, strategy, quantity @ price, cash, fees | legs), then "
-        "exact totals and the legs the selection leaves open. Filter by "
-        "period or dates, account, symbol, strategy, or a list of refs. Pass "
-        "refs to check any grouping of trades: no open legs means they form "
-        "a closed set, and its net is the exact P&L. Pass position=<id> for "
+        "each (ref, time, strategy, quantity @ price, cash, fees | legs, each "
+        "leg marked 'to open' or 'to close' against the whole account — say "
+        "it that way: 'bought to close', never 'bought' alone), then exact "
+        "totals and what is still open. Filter by period or dates, account, "
+        "symbol, strategy, or a list of refs. Pass refs to check any grouping "
+        "of trades: the totals line says when they close each other out and "
+        "its net is the exact P&L. Pass position=<id> for "
         "one position's trades — the way to answer 'what's open in X' — or "
         "record=<campaign id> for the positions serving that campaign. "
         "Quote these totals rather than adding numbers yourself. tastytrade "
@@ -522,18 +565,36 @@ def query_trade_log(ctx, args):
                              positions=chosen and [p["id"] for p in chosen])
     if not trades:
         return "No trades in the log match that."
+    history = _history(t["account"] for t in trades)
+    fx = _effects(history)
     shown = trades[-tcfg.TRADE_QUERY_MAX_ROWS:]
-    lines = [_trade_line(t, with_account=account is None) for t in shown]
+    lines = [_trade_line(t, account is None, fx[(t["account"], t["ref"])])
+             for t in shown]
     if chosen:
         lines.insert(0, "Positions: " + ", ".join(
             f"{_label(p)} on {p['account']}" for p in chosen))
     if len(shown) < len(trades):
         lines.insert(0, f"(The latest {len(shown)} of {len(trades)} trades; "
                         "narrow the dates for the rest. Totals cover all.)")
-    lines.append(_totals_line(f"{len(trades)} trades", tpos.totals(trades)))
+    totals = _totals_line(f"{len(trades)} trades", tpos.totals(trades))
     legs = tpos.net_legs(trades)
-    lines.append("Open legs of this selection: "
-                 + (_legs(legs) if legs else "none; every leg nets to zero."))
+    if not legs:
+        totals += "; these trades close each other out, so that net is their P&L"
+    lines.append(totals)
+    if chosen:      # whole positions: their own net is what is open
+        lines.append("Open legs of this selection: "
+                     + (_legs(legs) if legs else "none; every leg nets to zero."))
+    else:
+        # A date or ref window cuts positions in half; what is open comes
+        # from each account's whole history, on the contracts shown.
+        touched = {(t["account"], (t["symbol"], e, k, cp))
+                   for t in trades for e, k, cp, _ in t["legs"]}
+        still = [f"{a} {_legs(net)}" if account is None else _legs(net)
+                 for a, ts in history.items()
+                 if (net := {c: q for c, q in tpos.net_legs(ts).items()
+                             if (a, c) in touched})]
+        lines.append("Still open in the account on these contracts (whole "
+                     "history): " + ("; ".join(still) or "none"))
     return "\n".join(lines)
 
 
