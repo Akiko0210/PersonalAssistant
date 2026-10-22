@@ -545,6 +545,23 @@ def model_identity_block(label: str) -> str:
     )
 
 
+# --- Session log analysis (scripts/analyze_session.py) ------------------------
+# After a plain launch exits, run.bat/run.sh hand the session's log to the
+# Claude Code CLI. Name or path of that CLI; resolved through PATH, so the
+# npm install's claude.cmd shim is found on Windows as well as claude.exe.
+LOG_ANALYSIS_CLI = "claude"
+# A detailed read that also greps the code takes minutes; past this the
+# analysis is abandoned and the _analyzed file says so instead of hanging a
+# background window forever.
+LOG_ANALYSIS_TIMEOUT_S = 20 * 60
+# Loggers whose INFO lines are transport chatter (one per HTTP request, one per
+# audio clip). A session's raw log is ~1 MB, most of it these plus the context
+# DEBUG tables; dropping them leaves ~80 KB of what the user and agent did.
+# Their WARNING/ERROR lines are always kept.
+LOG_ANALYSIS_NOISE = {"httpx", "faster_whisper", "huggingface_hub.utils._http",
+                      "urllib3.connectionpool"}
+
+
 # --- Dashboard config overrides ----------------------------------------------
 # The web dashboard (web/server.py) lets the user adjust tunables visually. Its
 # edits are persisted to this file and applied here, at import time, on top of
