@@ -15,7 +15,7 @@ from tools import ToolContext, dispatch
 from trading import config as tcfg
 from trading import statement as tstatement
 from trading import trade_log
-from trading.trade_positions import group_positions
+from trading.trade_positions import group_positions, leg_effects
 
 # A real alert (2026-09-25), market-data noise and all.
 ALERT = ("#131646602945 BOT +1 SPX 100 (Weeklys) 25 SEP 26 7600 PUT @1.85LAST="
@@ -223,7 +223,7 @@ class TestPositions(LogBase):
                          email_date=f"Wed, 14 Oct 2026 {hour}:00:00 -0400")
 
     def open_diagonal(self):
-        self.assertIn("closes no open position's leg", self.log("1", self.OPEN, 10))
+        self.assertIn("only opens new legs", self.log("1", self.OPEN, 10))
         self.assertIn("Assigned 1 fills to P1", self.call(
             "assign_trades", refs=["1"], new_position="Nov 4 diagonal",
             record=self.rid))
@@ -241,10 +241,15 @@ class TestPositions(LogBase):
         self.assertIn("+1 SPX 2026-11-04 Wed 7750P", legs)
         self.assertNotIn("2026-10-15", legs)       # no phantom short leg
         self.assertEqual(self.open_legs(record=self.rid), legs)
+        # A roll says which leg it bought back and which it sold — the
+        # 2026-10-20 "you sold the diagonal back" misreading.
+        self.assertIn("+1 2026-10-15 Thu 7760P (to close), "
+                      "-1 2026-10-15 Thu 7730P (to open)",
+                      self.call("query_trade_log", position=1))
 
     def test_alerts_logged_out_of_order_still_join(self):
         self.open_diagonal()
-        self.assertIn("closes no open position's leg", self.log("3", self.ROLL2, 12))
+        self.assertIn("only opens new legs", self.log("3", self.ROLL2, 12))
         self.assertIn("#2 is in P1", self.log("2", self.ROLL1, 11))
         self.assertEqual(["1", "2", "3"], [t["ref"] for t in trade_log.query(
             positions=[1])])
@@ -263,7 +268,7 @@ class TestPositions(LogBase):
     def test_another_accounts_fill_never_matches(self):
         self.open_diagonal()
         reply = self.log("7", self.ROLL1, 11, account="*****699SCHW")
-        self.assertIn("closes no open position's leg", reply)
+        self.assertIn("only opens new legs", reply)
         self.assertIn("No position P1 in *****699SCHW",
                       self.call("assign_trades", refs=["7"], position=1))
 
@@ -293,6 +298,60 @@ class TestPositions(LogBase):
                                             {"record": self.rid}))
         self.assertIn("P1 'Nov 4 diagonal'", dispatch(
             linda, "query_trade_log", {"position": 1}))
+
+
+class TestFillDirection(LogBase):
+    """Open vs close per leg, measured against the account's whole history
+    (2026-10-21: a short 7650 sold on the 19th and bought back on the 21st
+    read as a new long in a lookup of the 20th-21st)."""
+
+    BLUE = "*****839SCHW"
+    SELL = "SOLD -1 SPX 100 (Weeklys) 22 OCT 26 7650 PUT @19.80"
+    BUY = "BOT +1 SPX 100 (Weeklys) 22 OCT 26 7650 PUT @1.25"
+
+    def log(self, ref, line, day):
+        return self.call("log_trade", alert=f"#{ref} {line} , ACCOUNT {self.BLUE}",
+                         email_date=f"{day} Oct 2026 10:00:00 -0400")
+
+    @staticmethod
+    def trade(ref, *legs):
+        return {"ref": ref, "symbol": "SPX",
+                "legs": [("2026-10-22", k, "P", q) for k, q in legs]}
+
+    def test_leg_effects_split_rolls_partials_and_holders(self):
+        fx = leg_effects([self.trade("a", (7650, -2)),
+                          self.trade("b", (7650, -1)),
+                          self.trade("roll", (7650, 3), (7620, -1)),
+                          self.trade("more", (7650, 1))])
+        (_, closed, holders), (_, sold, _) = fx["roll"]
+        self.assertEqual((closed, holders, sold), (3, ["a", "b"], 0))
+        self.assertEqual(fx["more"][0][1:], (0, []))   # nothing left to close
+        partial = leg_effects([self.trade("a", (7650, -2)),
+                               self.trade("b", (7650, 3))])["b"][0]
+        self.assertEqual(partial[1], 2)                # 2 close, 1 opens
+
+    def test_a_window_never_shows_a_buyback_as_open(self):
+        self.log("1", self.SELL, "Mon, 19")
+        self.log("2", self.BUY, "Wed, 21")
+        out = self.call("query_trade_log", account="839",
+                        start_date="2026-10-20")
+        self.assertIn("7650P (to close)", out)
+        self.assertTrue(out.splitlines()[-1].endswith("(whole history): none"))
+        alone = self.call("query_trade_log", account="839", refs=["2"])
+        self.assertIn("(whole history): none", alone)
+        self.assertNotIn("close each other out", alone)    # one leg is no P&L
+
+    def test_a_buyback_of_an_unnamed_short_is_already_paired(self):
+        """Not "closes no open position's leg", which Tom read as a new
+        trade (2026-10-21) — and no position is made for it: the zero-net
+        rule pairs the two on its own."""
+        self.assertIn("only opens new legs", self.log("1", self.SELL, "Mon, 19"))
+        reply = self.log("2", self.BUY, "Wed, 21")
+        self.assertIn("(to close)", reply)
+        self.assertIn("nothing to settle", reply)
+        self.assertNotIn("assign_trades", reply)
+        self.assertEqual(trade_log.positions(account=self.BLUE), [])
+        self.assertIn("closed", self.call("trade_log_positions", account="839"))
 
 
 class TestStatementDrop(LogBase):

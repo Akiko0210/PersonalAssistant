@@ -1,9 +1,9 @@
 """Group logged trades into positions and price them. Pure: no I/O.
 
 Two kinds of position. An ASSIGNED one is explicit: its trades carry its
-id (trade_log.positions), and `closing` is the rule that grows it — a fill
-joins the one position whose open leg it closes, so a roll chain follows
-its diagonal instead of splitting off as its own "debit spread"
+id (trade_log.positions), and `leg_effects` is the rule that grows it — a
+fill joins the one position whose open leg it closes, so a roll chain
+follows its diagonal instead of splitting off as its own "debit spread"
 (2026-10-15). An unassigned trade still falls under the user's rule below.
 
 The user's rule: the minimal set of trades whose legs net to
@@ -23,7 +23,7 @@ Whatever is left open is grouped by shared contracts:
   don't report expirations; the next statement import does).
 """
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date
 from itertools import combinations
 
@@ -49,14 +49,32 @@ def totals(trades):
             "pending": sum(t["fees"] is None for t in trades)}
 
 
-def closing(trade, open_by_position):
-    """Ids of the positions in {id: net legs} that `trade` closes or partly
-    closes a leg of: a leg of the opposite sign on the same contract. The
-    caller passes one account's positions, so another account never
-    matches."""
-    return [pid for pid, net in open_by_position.items()
-            if any(net.get((trade["symbol"], e, k, cp), 0) * q < 0
-                   for e, k, cp, q in trade["legs"])]
+def leg_effects(trades):
+    """One account's trades, oldest first -> {ref: [(leg, closed, holders)]}
+    per leg: `closed` is the signed part of the leg that closes contracts
+    earlier trades left open (the rest opens new ones), `holders` the refs of
+    every earlier trade still holding the opposite side of that contract.
+    Measured against the whole history, never a lookup's rows: on 2026-10-21
+    a buyback whose short sat a day before the window read as a new long."""
+    lots = defaultdict(list)     # contract -> [[ref, signed qty still open]]
+    out = {}
+    for t in trades:
+        effects = []
+        for e, k, cp, q in t["legs"]:
+            held = lots[(t["symbol"], e, k, cp)]
+            holders = [ref for ref, n in held if n * q < 0]
+            left = q
+            while held and held[0][1] * left < 0:    # FIFO, oldest lot first
+                take = min(abs(left), abs(held[0][1]))
+                held[0][1] += take if held[0][1] < 0 else -take
+                left += -take if left > 0 else take
+                if not held[0][1]:
+                    held.pop(0)
+            if left:
+                held.append([t["ref"], left])
+            effects.append(((e, k, cp, q), q - left, holders))
+        out[t["ref"]] = effects
+    return out
 
 
 def describe(trades, today=None):

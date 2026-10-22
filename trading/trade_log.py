@@ -19,7 +19,6 @@ every position P&L after it.
 
 import re
 import sqlite3
-from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import datetime
 
@@ -322,26 +321,28 @@ def assign(account, refs, position_id):
 
 def auto_assign(account):
     """Apply the one-match rule to `account`'s unassigned trades, oldest
-    first, each against the positions' legs as of that trade. Returns {ref:
-    [position ids]}: one id means it joined that position now (or earlier),
-    none or several mean the user must say. Walking the whole account makes
-    the order fills were logged in irrelevant — alerts arrive out of order."""
+    first: each joins the one position holding the contracts it closes.
+    Returns {ref: [position ids]}: one id means it joined that position now
+    (or earlier), none means no named position holds what it closes (the
+    zero-net rule pairs it), several mean the user must say. Walking the
+    whole account makes the order fills were logged in irrelevant — alerts
+    arrive out of order."""
     with _db() as db:
         trades = _read(db, "t.account = ?", (account,))
-        net = defaultdict(Counter)       # position -> its legs so far
+        effects = tpos.leg_effects(trades)
+        pos = {t["ref"]: t["position_id"] for t in trades}
         result, joined = {}, []
         for t in trades:
-            if t["position_id"] is None:
-                hits = tpos.closing(t, net)
-                result[t["ref"]] = hits
+            ref = t["ref"]
+            if pos[ref] is None:
+                hits = sorted({pos[h] for _, closed, hs in effects[ref]
+                               if closed for h in hs} - {None})
                 if len(hits) == 1:
-                    t["position_id"] = hits[0]
-                    joined.append((hits[0], t["ref"]))
+                    pos[ref] = hits[0]
+                    joined.append((hits[0], ref))
+                result[ref] = hits
             else:
-                result[t["ref"]] = [t["position_id"]]
-            if t["position_id"] is not None:
-                for e, k, cp, q in t["legs"]:
-                    net[t["position_id"]][(t["symbol"], e, k, cp)] += q
+                result[ref] = [pos[ref]]
         db.executemany("UPDATE trades SET position_id = ? WHERE account = ? "
                        "AND ref = ?", [(p, account, r) for p, r in joined])
     return result
