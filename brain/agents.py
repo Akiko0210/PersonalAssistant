@@ -110,8 +110,20 @@ CAMPAIGN_RECORD_RULES = (
 # memory: "the 7650 leg stays open" outlived the leg (2026-10-19), five
 # versions of one diagonal's legs reached a single answer (2026-10-21).
 # brain/facts.py drops these kinds on write and read, and gives the
-# extractor the rule for the same state filed under any other key.
+# extractor the rule for the same state filed under any other key. The rule
+# alone did not hold: the 2026-10-22 rebuild on DeepSeek Flash refiled 89
+# facts naming a contract under "matter" and "plan" — so a fact naming one
+# (a strike beside put/call, or 7650P) is dropped too, whatever its key.
 TRADE_STATE_KINDS = ("holding", "trade", "trade-log", "calc")
+# Strike then put/call ("7650 put", "7720/7670 put", "7650 and 7660 puts"),
+# or put/call then "at" a strike ("put calendar at the 7700"). Never a bare
+# "calls 839": the user calls accounts by name, and those facts stay.
+TRADE_STATE_TEXT = (                     # 20xx is a year, never a strike here
+    r"\b(?!20\d\d\b)\d{3,5}(?:\.\d+)?[PC]\b"
+    r"|\b(?!20\d\d\b)\d{3,5}(?:/\d{3,5})*(?:\s+(?:and|or)\s+\d{3,5})?"
+    r"\s+(?:puts?|calls?)\b"
+    r"|\b(?:puts?|calls?)(?:\s+(?:calendar|diagonal|vertical|spread|butterfly|"
+    r"condor))?\s+at\s+(?:the\s+)?(?!20\d\d\b)\d{3,5}\b")
 TRADE_STATE_RULE = (
     "Never record positions, legs, fills, rolls, what is open or closed, "
     "or P&L, under any key: the trade log holds them, computed fresh. "
@@ -297,6 +309,7 @@ AGENTS = {
         "reads": (),
         "brokers": ("schwab",),
         "fact_skip": TRADE_STATE_KINDS,
+        "fact_skip_text": TRADE_STATE_TEXT,
         "fact_rule": TRADE_STATE_RULE,
         "model": "sonnet",      # analysis benefits from the stronger model
         # Only Zira + David are installed on this machine, so Tom shares

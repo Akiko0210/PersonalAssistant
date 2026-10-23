@@ -49,13 +49,16 @@ def slug(key) -> str:
     return _SLUG.sub("-", str(key or "").strip().lower()).strip("-")
 
 
-def skipped(meta) -> bool:
-    """A fact of a kind its persona never keeps (agents' fact_skip): Tom's
-    position state, which the trade log owns. Dropped on write, whatever the
-    extractor returns, and on read, so facts written before the rule stop
-    reaching the model at once."""
-    kinds = agents.AGENTS.get(meta.get("agent"), {}).get("fact_skip", ())
-    return (meta.get("entity") or "").split(":")[0] in kinds
+def skipped(meta, doc="") -> bool:
+    """A fact its persona never keeps: one of its fact_skip kinds, or a
+    `doc` matching its fact_skip_text (agents) — Tom's position state, which
+    the trade log owns. Dropped on write, whatever the extractor returns,
+    and on read, so facts written before the rule stop reaching the model at
+    once."""
+    hat = agents.AGENTS.get(meta.get("agent"), {})
+    text = hat.get("fact_skip_text")
+    return ((meta.get("entity") or "").split(":")[0] in hat.get("fact_skip", ())
+            or bool(text and re.search(text, doc, re.I)))
 
 
 def fact_id(owner, xid, entity, value) -> str:
@@ -116,8 +119,8 @@ class FactStore(HybridStore):
                    for k in agents.readable_owners(owner)]
         rows = self._collect(sources, query, n, where, keep)
         return rows._replace(
-            dense=[h for h in rows.dense if not skipped(h.meta)],
-            lexical=[h for h in rows.lexical if not skipped(h.meta)])
+            dense=[h for h in rows.dense if not skipped(h.meta, h.doc)],
+            lexical=[h for h in rows.lexical if not skipped(h.meta, h.doc)])
 
     def current(self, owner, entities) -> list:
         """The facts in force about `entities`, oldest first, as Hit rows —
@@ -144,7 +147,7 @@ class FactStore(HybridStore):
             out += [chroma_store.Hit(0.0, d, m or {}, i, vecs.get(i))
                     for i, d, m in zip(ids, got.get("documents") or [],
                                        got.get("metadatas") or [])
-                    if not skipped(m or {})]
+                    if not skipped(m or {}, d)]
         out.sort(key=lambda h: h.meta.get("epoch") or 0)
         return out
 
@@ -227,7 +230,7 @@ class FactStore(HybridStore):
                 sources = f"{prev.get('source_ids', '')},{xid}".strip(",")
             else:
                 entity, sources = slug(op.get("entity")), xid
-            if not entity or skipped({"agent": owner, "entity": entity}):
+            if not entity or skipped({"agent": owner, "entity": entity}, op["value"]):
                 continue
             fid = fact_id(owner, xid, entity, op["value"])
             ids.append(fid)

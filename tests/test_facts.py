@@ -14,7 +14,7 @@ from unittest import mock
 
 import config as cfg
 from brain import agents
-from brain.facts import catch_up, extract, learn
+from brain.facts import catch_up, extract, learn, skipped
 from brain.llm.plain import ask
 from stores.chroma_store import Hit
 from tests.store_fixtures import facts_over, memory_over
@@ -190,8 +190,33 @@ class TestTradeStateIsNotAFact(unittest.TestCase):
         self.assertIn(agents.TRADE_STATE_RULE, seen["system"])
         self.assertEqual(list(self.facts.entities("tom")), ["account:blue"])
 
+    def test_a_fact_naming_a_contract_is_dropped_under_any_key(self):
+        """The 2026-10-22 rebuild refiled position state as "matter" and
+        "plan": the text, not the key, decides."""
+        dropped = (
+            "Short one Oct 21 7660 put, sold to open at a 15.70 credit.",
+            "The Oct 16 vertical is long the 7650/7620 puts; the leg stays open.",
+            "The user holds a put calendar at the 7700 strike in account 868.",
+            "Rolled the short leg from 7720P to 7790P.",
+            "Decided to roll the short Oct 15 7760 put down.")
+        kept = (
+            "839 is 'Blue', 868 is 'Red', and 699 is 'IRA'.",
+            "The user calls account 839 'blue'; the user calls 868 red.",
+            "The user wants the VIX level with every morning check-in.",
+            "Act on the campaign above 7,770 on SPX.",
+            "The user prefers puts over calls for the quick-cycle campaign.",
+            "Short puts expiring 2026-10-23 are reviewed the day before.")
+        tom = {"agent": "tom", "entity": "matter:x"}
+        self.assertEqual([d for d in dropped if not skipped(tom, d)], [])
+        self.assertEqual([d for d in kept if skipped(tom, d)], [])
+        self.assertFalse(skipped({"agent": "alice", "entity": "matter:x"}, dropped[0]))
+        self.facts.apply("tom", [add("matter:blue-7660", dropped[0]), self.NICKNAME],
+                         xid="xc_1", ts=T1, epoch=1.0)
+        self.assertEqual(list(self.facts.entities("tom")), ["account:blue"])
+
     def test_old_trade_state_facts_stop_reaching_tom(self):
-        with mock.patch.dict(agents.AGENTS["tom"], {"fact_skip": ()}):
+        with mock.patch.dict(agents.AGENTS["tom"], {"fact_skip": (),
+                                                    "fact_skip_text": ""}):
             self.facts.apply("tom", [self.HOLDING, self.NICKNAME],
                              xid="xc_1", ts=T1, epoch=1.0)     # written before the rule
         rows = self.facts.query_rows("blue 7650 put", owner="tom")
