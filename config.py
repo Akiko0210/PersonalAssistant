@@ -68,6 +68,31 @@ def history_path(key):
 SUMMARY_DIR = DATA_DIR / "summaries"
 TRANSCRIPT_DIR = DATA_DIR / "transcripts"
 
+# --- Display window (visual aid for trading answers, display/) ---------------
+# A native window that shows what the latest trading answer was about, in big
+# type, so the user needn't hold five legs in their head while listening
+# (#28). Its own process (pywebview must own a main thread, and the agent's is
+# taken), launched by the agent and reading the agent's dashboard port. False
+# runs without it.
+DISPLAY_WINDOW = True
+# FindWindow looks the window up by this title to bring it forward, so it must
+# not collide with any other window's.
+DISPLAY_TITLE = "Voice Agent Display"
+DISPLAY_WIDTH = 560
+# The window is as tall as the screen less this, which clears the taskbar
+# and the title bar: a fixed 820 ran under the taskbar on a 1080p screen at
+# 125% scaling (864 logical pixels), hiding a card's bottom lines.
+DISPLAY_SCREEN_MARGIN = 110
+# The window polls this often; a new card appears within a poll of the tool
+# result, well inside the "within about a second" the issue asks for.
+DISPLAY_POLL_S = 0.5
+# A card is a snapshot, never live: past this age it says so in words. Marks
+# on an SPX spread move within minutes, so two minutes is already generous.
+DISPLAY_STALE_S = 120
+# One window, whoever starts it: it outlives the agent (to say "not running"),
+# so a restarted agent must find the old one instead of stacking a second.
+DISPLAY_LOCK_PATH = DATA_DIR / "display.lock"
+
 # --- Note categories -----------------------------------------------------------
 # The category registry (seed folders, voice-created overlays, category_dir and
 # the add/rename/delete API) lives in categories.py — it is runtime-mutable
