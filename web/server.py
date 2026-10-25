@@ -943,13 +943,21 @@ def import_statement_upload(name, reader, length):
     from tools import trade_log_tools
     from trading import config as tcfg
     imported, message = trade_log_tools.import_statement_text(name, text)
+    if imported:
+        try:
+            tcfg.STATEMENTS_DIR.mkdir(parents=True, exist_ok=True)
+            # newline="": the upload's \r\n kept as is. Text mode made it
+            # \r\r\n on Windows, and every copy since the drop zone shipped
+            # failed Tom's own import on its header row (#38).
+            write_text_atomic(tcfg.STATEMENTS_DIR / name, text, newline="")
+        except OSError as e:  # the log already has it; a 500 would say it didn't
+            message += f" (Couldn't keep a copy of the file: {e})"
+    # Tom answers from the log and never saw the page's status line, so he
+    # told the user a drop that had imported was missing (#38).
+    if _embedded_agent is not None:
+        _embedded_agent.report_statement_import(imported, message)
     if not imported:
         return 400, {"ok": False, "error": message}
-    try:
-        tcfg.STATEMENTS_DIR.mkdir(parents=True, exist_ok=True)
-        write_text_atomic(tcfg.STATEMENTS_DIR / name, text)
-    except OSError as e:  # the log already has it; a 500 would say it didn't
-        message += f" (Couldn't keep a copy of the file: {e})"
     return 200, {"ok": True, "message": message}
 
 

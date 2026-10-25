@@ -272,6 +272,20 @@ class Agent:
         self.typed.put((text, target))
         self.interject.set()
 
+    def report_statement_import(self, imported: bool, message: str):
+        """A statement dropped on the dashboard, from a web handler thread.
+        Tom keeps the trade log, and before #38 he never heard of a drop: he
+        ran his own import and told the user a statement that had imported
+        was missing. So his thread gets the result, and he says one line —
+        the page's status text is hard for this user to see. Queued like a
+        delegate's result: delivered at the next gap, never over the user."""
+        self.interjections.put({
+            "agent": "tom",
+            "event": "The user dropped a statement on the dashboard: " + message,
+            "announce": ("your statement is in the trade log." if imported else
+                         "the statement you dropped wasn't imported. Ask me why.")})
+        self.interject.set()
+
     def _handle_typed_message(self, text: str, target=None):
         """Answer one typed message as a spoken turn. Same tail as a spoken
         utterance (_respond) minus the mic-specific parts: no continuation
@@ -639,10 +653,17 @@ class Agent:
           the end."""
         hat = agents.AGENTS[item["agent"]]
         note = item.get("note")
-        if note:
+        if note or item.get("announce"):
             active = agents.AGENTS[self.llm.active]
             self._use_voice(hat)
             try:
+                if not note:
+                    # A dashboard event (report_statement_import): the note
+                    # goes to the worker's own thread before the one line.
+                    self.llm.note_to(item["agent"], item["event"])
+                    self.say(f"{hat['name']} here — {item['announce']}",
+                             voice=False, commands=False)
+                    return False
                 self.say(f"{hat['name']} here."
                          if self._direct_folder(note, hat["name"])
                          else f"{hat['name']} here — your note is ready to file.",
@@ -1153,6 +1174,8 @@ class Agent:
             except queue.Empty:
                 return
             note = item.get("note")
+            if item.get("announce"):  # unspoken, but Tom's thread still learns
+                self.llm.note_to(item["agent"], item["event"])
             if not note:
                 continue
             category = (self.store._match_category(note.get("category"))
