@@ -133,6 +133,11 @@ def _text_of(resp):
     return "".join(b.text for b in resp.content if b.type == "text").strip()
 
 
+def _self_note(events):
+    return ("(Note to self — what my tool actions just did, for when the "
+            "user asks about them: " + " ".join(events) + ")")
+
+
 def system_blocks(static, background="", record=""):
     """The system prompt as the API's block list: the static part carries a
     cache breakpoint (tools render before system, so the marker caches both),
@@ -646,13 +651,25 @@ class Claude:
         events, self._ctx.events = self._ctx.events, []
         if not events:
             return
-        note = ("(Note to self — what my tool actions just did, for when the "
-                "user asks about them: " + " ".join(events) + ")")
-        self.history.append({"role": "assistant", "content": note})
+        self.history.append({"role": "assistant", "content": _self_note(events)})
         self.history = hist.sanitize(self.history)
         if persist:
             self._save_history()
             self._remember()  # the self-note belongs in the exchange's record
+
+    def note_to(self, key, text):
+        """Put a self-note about something that happened outside any turn (a
+        statement dropped on the dashboard) in `key`'s thread, whether or not
+        `key` is the one talking — it's that persona the user will ask. Turn
+        thread only: it is the one thread that loads and saves histories."""
+        if key == self.active:
+            self.record_tool_event(text)
+            self.flush_tool_events(persist=True)
+            return
+        path = cfg.history_path(key)
+        h = hist.load(path)
+        h.append({"role": "assistant", "content": _self_note([text])})
+        hist.save(path, hist.sanitize(h))
 
     def record_unanswered(self, user_text: str):
         """Keep a transcribed utterance in history when a hotkey cut the turn

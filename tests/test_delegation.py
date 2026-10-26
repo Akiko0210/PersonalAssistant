@@ -161,8 +161,10 @@ class _Shell:
         self.saved = []       # (_save_pending_note args)
         self.delegated = []   # _start_delegation args
         self.switched = []    # _switch_agent args
+        self.notes = []       # (persona, text) from note_to
         self.llm = SimpleNamespace(
             active=active,
+            note_to=lambda key, text: self.notes.append((key, text)),
             record_tool_event=self.events.append,
             flush_tool_events=lambda persist=False: None,
             take_pending_delegations=lambda: [],
@@ -280,6 +282,30 @@ class TestInterjectionDelivery(unittest.TestCase):
         shell.interjections.put({"agent": "bob", "text": "ready", "note": note})
         Agent._deliver_interjections(shell)
         self.assertEqual(shell.spoken[0][0], "Bob here.")
+
+    def test_a_dashboard_statement_drop_tells_tom_whoever_is_talking(self):
+        # #38: Tom's thread gets the import result, then one line in his
+        # voice — even while the user is talking to Alice.
+        shell = _Shell(active="alice")
+        Agent.report_statement_import(shell, True, "Imported IRA.csv: 7 orders.")
+        self.assertTrue(shell.interject.is_set())  # wakes an idle listen
+        Agent._deliver_interjections(shell)
+        self.assertEqual(len(shell.notes), 1)
+        persona, text = shell.notes[0]
+        self.assertEqual(persona, "tom")
+        self.assertIn("Imported IRA.csv: 7 orders.", text)
+        self.assertEqual(shell.spoken[0][0],
+                         "Tom here — your statement is in the trade log.")
+        self.assertEqual(shell.voices[0][0], agents.AGENTS["tom"]["tts_voice"])
+        self.assertEqual(shell.voices[-1][0], agents.AGENTS["alice"]["tts_voice"])
+        self.assertEqual(shell.events, [])  # nothing in Alice's thread
+
+    def test_a_refused_drop_is_announced_as_not_imported(self):
+        shell = _Shell(active="tom")
+        Agent.report_statement_import(shell, False, "Nothing imported from x.csv: no TOTAL row.")
+        Agent._deliver_interjections(shell)
+        self.assertIn("no TOTAL row", shell.notes[0][1])
+        self.assertIn("wasn't imported", shell.spoken[0][0])
 
     def test_deferred_while_muted(self):
         shell = _Shell()

@@ -3,10 +3,13 @@ tie-out, alert/statement reconciliation, minimal zero-net position grouping,
 and the tools' honest-failure paths (unparseable lines, which account?)."""
 
 import io
+import os
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from brain import agents
 import config as cfg
@@ -393,6 +396,62 @@ class TestStatementDrop(LogBase):
             with self.subTest(name=name):
                 self.assertEqual(self.drop(name, STATEMENT)[0], 400)
         self.assertEqual(trade_log.query(), [])
+
+    def test_a_windows_drop_keeps_a_copy_tom_can_import(self):
+        # #38: thinkorswim exports \r\n. The copy came out \r\r\n on Windows,
+        # and Tom's import then crashed on the header row ("Misc Fees").
+        crlf = STATEMENT.replace("\n", "\r\n")
+        self.assertEqual(self.drop("IRA.csv", crlf)[0], 200)
+        copy = tcfg.STATEMENTS_DIR / "IRA.csv"
+        self.assertEqual(copy.read_bytes(), crlf.encode("utf-8"))
+        self.assertIn("Imported IRA.csv", self.call("import_statement"))
+
+    def test_the_drop_tells_the_running_agent_either_way(self):
+        from web import server
+        told = []
+        agent = SimpleNamespace(report_statement_import=lambda *a: told.append(a))
+        with mock.patch.object(server, "_embedded_agent", agent):
+            self.drop("stmt.csv", STATEMENT)
+            self.drop("bad.csv", STATEMENT.replace("($4.57)", "($4.00)"))
+        self.assertEqual([ok for ok, _ in told], [True, False])
+        self.assertIn("ties out", told[0][1])
+        self.assertIn("Nothing imported from bad.csv", told[1][1])
+
+
+class TestStatementFolder(LogBase):
+    """Voice's "import my statement": any .csv in the folder, by name or
+    newest — never an *AccountStatement* filter or a working-dir path (#38)."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_dir = tcfg.STATEMENTS_DIR
+        tcfg.STATEMENTS_DIR = Path(self.tmp.name) / "statements"
+        tcfg.STATEMENTS_DIR.mkdir()
+
+    def tearDown(self):
+        tcfg.STATEMENTS_DIR = self._saved_dir
+        super().tearDown()
+
+    def put(self, name, text, age_s):
+        path = tcfg.STATEMENTS_DIR / name
+        path.write_text(text, encoding="utf-8")
+        t = datetime.now().timestamp() - age_s
+        os.utime(path, (t, t))
+
+    def test_no_path_takes_the_newest_saved_csv_whatever_its_name(self):
+        self.put("2026-09-20-AccountStatement.csv", "old, refused", age_s=3600)
+        self.put("IRA.csv", STATEMENT, age_s=10)
+        self.assertIn("Imported IRA.csv", self.call("import_statement"))
+
+    def test_a_bare_or_relative_name_means_the_statements_folder(self):
+        self.put("IRA.csv", STATEMENT, age_s=10)
+        for path in ("IRA.csv", "data/trading/statements/IRA.csv"):
+            with self.subTest(path=path):
+                self.assertIn("Imported IRA.csv",
+                              self.call("import_statement", path=path))
+
+    def test_an_empty_folder_says_so(self):
+        self.assertIn("No .csv in", self.call("import_statement"))
 
 
 def _t(ref, when, legs, amount):

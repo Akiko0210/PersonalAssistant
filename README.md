@@ -550,14 +550,17 @@ Tom keeps a log of your thinkorswim/Schwab fills in
 - **Statements** — now only for history older than a year, or an account
   Schwab doesn't share with the app. Export the account statement CSV from thinkorswim and drop
   it on the **Statement for Tom** box on the dashboard's Trading page. The
-  import result shows right under the box. A statement is the authoritative
+  import result shows right under the box, and if the agent is running Tom
+  says it out loud and keeps the result in his thread, so you can ask him
+  about it. A statement is the authoritative
   record: it adds exact fees and expirations, and it replaces the alert-logged
   fills of the span it covers. Nothing outside that span is touched, and
   importing the same statement twice is harmless. It is refused if its rows
   don't add up to its own TOTAL row. Imported files are kept in
   `data/trading/statements/`. By voice, *"Tom, import my latest statement"*
-  imports the newest `*AccountStatement*.csv` there (or in
-  `TRADE_STATEMENTS_DIR`, if you set one in `.env`).
+  imports the most recently saved `.csv` there, whatever its name (or in
+  `TRADE_STATEMENTS_DIR`, if you set one in `.env`). *"Import IRA.csv"*
+  imports that file from the same folder.
 - **Positions.** A position is the minimal set of trades whose legs net to
   zero. Ask *"what was my P&L on calendars in August?"* or *"list my open
   positions on the IRA."* Every figure is summed from the log. If you have
