@@ -83,6 +83,22 @@ class TestParseFill(unittest.TestCase):
         self.assertEqual(fill["amount"], -185.0)
         self.assertTrue(fill["text"].endswith("@1.85"))
 
+    def test_a_debit_roll_at_a_negative_price_is_a_debit(self):
+        # #40: two rolls from the BLUE statement, checked against the same
+        # orders as the Schwab sync logged them (refs 1008228162638 and
+        # 1008337422448). Reading "@-8.55" as 8.55 would make each a credit.
+        for line, legs, cash in (
+                ("SOLD -1 DIAGONAL SPX 100 (Weeklys) 13 OCT 26/8 OCT 26 "
+                 "7740/7790 PUT @-8.55 CBOE",
+                 [("2026-10-13", 7740, "P", -1), ("2026-10-08", 7790, "P", 1)], -855.0),
+                ("SOLD -1 DIAGONAL SPX 100 (Weeklys) 19 OCT 26/16 OCT 26 "
+                 "7670/7720 PUT @-27.15 CBOE",
+                 [("2026-10-19", 7670, "P", -1), ("2026-10-16", 7720, "P", 1)], -2715.0)):
+            with self.subTest(line=line):
+                fill = trade_log.parse_fill(line)
+                self.assertEqual(sorted(fill["legs"]), sorted(legs))
+                self.assertEqual(fill["amount"], cash)
+
     def test_unknown_lines_are_refused_not_guessed(self):
         for line in (
                 "BOT +1 IRON CONDOR SPX 100 (Weeklys) 25 SEP 26 "
