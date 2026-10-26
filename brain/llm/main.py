@@ -177,7 +177,7 @@ class _NullIdle:
 
 
 class Claude:
-    def __init__(self, store, idle=None, kb=None):
+    def __init__(self, store, idle=None, kb=None, show=None):
         self.client = anthropic_api.make_client()
         self._deepseek = None  # lazily built by client_for; needs DEEPSEEK_API_KEY
         self.store = store
@@ -217,12 +217,13 @@ class Claude:
         self._setup_failover()
         # Everything tool handlers may touch (see tools/); also carries the
         # pending conversation note and the active conversation model (which the
-        # set_conversation_model tool can switch mid-session).
+        # set_conversation_model tool can switch mid-session). `show` puts the
+        # conversation's trading answers on the display window (display/).
         self._ctx = ToolContext(store=self.store, discord=self.discord,
                                 kb=self.kb, memory=self.memory, facts=self.facts,
                                 convo_model=agents.registry_model(self.active),
                                 active_agent=self.active,
-                                failover=self._convo_failover)
+                                failover=self._convo_failover, show=show)
         self._active_since = datetime.now()
         self._write_agent_state()
         # Conversation memory: restore the active persona's own thread (trimmed)

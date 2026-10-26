@@ -34,6 +34,10 @@ cryptography>=3.1
 # Trading (tastytrade REST + DXLink streaming quotes) — see TRADING_PLAN.md
 requests>=2.31
 websocket-client>=1.7
+# The display window for trading answers (display/): a native window over
+# the OS web view — Edge WebView2 on Windows 11, WebKit on macOS, GTK or Qt
+# on Linux. Optional: without it the agent logs once and runs without one.
+pywebview>=5
 # Gmail tools OAuth (lib/gmail_auth.py); the API calls themselves use requests
 google-auth>=2
 google-auth-oauthlib>=1

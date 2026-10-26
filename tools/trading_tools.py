@@ -28,6 +28,7 @@ Design rules:
 from datetime import date, timedelta
 
 from brain import agents
+from display import card as blocks
 from lib.dates import PERIODS, period_range, with_weekday
 from tools import tool
 from trading import accounts as taccounts
@@ -50,6 +51,27 @@ _ALL = {"all", "all accounts", "every account", "both", "both accounts"}
 
 def _fmt(x, none="unknown"):
     return f"{x:,.2f}" if isinstance(x, (int, float)) else none
+
+
+def _pnl(x, none="unknown"):
+    """A P&L figure, always signed: the display window colours it, and the
+    sign is what says gain or loss to someone who can't tell the colours."""
+    return f"{x:+,.2f}" if isinstance(x, (int, float)) else none
+
+
+def display_heading(what, broker=None):
+    """A tool's display= heading: `what`, then who answered on which broker
+    ('Open positions — Tom, Schwab'). `broker` pins a fixed one (the trade
+    log is Schwab's); otherwise the one asked for, or the persona's own."""
+    def heading(ctx, args):
+        hat = agents.AGENTS.get(ctx.active_agent or "") or {}
+        keys = ([broker] if broker else
+                [tmain.normalize(args["broker"])] if args.get("broker") else
+                _mine(ctx))
+        brokers = " and ".join(tmain.label(k) for k in keys if k)
+        who = ", ".join(x for x in (hat.get("name"), brokers) if x)
+        return f"{what} — {who}" if who else what
+    return heading
 
 
 # --- which broker ----------------------------------------------------------
@@ -192,6 +214,23 @@ def _strike_listed(eng, chain, expiration, strike):
     return None
 
 
+def _ticket_card(tk, notes=(), extra=()):
+    """The ticket on the display: the limit price first, then every leg by
+    number, side and contract — the number is what the user says to adjust
+    it ("move leg 2 down"). `extra` rows follow the legs (a review's fees)."""
+    price = (f"{tk.limit_price:.2f} {tk.price_effect}" if tk.limit_price
+             else "not set")
+    legs = [blocks.row(blocks.contract(tk.underlying, l.expiration, l.strike, l.cp),
+                       badge=l.side.upper(),
+                       lines=[f"Leg {i}: {l.action}, {l.size} "
+                              f"contract{'s' * (l.size > 1)}"])
+            for i, l in enumerate(tk.legs, 1)]
+    return blocks.card([blocks.section(
+        f"{tk.underlying} {tk.strategy or 'custom'} · {tk.tif}",
+        legs + [r for r in extra if r],
+        total=blocks.total("Limit price", price, blocks.MONEY))], notes=notes)
+
+
 def _engine_and_ticket(ctx, args=None):
     """(eng, ticket, chain, None) or (None, None, None, spoken-problem) —
     the engine + current-ticket preamble the ticket-mutating tools share."""
@@ -236,30 +275,42 @@ def _one_account(ctx, eng, args=None):
 
 
 def _per_account(ctx, args, one, total=None):
-    """Run one(engine, account) -> (sentence, number-or-None) for every
-    account a read covers, across the persona's brokers. Each sentence is
-    prefixed with its account (and broker, when there are two); with more
-    than one account, total(numbers) adds a combined line — added up in the
-    sentence only, never in storage."""
+    """Run one(engine, account) -> (sentence, number-or-None, section-or-None)
+    for every account a read covers, across the persona's brokers. Each
+    sentence is prefixed with its account (and broker, when there are two),
+    and each account is one section of the display card (a sentence with no
+    section becomes the section's note). With more than one account, total
+    = (name, format, kind) adds a combined figure — added up in the sentence
+    and on the card only, never in storage."""
     engs, problem = _engines(ctx, args)
     if problem:
         return problem
-    parts, values = [], []
+    parts, values, sections = [], [], []
     for broker, eng, err in engs:
         where = f"{tmain.label(broker)}, " if len(engs) > 1 else ""
         if err:
             parts.append(f"{tmain.label(broker)}: {err}")
+            sections.append(blocks.section(tmain.label(broker), notes=[err]))
             continue
         accts, problem = _accounts(ctx, eng, args)
         if problem:
             parts.append(where + problem)
+            sections.append(blocks.section(where.rstrip(", ") or None,
+                                           notes=[problem]))
             continue
         for account in accts:
-            text, value = one(eng, account)
+            text, value, sec = one(eng, account)
             parts.append(f"{where}{eng.label(account)}: {text}")
             values.append(value)
+            sections.append({**(sec or blocks.section(notes=[text])),
+                             "heading": f"{where}{eng.label(account)}"})
+    combined = None
     if total and len(values) > 1 and None not in values:
-        parts.append(total(values))
+        name, fmt, kind = total
+        combined = blocks.total(f"All accounts, {name}", fmt(sum(values)), kind)
+        parts.append(f"All of them together, added here only: {name} "
+                     f"{combined['value']}.")
+    ctx.card = blocks.card(sections, total=combined)
     return " ".join(parts)
 
 
@@ -371,11 +422,11 @@ def get_balance(ctx, args):
         try:
             b = eng.balance(account)
         except Exception as e:
-            return f"couldn't fetch the balance: {e}.", None
+            return f"couldn't fetch the balance: {e}.", None, None
         return (f"net liquidating value {_fmt(b.net_liq)}, cash {_fmt(b.cash)}, "
-                f"buying power {_fmt(b.buying_power)}."), b.net_liq
-    return _per_account(ctx, args, one, total=lambda v: (
-        f"All of them together, added here only: net liquidating value {_fmt(sum(v))}."))
+                f"buying power {_fmt(b.buying_power)}."), b.net_liq, None
+    return _per_account(ctx, args, one, total=(
+        "net liquidating value", _fmt, blocks.MONEY))
 
 
 @tool({
@@ -485,7 +536,7 @@ def list_expirations(ctx, args):
         },
         "required": ["strategy", "symbol"],
     },
-})
+}, display=display_heading("Order ticket"))
 def build_strategy(ctx, args):
     eng, err = _engine(ctx, args)
     if err:
@@ -519,8 +570,9 @@ def build_strategy(ctx, args):
     at = f" (underlying at {_fmt(price)})" if price is not None else \
          " (no live underlying price — strikes centred on the chain)"
     where = f" for {eng.label(account)}" if account else ""
-    return (f"Built on {tmain.label(eng.key)}{where}{at}: {tk.describe()} "
-            "Say adjustments, or ask me to review it.")
+    built = f"Built on {tmain.label(eng.key)}{where}{at}"
+    ctx.card = _ticket_card(tk, notes=[built + "."])
+    return f"{built}: {tk.describe()} Say adjustments, or ask me to review it."
 
 
 @tool({
@@ -547,7 +599,7 @@ def build_strategy(ctx, args):
         },
         "required": ["leg_number"],
     },
-})
+}, display=display_heading("Order ticket"))
 def adjust_leg(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -592,8 +644,9 @@ def adjust_leg(ctx, args):
     tticket.save(tk, eng.key)
     problems = tk.validate(chain)
     tail = (" Note: " + " ".join(problems)) if problems else ""
-    return (f"Leg {i + 1} updated ({', '.join(changes)}). "
-            f"Ticket now: {tk.describe()}{tail}")
+    updated = f"Leg {i + 1} updated ({', '.join(changes)})."
+    ctx.card = _ticket_card(tk, notes=[updated, *problems])
+    return f"{updated} Ticket now: {tk.describe()}{tail}"
 
 
 @tool({
@@ -616,7 +669,7 @@ def adjust_leg(ctx, args):
             "tif": {"type": "string", "enum": ["Day", "GTC"]},
         },
     },
-})
+}, display=display_heading("Order ticket"))
 def set_order_terms(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -645,6 +698,7 @@ def set_order_terms(ctx, args):
     if not said:
         return "Say a price (with credit or debit), 'mid', or a time-in-force."
     tticket.save(tk, eng.key)
+    ctx.card = _ticket_card(tk, notes=[f"Done: {', '.join(said)}."])
     return f"Done: {', '.join(said)}. {tk.describe()}"
 
 
@@ -662,7 +716,7 @@ def set_order_terms(ctx, args):
         "price check."
     ),
     "input_schema": {"type": "object", "properties": {}},
-})
+}, display=display_heading("Ticket pricing"))
 def price_order(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -674,12 +728,15 @@ def price_order(ctx, args):
 
     def g(x, spec):
         return format(x, spec) if x is not None else "n/a"
-    lines = []
-    for leg, q in quotes:
+    lines, rows = [], []
+    for i, (leg, q) in enumerate(quotes, 1):
         name = (f"{leg.code} {leg.size} {with_weekday(leg.expiration)} "
                 f"{leg.strike:g} {leg.cp}")
+        contract = blocks.contract(tk.underlying, leg.expiration, leg.strike, leg.cp)
         if q is None or q.mid is None:
             lines.append(f"{name}: no live quote")
+            rows.append(blocks.row(contract, "no live quote",
+                                   badge=leg.side.upper()))
             continue
         greeks = ("greeks not available" if q.delta is None else
                   f"IV {g(q.iv and q.iv * 100, '.1f')}%, delta {g(q.delta, '+.3f')}, "
@@ -687,9 +744,15 @@ def price_order(ctx, args):
                   f"vega {g(q.vega, '.2f')}")
         lines.append(f"{name}: bid {_fmt(q.bid)}, ask {_fmt(q.ask)}, "
                      f"mid {_fmt(q.mid)}; {greeks}")
+        rows.append(blocks.row(contract, f"mid {_fmt(q.mid)}", blocks.MONEY,
+                               badge=leg.side.upper(), lines=[
+                                   f"Leg {i}: {leg.action}, {leg.size}",
+                                   f"Bid {_fmt(q.bid)} · ask {_fmt(q.ask)}",
+                                   greeks.capitalize()]))
     net = tk.net_of(quotes)
-    lines.append(f"Net mid {abs(net):.2f} {'credit' if net > 0 else 'debit'} "
-                 "for the ticket as built" if net is not None else
+    net_price = (f"{abs(net):.2f} {'credit' if net > 0 else 'debit'}"
+                 if net is not None else None)
+    lines.append(f"Net mid {net_price} for the ticket as built" if net_price else
                  "No net price: a leg has no live quote (the sandbox has no "
                  "real-time option quotes)")
     ng = tk.net_greeks(quotes)
@@ -699,6 +762,12 @@ def price_order(ctx, args):
                  f"day, vega {g(ng['vega'], '+.2f')}"
                  if None not in ng.values() else
                  "No net greeks: the quotes carried none for at least one leg")
+    ctx.card = blocks.card(
+        [blocks.section(f"{tk.underlying} {tk.strategy or 'custom'}", rows)],
+        total=net_price and blocks.total("Net mid, ticket as built", net_price,
+                                         blocks.MONEY),
+        notes=[lines[-1] + ".", "Quotes only: nothing placed, buying power "
+               "not checked.", "" if net_price else lines[-2] + "."])
     return ("Live pricing, quotes only (nothing placed, buying power not "
             "checked). " + ". ".join(lines) + ".")
 
@@ -714,7 +783,7 @@ def price_order(ctx, args):
         "price_order, which works even when this dry run is rejected."
     ),
     "input_schema": {"type": "object", "properties": {}},
-})
+}, display=display_heading("Order review"))
 def review_order(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -745,17 +814,26 @@ def review_order(ctx, args):
         return ("The broker rejected the dry run (this account can't place "
                 "it; the price is unaffected — price_order gives it): " +
                 " ".join(result.errors))
-    parts = [f"Reviewed for {eng.label(account)} on {tmain.label(eng.key)}: "
-             f"{tk.describe()}"]
+    reviewed = f"Reviewed for {eng.label(account)} on {tmain.label(eng.key)}"
+    parts = [f"{reviewed}: {tk.describe()}"]
+    bp = None
     if result.buying_power_change is not None:
-        parts.append(f"Buying power effect {_fmt(result.buying_power_change)}")
+        bp = ("Buying power effect", _fmt(result.buying_power_change))
     elif result.new_buying_power is not None:   # Schwab reports the projection
-        parts.append(f"Projected buying power {_fmt(result.new_buying_power)}")
-    parts.append(f"fees about {_fmt(result.total_fees)}")
-    if result.warnings:
-        parts.append("Warnings: " + "; ".join(result.warnings))
-    parts.append(f"This is the {eng.broker.env_label()} environment. Say "
-                 "'submit it' to place the order.")
+        bp = ("Projected buying power", _fmt(result.new_buying_power))
+    if bp:
+        parts.append(" ".join(bp))
+    fees = _fmt(result.total_fees)
+    parts.append(f"fees about {fees}")
+    warnings = "Warnings: " + "; ".join(result.warnings) if result.warnings else ""
+    if warnings:
+        parts.append(warnings)
+    env = (f"This is the {eng.broker.env_label()} environment. Say "
+           "'submit it' to place the order.")
+    parts.append(env)
+    ctx.card = _ticket_card(tk, notes=[reviewed + ".", warnings, env], extra=[
+        bp and blocks.row(*bp, blocks.MONEY),
+        blocks.row("Fees, about", fees, blocks.MONEY)])
     return ". ".join(parts)
 
 
@@ -779,7 +857,7 @@ def review_order(ctx, args):
         },
         "required": ["confirmed"],
     },
-})
+}, display=display_heading("Order submission"))
 def submit_order(ctx, args):
     eng, tk, chain, problem = _engine_and_ticket(ctx)
     if problem:
@@ -824,7 +902,7 @@ def submit_order(ctx, args):
             "broker": BROKER_ARG,
         },
     },
-})
+}, display=display_heading("Orders"))
 def list_orders(ctx, args):
     # Defaulting to today made "any working orders?" answer "no" while orders
     # were live at the broker — they were simply older than midnight.
@@ -834,19 +912,27 @@ def list_orders(ctx, args):
         try:
             orders = eng.orders.list_orders(account, start_date=start)
         except Exception as e:
-            return f"couldn't fetch orders: {e}.", None
+            return f"couldn't fetch orders: {e}.", None, None
         if args.get("working_only"):
             orders = [o for o in orders if o.is_working]
         if not orders:
-            return f"no orders since {start}.", None
-        lines = []
+            return f"no orders since {start}.", None, None
+        lines, rows = [], []
         for o in orders[:10]:
             legs = "; ".join(f"{l['action']} {l['quantity']} {l['symbol']}"
                              for l in o.legs)
-            price = f" at {o.price:g} {o.price_effect}" if o.price else ""
-            lines.append(f"Order {o.id} on {o.underlying}: {o.status}{price} — {legs}")
-        more = f" (+{len(orders) - 10} more)" if len(orders) > 10 else ""
-        return ". ".join(lines) + more + ".", None
+            price = f"{o.price:g} {o.price_effect}" if o.price else None
+            lines.append(f"Order {o.id} on {o.underlying}: {o.status}"
+                         + (f" at {price}" if price else "") + f" — {legs}")
+            rows.append(blocks.row(
+                f"{o.underlying} · order {o.id}", price, blocks.MONEY,
+                badge=o.status.upper(), lines=[
+                    f"{l['action'].replace('_', ' ').capitalize()} "
+                    f"{l['quantity']} {blocks.symbol_name(l['symbol'])}"
+                    for l in o.legs]))
+        more = f"+{len(orders) - 10} more" if len(orders) > 10 else ""
+        return (". ".join(lines) + (f" ({more})" if more else "") + ".", None,
+                blocks.section(rows=rows, notes=[more]))
     return _per_account(ctx, args, one)
 
 
@@ -909,35 +995,43 @@ def cancel_order(ctx, args):
             "broker": BROKER_ARG,
         },
     },
-})
+}, display=display_heading("Open positions"))
 def get_positions(ctx, args):
     def one(eng, account):
         try:
             positions = eng.positions(account, args.get("underlying"))
         except Exception as e:
-            return f"couldn't fetch positions: {e}.", None
+            return f"couldn't fetch positions: {e}.", None, None
         if not positions:
             scope = f" in {tsym.normalize_underlying(args['underlying'])}" \
                 if args.get("underlying") else ""
-            return f"no open positions{scope}.", 0.0
-        lines, total, unmarked = [], 0.0, 0
+            return f"no open positions{scope}.", 0.0, None
+        lines, rows, total, unmarked = [], [], 0.0, 0
         for p in positions[:12]:
             mark = eng.mark(p)
             u = p.unrealized(mark)
             side = "long" if p.quantity > 0 else "short"
-            upnl = f"unrealized {_fmt(u)}" if u is not None else "no mark"
+            upnl = f"unrealized {_pnl(u)}" if u is not None else "no mark"
             if u is None:
                 unmarked += 1
             else:
                 total += u
+            avg = _fmt(p.average_open_price)
             lines.append(f"{side} {abs(p.quantity):g} {p.symbol} "
-                         f"(avg {_fmt(p.average_open_price)}, {upnl})")
-        summary = f"Total unrealized {_fmt(total)}"
+                         f"(avg {avg}, {upnl})")
+            rows.append(blocks.row(
+                blocks.symbol_name(p.symbol),
+                _pnl(u) if u is not None else "no mark", blocks.PNL,
+                badge=side.upper(),
+                lines=[f"Quantity {abs(p.quantity):g} · avg {avg}"]))
+        summary = f"Total unrealized {_pnl(total)}"
+        unmarked_note = f"{unmarked} position(s) unmarked" if unmarked else ""
         if unmarked:
-            summary += f" ({unmarked} position(s) unmarked)"
-        return ". ".join(lines) + f". {summary}.", total
-    return _per_account(ctx, args, one, total=lambda v: (
-        f"All of them together, added here only: unrealized {_fmt(sum(v))}."))
+            summary += f" ({unmarked_note})"
+        return ". ".join(lines) + f". {summary}.", total, blocks.section(
+            rows=rows, total=blocks.total("Total unrealized", _pnl(total)),
+            notes=[unmarked_note])
+    return _per_account(ctx, args, one, total=("unrealized", _pnl, blocks.PNL))
 
 
 @tool({
@@ -963,7 +1057,7 @@ def get_positions(ctx, args):
             "broker": BROKER_ARG,
         },
     },
-})
+}, display=display_heading("Profit and loss"))
 def get_pnl(ctx, args):
     start, end = period_range(args.get("period"), args.get("start_date"),
                               args.get("end_date"))
@@ -974,21 +1068,31 @@ def get_pnl(ctx, args):
         try:
             rep = eng.pnl_report(account, start, end, underlying=args.get("underlying"))
         except Exception as e:
-            return f"couldn't build the P&L report: {e}.", None
+            return f"couldn't build the P&L report: {e}.", None, None
+        realized, fees = _pnl(rep.realized), _fmt(rep.fees)
         parts = [f"from {rep.start} to {rep.end}{scope}: realized "
-                 f"{_fmt(rep.realized)} net of {_fmt(rep.fees)} in fees "
+                 f"{realized} net of {fees} in fees "
                  f"across {len(rep.events)} closed trades"]
+        rows = [blocks.row("Fees", fees, blocks.MONEY),
+                blocks.row("Closed trades", str(len(rep.events)))]
         if rep.by_underlying and not args.get("underlying"):
-            tops = sorted(rep.by_underlying.items(), key=lambda kv: -abs(kv[1]))[:4]
+            tops = [(u, _pnl(v)) for u, v in sorted(
+                rep.by_underlying.items(), key=lambda kv: -abs(kv[1]))[:4]]
             parts.append("by underlying: " +
-                         ", ".join(f"{u} {_fmt(v)}" for u, v in tops))
+                         ", ".join(f"{u} {v}" for u, v in tops))
+            rows += [blocks.row(f"{u} realized", v, blocks.PNL) for u, v in tops]
         if rep.unrealized is not None:
-            parts.append(f"current unrealized {_fmt(rep.unrealized)}")
-        if rep.note:
-            parts.append(rep.note.strip())
-        return ". ".join(parts) + ".", rep.realized
-    return _per_account(ctx, args, one, total=lambda v: (
-        f"All of them together, added here only: realized {_fmt(sum(v))}."))
+            parts.append(f"current unrealized {_pnl(rep.unrealized)}")
+            rows.append(blocks.row("Unrealized now", _pnl(rep.unrealized),
+                                   blocks.PNL))
+        note = (rep.note or "").strip()
+        if note:
+            parts.append(note)
+        return ". ".join(parts) + ".", rep.realized, blocks.section(
+            rows=rows, notes=[note],
+            total=blocks.total(f"Realized{scope}, {rep.start} to {rep.end}",
+                               realized))
+    return _per_account(ctx, args, one, total=("realized", _pnl, blocks.PNL))
 
 
 @tool({
@@ -999,7 +1103,7 @@ def get_pnl(ctx, args):
         "submitted orders."
     ),
     "input_schema": {"type": "object", "properties": {}},
-})
+}, display=display_heading("Order ticket"))
 def clear_ticket(ctx, args):
     broker, problem = _broker(ctx, args)
     if problem:

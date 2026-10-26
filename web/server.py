@@ -534,6 +534,15 @@ def api_control(agent):
     return {"agent_running": agent_running(), "muted": None, "mode": None}
 
 
+def api_display(agent):
+    """GET /api/display — the card the display window shows (display/main.py
+    polls it). The card lives only in the agent's process, so a standalone
+    server has none to give and says the agent isn't here."""
+    if agent is None:
+        return {"agent_running": False, "card": None}
+    return {"agent_running": True, "card": agent.card}
+
+
 def api_control_post(agent, name, payload):
     """POST /api/control/<name> -> (status, body). A request that can't be
     delivered is an error the user is told about — silently accepting it would
@@ -1059,6 +1068,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, api_agents())
             if route == "/api/control":
                 return self._send(200, api_control(self.server.agent))
+            if route == "/api/display":
+                return self._send(200, api_display(self.server.agent))
             if route == "/api/voices":
                 return self._send(200, api_voices())
             if route == "/api/history":

@@ -476,6 +476,24 @@ calculated separately and only ever added up in a sentence. The dashboard's
 **Trading** page works on one broker at a time, chosen at the top (same
 ticket as the voice, review/submit/cancel, P&L reports).
 
+**The display window** shows what the latest trading answer was about —
+positions, orders, P&L, the trades behind a position, the ticket being
+built or reviewed — in large white-on-black type, so you needn't hold every
+leg in your head while listening. Every card has the same shape: a heading
+("Open positions — Tom, Charles Schwab"), an "as of" time, the one figure
+that matters in a big box at the top (total unrealized, realized P&L, the
+limit price), then one row per position, leg, order or trade — a word badge
+(LONG, SHORT, WORKING, FILLED), a readable contract ("SPX 7750 Put · Fri
+Nov 6"), its value on the right, and small detail lines. The figures are the
+ones the agent answered from. Only profit and loss is coloured, and it keeps
+its "+" or "-"; cash, prices and quantities stay white. After two minutes
+the card says in words that the numbers aren't current. The window sits at
+the top-right, as tall as the screen allows. The agent opens it at start
+(it needs `pip install pywebview`;
+`DISPLAY_WINDOW = False` turns it off). It comes to the front only when a new
+answer arrives, never takes the keyboard, and if you close it the next
+trading answer reopens it. When the agent stops, the window says so.
+
 ### Charles Schwab (Tom)
 
 Register an app on the [Schwab Developer Portal](https://developer.schwab.com)
@@ -635,6 +653,7 @@ brain/           llm (Claude loop), agents (personas), history, memory
 stores/          notes, knowledge, categories, discord_data, chroma_store
 lib/             atomic_io, single_instance, frontmatter — leaf utilities
 web/             server.py (the dashboard, embedded in the agent) + static/
+display/         the display window for trading answers (its own process; per-OS raise)
 docs/            PROJECT.md, MEDIA_CONTROL.md, TODO.md, TRADING_*.md
 tools/           tool registry — one file per domain (notes, discord, model, ...)
 tests/           unittest suite over the pure logic (no hardware needed)
