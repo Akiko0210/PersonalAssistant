@@ -50,7 +50,10 @@ _EXP = r"\d{1,2} [A-Z]{3} \d{2}"
 _STRIKE = r"\d+(?:\.\d+)?"
 # "BOT +2 CALENDAR SPX 100 (Weeklys) 3 FEB 26/30 JAN 26 6860 PUT @7.00 CBOE".
 # It ends at the price: statements append a venue, while alerts glue market
-# data straight on ("@1.85LAST=7715.14 BID=...").
+# data straight on ("@1.85LAST=7715.14 BID=..."). A roll that costs money is
+# written SOLD at a negative price ("SOLD -1 DIAGONAL ... @-8.55", a $855
+# debit): the sign is kept, and -qty*price*mult comes out as that debit —
+# dropping it would have logged the debit as a credit (#40).
 _FILL_RE = re.compile(
     r"(?P<side>BOT|SOLD) (?P<qty>[+-]\d+) "
     r"(?:(?P<spread>" + "|".join(k for k in _SPREADS if k) + r") )?"
@@ -58,7 +61,7 @@ _FILL_RE = re.compile(
     rf"(?P<exps>{_EXP}(?:/{_EXP})?) "
     rf"(?P<strikes>{_STRIKE}(?:/{_STRIKE})*) "
     r"(?P<types>(?:CALL|PUT)(?:/(?:CALL|PUT))*) "
-    r"@(?P<price>\d*\.?\d+)")
+    r"@(?P<price>-?\d*\.?\d+)")
 
 
 def _iso(exp):
