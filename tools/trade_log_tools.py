@@ -399,9 +399,11 @@ def assign_trades(ctx, args):
 
 
 def _newest_statement():
-    # Statement names start with their date, so the last name is the newest.
-    found = sorted(tcfg.STATEMENTS_DIR.glob("*AccountStatement*.csv"))
-    return found[-1] if found else None
+    # Any name, newest saved: the folder holds only statements, and parse()
+    # refuses anything else by its header and TOTAL row. The old
+    # *AccountStatement* filter hid the user's IRA.csv for half an hour (#38).
+    found = [p for p in tcfg.STATEMENTS_DIR.glob("*") if p.suffix.lower() == ".csv"]
+    return max(found, key=lambda p: p.stat().st_mtime) if found else None
 
 
 @tool({
@@ -410,21 +412,26 @@ def _newest_statement():
         "Import a thinkorswim/Schwab account-statement CSV into the trade "
         "log. The statement is the authoritative record: it adds exact fees "
         "and expirations, and replaces the alert-logged fills of the span it "
-        "covers. With no path it imports the newest statement in the user's "
-        "statements folder. Safe to repeat."
+        "covers. With no path it imports the most recently saved .csv in the "
+        "user's statements folder, whatever its name. Safe to repeat."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "path": {"type": "string",
-                     "description": "CSV path; omit for the newest statement."},
+                     "description": ("A file name in the statements folder, or "
+                                     "a full path; omit for the newest .csv.")},
         },
     },
 })
 def import_statement(ctx, args):
     path = Path(args["path"]) if args.get("path") else _newest_statement()
     if path is None:
-        return f"No *AccountStatement*.csv in {tcfg.STATEMENTS_DIR}."
+        return f"No .csv in {tcfg.STATEMENTS_DIR}."
+    # A relative path is the user naming a file in the statements folder —
+    # they can't see, let alone dictate, the app's working directory.
+    if not path.is_absolute():
+        path = tcfg.STATEMENTS_DIR / path.name
     try:
         text = path.read_text(encoding="utf-8-sig")
     except OSError as e:

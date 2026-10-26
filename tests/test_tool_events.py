@@ -10,8 +10,12 @@ Claude is built via __new__ so its heavy __init__ (API client, stores, embedding
 model) is skipped; the methods here only touch _ctx, history, and _save_history.
 """
 
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
+import config as cfg
 from brain import history as hist
 from tools import ToolContext
 from tests.llm_fixtures import make_claude
@@ -79,6 +83,30 @@ class TestFlushToolEvents(unittest.TestCase):
         c.flush_tool_events()
         # Idempotent: sanitizing again changes nothing structurally.
         self.assertEqual(hist.sanitize(c.history), c.history)
+
+
+class TestNoteTo(unittest.TestCase):
+    """A dashboard event lands in the thread of the persona it's for (#38)."""
+
+    def test_the_active_persona_gets_it_in_memory_and_saved(self):
+        c = make_claude(active="tom", history=[{"role": "user", "content": "hi"}])
+        c.note_to("tom", "statement imported")
+        self.assertIn("statement imported", c.history[-1]["content"])
+        self.assertEqual(len(c.saved), 1)
+
+    def test_an_inactive_persona_gets_it_in_its_saved_thread(self):
+        c = make_claude(active="alice", history=[{"role": "user", "content": "hi"}])
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(cfg, "DATA_DIR", Path(tmp)):
+            hist.save(cfg.history_path("tom"), [
+                {"role": "user", "content": "any fills?"},
+                {"role": "assistant", "content": "None today."}])
+            c.note_to("tom", "statement imported")
+            tom = hist.load(cfg.history_path("tom"))
+        self.assertEqual(len(tom), 2)        # folded into Tom's last reply
+        self.assertIn("statement imported", tom[-1]["content"])
+        self.assertEqual(c.history, [{"role": "user", "content": "hi"}])
+        self.assertEqual(c.saved, [])        # Alice's thread is untouched
 
 
 if __name__ == "__main__":

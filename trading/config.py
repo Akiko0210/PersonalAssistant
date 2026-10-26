@@ -96,8 +96,9 @@ def tokens_path(broker):
 # --- Trade log (thinkorswim/Schwab fills; see trading/trade_log.py) --------
 
 TRADE_LOG_PATH = TRADING_DIR / "trade_log.db"
-# Where "import my latest statement" looks when no path is given: the newest
-# *AccountStatement*.csv here. Voice can't dictate a Windows path. Statements
+# Where "import my latest statement" looks when no path is given: the most
+# recently saved .csv here, whatever its name — so keep only statements in it.
+# Voice can't dictate a Windows path. Statements
 # dropped on the dashboard's Trading page are kept here once imported. Under
 # data/ (gitignored) by default — a personal folder path doesn't belong in the
 # repo; point TRADE_STATEMENTS_DIR at one in .env instead.

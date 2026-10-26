@@ -43,17 +43,18 @@ def write_json_atomic(path, obj, *, indent=2, ensure_ascii=False):
     write_text_atomic(path, json.dumps(obj, indent=indent, ensure_ascii=ensure_ascii))
 
 
-def write_text_atomic(path, text, encoding="utf-8"):
+def write_text_atomic(path, text, encoding="utf-8", newline=None):
     """Atomically replace `path`'s contents with `text`. Raises on I/O failure
     (leaving the existing file untouched); callers that must not fail should
-    catch, as before."""
+    catch, as before. `newline` is open()'s: "" writes `text`'s line endings
+    as they are, where the default turns every \\n into \\r\\n on Windows."""
     path = os.fspath(path)
     directory = os.path.dirname(path) or "."
     # Temp file in the SAME directory, so os.replace() is a same-volume atomic
     # rename rather than a cross-volume copy (which wouldn't be atomic).
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".swap")
     try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
+        with os.fdopen(fd, "w", encoding=encoding, newline=newline) as f:
             f.write(text)
             f.flush()
             os.fsync(f.fileno())   # force to disk before the rename is exposed
