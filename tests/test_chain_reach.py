@@ -52,6 +52,19 @@ class ReachTests(unittest.TestCase):
         self.assertEqual(self.ticket().legs[0].expiration, "2027-02-19")
         self.assertIn(("2027-02-03", "2027-03-03", False), self.broker.asked)
 
+    def test_a_date_under_two_weeks_out_never_asks_for_the_past(self):
+        # Schwab 400s a window starting before today (#42); ten days out,
+        # date - 14 would start four days ago.
+        class Nov10(date):
+            @classmethod
+            def today(cls):
+                return date(2026, 11, 10)
+        with mock.patch("tools.trading_tools.date", Nov10):
+            out = self.call("build_strategy", strategy="Short Put", symbol="SPX",
+                            expiration="2026-11-20")
+        self.assertIn("Built", out)
+        self.assertIn(("2026-11-10", "2026-12-04", False), self.broker.asked)
+
     def test_a_date_with_nothing_listed_near_it_is_refused(self):
         out = self.call("build_strategy", strategy="Short Put", symbol="SPX",
                         expiration="2026-12-20")

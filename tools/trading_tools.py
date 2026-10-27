@@ -180,8 +180,12 @@ def _expiration(eng, chain, said):
     target = date.fromisoformat(said)
     reach = timedelta(days=tcfg.CHAIN_REACH_DAYS)
     if not chain.expirations or said > chain.expirations[-1]:
+        # Never from before today: Schwab answers 400 "Check Param Values" to
+        # a window that starts in the past, which broke every date 8-13 days
+        # out (2026-10-27, #42) — and nothing before today can be traded.
+        start = max(target - reach, date.today())
         try:
-            eng.extend_chain(chain, (target - reach).isoformat(),
+            eng.extend_chain(chain, start.isoformat(),
                              (target + reach).isoformat())
         except Exception as e:
             return None, f"Couldn't load {chain.underlying} expirations near {said}: {e}"
