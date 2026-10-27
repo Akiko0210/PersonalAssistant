@@ -16,6 +16,10 @@ Two halves live here:
   thread and the agent's is taken by Agent().run(). It polls the agent's
   dashboard route /api/display and comes to the front only when the card's
   version changes. The isolation means a window crash never touches voice.
+  It closes when the agent that launched it is gone (#46): a window left
+  behind held the display lock, so every card relaunched a process that
+  exited at once, and each launch reached the agent as a headset Pause —
+  the agent muted itself mid-turn.
 
 Bringing the window forward is OS-specific and lives in the variant files
 beside this one: `windows.py` (SetWindowPos without activation) and
@@ -73,8 +77,8 @@ def make_card(heading, content, version):
 class Window:
     """The window process, from the agent's side. open() starts it when it
     isn't running — at agent start, and again with the next card after the
-    user closed it or it crashed. A window left over from an earlier agent
-    run holds the display lock, so the new process simply exits."""
+    user closed it or it crashed. It is handed this process's pid and closes
+    when that process is gone."""
 
     def __init__(self, port):
         self._port = port
@@ -91,7 +95,8 @@ class Window:
             return self
         try:
             self._proc = subprocess.Popen(
-                [sys.executable, "-m", "display.main", "--port", str(self._port)],
+                [sys.executable, "-m", "display.main", "--port", str(self._port),
+                 "--agent-pid", str(os.getpid())],
                 cwd=cfg.BASE_DIR, **_impl.POPEN_KWARGS)
         except OSError as e:
             log.warning("could not start the display window: %s", e)
@@ -120,10 +125,15 @@ def is_new(version, last):
     return version is not None and version != last
 
 
-def _follow(window, port):
+def _follow(window, port, agent_pid=None):
     # Not on the first poll: a window that just opened is already on top.
     shown, last = None, _OPENING
     while True:
+        # The process, not the route: a slow /api/display reply under load
+        # must not close the window; a quit, crash or closed console must.
+        if agent_pid and not _impl.agent_alive(agent_pid):
+            window.destroy()
+            return
         state = fetch(port)
         if state != shown:
             # A page error must not end this loop: the window would freeze
@@ -140,7 +150,7 @@ def _follow(window, port):
         time.sleep(cfg.DISPLAY_POLL_S)
 
 
-def run(port):
+def run(port, agent_pid=None):
     try:
         lock = SingleInstance(cfg.DISPLAY_LOCK_PATH).acquire()
     except AlreadyRunning:
@@ -157,8 +167,8 @@ def run(port):
         focus=False, background_color="#000000")
     # Daemon, so closing the window ends the process; pywebview's own func
     # thread would keep it alive.
-    threading.Thread(target=_follow, args=(window, port), daemon=True,
-                     name="follow").start()
+    threading.Thread(target=_follow, args=(window, port, agent_pid),
+                     daemon=True, name="follow").start()
     try:
         webview.start()
     finally:
@@ -168,13 +178,15 @@ def run(port):
 def main():
     ap = argparse.ArgumentParser(description="Voice agent display window")
     ap.add_argument("--port", type=int, default=cfg.DASHBOARD_PORT)
+    # Omitted (a window started by hand), it stays until closed.
+    ap.add_argument("--agent-pid", type=int, default=None)
     args = ap.parse_args()
     cfg.ensure_dirs()
     # Detached from the agent's console, so its errors go to a file.
     logging.basicConfig(filename=cfg.LOG_DIR / "display.log", level=logging.INFO,
                         format="%(asctime)s %(name)-8s %(levelname)-7s %(message)s")
     try:
-        run(args.port)
+        run(args.port, args.agent_pid)
     except Exception:
         log.exception("display window failed")
         raise

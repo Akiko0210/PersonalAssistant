@@ -492,7 +492,8 @@ the top-right, as tall as the screen allows. The agent opens it at start
 (it needs `pip install pywebview`;
 `DISPLAY_WINDOW = False` turns it off). It comes to the front only when a new
 answer arrives, never takes the keyboard, and if you close it the next
-trading answer reopens it. When the agent stops, the window says so.
+trading answer reopens it. When the agent stops — quit, crash, or closed
+console — the window closes with it.
 
 ### Charles Schwab (Tom)
 

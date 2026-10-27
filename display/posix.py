@@ -4,9 +4,21 @@ on Linux), which raises the window without activating it. Untested on either
 so far — the issue targets Windows first.
 """
 
-# Its own session, so a Ctrl+C in the agent's terminal doesn't take the
-# window down with it; the window outlives the agent to say so.
+import os
+
+# Its own session, so one rule decides when the window goes — its agent's
+# process is gone (agent_alive) — not which terminal signals reach it.
 POPEN_KWARGS = {"start_new_session": True}
+
+
+def agent_alive(pid):
+    try:
+        os.kill(pid, 0)   # signal 0: existence check only
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True       # exists, owned by someone else
+    return True
 
 
 def bring_to_front(window):

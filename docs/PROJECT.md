@@ -261,9 +261,14 @@ unit-tested without a microphone, speakers, or an API key.
   version; the window comes forward only on a version change, via the variant files
   (`windows.py`: SetWindowPos topmost-then-not with SWP_NOACTIVATE;
   `posix.py`: pywebview's `on_top`), and is created non-activating so it
-  never takes the keyboard. It outlives the agent to say "not running", so a
-  display lock (`data/display.lock`) keeps a restarted agent from opening a
-  second one; a card arriving while the window is closed reopens it.
+  never takes the keyboard. It closes with the agent that launched it (#46):
+  the agent passes `--agent-pid`, and each poll checks that process through
+  the variant files' `agent_alive` (the process, not the route, so a slow
+  reply never closes it). It once outlived the agent; the orphan held the
+  display lock, every card relaunched a process that exited at once, and each
+  launch reached the agent as an SMTC Pause, muting it unasked. The lock
+  (`data/display.lock`) still keeps two windows from stacking; a card
+  arriving while the window is closed reopens it.
   Delegated tasks get no `show`, so a background answer never swaps the card.
 
 ### Tools package
