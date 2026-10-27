@@ -133,14 +133,18 @@ class TestStatement(unittest.TestCase):
 class LogBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = tcfg.TRADE_LOG_PATH
+        self._saved = tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR
         tcfg.TRADE_LOG_PATH = Path(self.tmp.name) / "trade_log.db"
+        # The readers fall back to the persona's saved account focus
+        # (data/trading/<broker>/accounts.json); the user's real one made
+        # "which account?" answer from one account instead of asking (#44).
+        tcfg.TRADING_DIR = Path(self.tmp.name)
         self.csv = Path(self.tmp.name) / "2026-09-20-AccountStatement.csv"
         self.csv.write_text(STATEMENT, encoding="utf-8")
         self.ctx = ToolContext(active_agent="tom")
 
     def tearDown(self):
-        tcfg.TRADE_LOG_PATH = self._saved
+        tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR = self._saved
         self.tmp.cleanup()
 
     def call(self, name, **args):
