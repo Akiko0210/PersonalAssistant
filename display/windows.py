@@ -9,10 +9,29 @@ activates as it raises, and from a thread that isn't the UI's.
 
 import subprocess
 
-# Off the agent's console: a Ctrl+C or closed console there would take the
-# window down with it, and the window outlives the agent to say so.
+# Off the agent's console, so one rule decides when the window goes — its
+# agent's process is gone (agent_alive) — not which console signals reach it.
 POPEN_KWARGS = {"creationflags": subprocess.DETACHED_PROCESS
                 | subprocess.CREATE_NEW_PROCESS_GROUP}
+
+# Win32 values pywin32 doesn't name in every release.
+_QUERY_LIMITED = 0x1000   # PROCESS_QUERY_LIMITED_INFORMATION
+_STILL_ACTIVE = 259
+
+
+def agent_alive(pid):
+    # Not os.kill(pid, 0): on Windows that is TerminateProcess.
+    import pywintypes
+    import win32api
+    import win32process
+    try:
+        handle = win32api.OpenProcess(_QUERY_LIMITED, False, pid)
+    except pywintypes.error:
+        return False  # no such process
+    try:
+        return win32process.GetExitCodeProcess(handle) == _STILL_ACTIVE
+    finally:
+        win32api.CloseHandle(handle)
 
 
 def bring_to_front(window):

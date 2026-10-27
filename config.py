@@ -89,8 +89,9 @@ DISPLAY_POLL_S = 0.5
 # A card is a snapshot, never live: past this age it says so in words. Marks
 # on an SPX spread move within minutes, so two minutes is already generous.
 DISPLAY_STALE_S = 120
-# One window, whoever starts it: it outlives the agent (to say "not running"),
-# so a restarted agent must find the old one instead of stacking a second.
+# One window, whoever starts it: the window closes with its agent (#46), but
+# only ~2 s later (a refused localhost connect takes that long on Windows),
+# and an agent restarted inside that gap must not stack a second.
 DISPLAY_LOCK_PATH = DATA_DIR / "display.lock"
 
 # --- Note categories -----------------------------------------------------------

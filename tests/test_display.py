@@ -4,7 +4,10 @@ sentence; only P&L is coloured; the route serves it honestly with or
 without an agent; and the window comes forward only for a new card.
 """
 
+import os
 import re
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -217,6 +220,33 @@ class WindowTests(unittest.TestCase):
             popen.return_value.poll.return_value = 0      # user closed it
             w.open()
             self.assertEqual(popen.call_count, 2)
+        # Tied to this agent, so it can't outlive it (#46).
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv[argv.index("--agent-pid") + 1], str(os.getpid()))
+
+    def test_closes_once_its_agent_is_gone_without_asking_the_route(self):
+        window = mock.Mock()
+        with mock.patch.object(display._impl, "agent_alive", return_value=False), \
+                mock.patch.object(display, "fetch") as fetch:
+            display._follow(window, 8765, agent_pid=4321)
+        window.destroy.assert_called_once()
+        fetch.assert_not_called()   # a slow route can't be what closes it
+
+    def test_keeps_following_while_its_agent_lives(self):
+        window = mock.Mock()
+        with mock.patch.object(display._impl, "agent_alive", return_value=True), \
+                mock.patch.object(display, "fetch", return_value={"card": None}), \
+                mock.patch("time.sleep", side_effect=StopIteration), \
+                self.assertRaises(StopIteration):
+            display._follow(window, 8765, agent_pid=4321)
+        window.destroy.assert_not_called()
+        window.evaluate_js.assert_called_once()
+
+    def test_liveness_is_real_on_this_os(self):
+        self.assertTrue(display._impl.agent_alive(os.getpid()))
+        done = subprocess.Popen([sys.executable, "-c", "pass"])
+        done.wait()
+        self.assertFalse(display._impl.agent_alive(done.pid))
 
     def test_off_without_pywebview_or_a_dashboard(self):
         with mock.patch("subprocess.Popen") as popen:
