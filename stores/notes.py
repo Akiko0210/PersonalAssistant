@@ -369,7 +369,7 @@ class NoteStore:
             slug = info.get("category")
             disk_slug = next(
                 (s for s, m in categories.NOTE_CATEGORIES.items()
-                 if (cfg.DATA_DIR / m["folder"] / f"{nid}.md").exists()),
+                 if (cfg.NOTES_DIR / m["folder"] / f"{nid}.md").exists()),
                 None,
             )
             if slug not in categories.NOTE_CATEGORIES:

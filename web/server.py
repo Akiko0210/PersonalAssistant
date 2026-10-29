@@ -12,7 +12,7 @@ Design constraints:
   JSON/markdown files on disk, so the dashboard starts instantly and can run
   alongside the agent without loading a second embedding model. Semantic search
   stays a voice feature; the dashboard's search is a plain substring scan.
-- Read-mostly: it writes data/config_overrides.json (via atomic_io, same as
+- Read-mostly: it writes data/settings/config_overrides.json (via atomic_io, same as
   every other state file), and accepts uploads into knowledge/. Config changes
   are picked up by config.py at the agent's next start — the dashboard does not
   reach into a live process, with the one exception below.
@@ -419,7 +419,7 @@ def api_note(note_id):
     folders = folder_registry()
     slug = categories.slug_of(info)
     folder = folders.get(slug, {}).get("folder", slug)
-    base = cfg.DATA_DIR / folder
+    base = cfg.NOTES_DIR / folder
     summary, transcript = "", ""
     spath = base / f"{note_id}.md"
     if spath.exists():
@@ -451,7 +451,7 @@ def api_search(query):
         title = info.get("title", "")
         snippet = ""
         hit = q in title.lower()
-        path = cfg.DATA_DIR / folder / f"{nid}.md"
+        path = cfg.NOTES_DIR / folder / f"{nid}.md"
         if path.exists():
             try:
                 _, body = parse_frontmatter(path.read_text(encoding="utf-8"))
@@ -577,7 +577,7 @@ def api_voices():
 
 
 def api_agents():
-    """The persona registry: coded defaults overlaid with data/agents.json,
+    """The persona registry: coded defaults overlaid with data/settings/agents.json,
     plus who's active. Editable fields only — tool lists are shown read-only."""
     agents_registry.load_agents()  # pick up saved edits fresh, like folder_registry
     overlay = read_json(cfg.AGENTS_PATH, {})
@@ -622,7 +622,7 @@ def api_agents():
 
 
 def save_agents(payload):
-    """Validate and persist persona edits to data/agents.json. Payload:
+    """Validate and persist persona edits to data/settings/agents.json. Payload:
     {agent_key: {field: value, ...} | null} — null resets that agent to its
     coded defaults. Unknown agents/fields are errors, not silently dropped."""
     if not isinstance(payload, dict):
@@ -1285,6 +1285,11 @@ def main():
                     help="don't open the dashboard in the default browser")
     args = ap.parse_args()
 
+    try:  # opened before the agent's first start since #49 moved data/
+        with SingleInstance(cfg.LOCK_PATH):
+            cfg.migrate_layout()
+    except (AlreadyRunning, OSError):
+        pass  # the agent holds it, and moves data/ on its own start
     cfg.ensure_dirs()
     try:
         server = build_server(args.port)

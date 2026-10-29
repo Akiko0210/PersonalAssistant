@@ -182,21 +182,21 @@ unit-tested without a microphone, speakers, or an API key.
   scan reports the file as failed.
 - **`stores/working_state.py`** — each persona's *working record*: what it is in
   the middle of for the user (Tom's campaigns, Linda's Coaches Notebook, Alice's
-  list). SQLite (`data/working_state.db`, the trade log's connection-per-call
+  list). SQLite (`data/memory/working_state.db`, the trade log's connection-per-call
   shape): records with an open/closed lifecycle and a current-state body, plus
   dated entries. Writes take the writer's key only; `block(owner)` packs the
   open records into the always-shown prompt block (§7).
 - **`stores/discord_data.py`** — `DiscordData`: read-only view over a sibling "Discord
   Notifier" project's captured messages and trade alerts.
 - **`stores/categories.py`** — the note-folder registry: seed folders, the
-  voice-created/renamed overlay (persisted to `data/categories.json`),
+  voice-created/renamed overlay (persisted to `data/notes/categories.json`),
   `category_dir`, and the add/rename/delete API. This is runtime-mutable *state*,
   deliberately separate from `config.py`.
 
 ### Configuration
 - **`config.py`** — pure constants: paths, audio/VAD parameters, barge-in
   thresholds, model ids, the system prompt, and `ensure_dirs()`. At import it
-  overlays `data/config_overrides.json` (whitelisted tunables only) so values
+  overlays `data/settings/config_overrides.json` (whitelisted tunables only) so values
   adjusted in the dashboard reach the agent on its next start.
 
 ### Dashboard
@@ -208,7 +208,7 @@ unit-tested without a microphone, speakers, or an API key.
   notes/folders/transcripts, inspect the live conversation history, the
   knowledge base, Discord captures, and session logs — and edit
   the tunable config values from a form. Stdlib-only and read-mostly: it writes
-  `data/config_overrides.json` (atomically) and accepts knowledge uploads. Its
+  `data/settings/config_overrides.json` (atomically) and accepts knowledge uploads. Its
   search is a plain substring scan — semantic search stays a voice feature.
   - The **Knowledge page is laid out for a user with tunnel vision**: a single
     ~560px column, numbered steps, 17px+ text, full-width 54px buttons, and
@@ -429,7 +429,7 @@ unit-tested without a microphone, speakers, or an API key.
    question in the new voice). A note prepared *inside* a forwarded turn is
    drained right there — deferred work must never outlive the turn that
    created it (that leak once ate a "switch me back" command).
-7. The transcript is saved to `data/history_<key>.json` after the turn. The
+7. The transcript is saved to `data/conversation_history/<key>.json` after the turn. The
    exchange is handed to the memory worker (`_remember`) once settled —
    so memory holds what the user heard — and the worker embeds it into the
    persona's index and runs the fact extractor over it (`brain/facts.py`)
@@ -608,7 +608,7 @@ central list or dispatch chain.
 
 ## 6. Conversation history & the invariant that once bricked the app
 
-Each persona's live conversation is persisted to `data/history_<key>.json`
+Each persona's live conversation is persisted to `data/conversation_history/<key>.json`
 after every turn and restored on the next boot (the pre-isolation shared
 `history.json` is parked as `.bak` by a one-time migration). The Anthropic API enforces invariants a saved history
 can silently violate: every `tool_use` must be answered by a `tool_result` in the
@@ -656,7 +656,7 @@ prompt-caching layout).
 
 1. **Verbatim tail** — the last `CONTEXT_RECENT_EXCHANGES` exchanges go to the
    model word for word, as a coherence anchor for "yes, do that". The
-   persisted transcript (`data/history_<key>.json`, capped at
+   persisted transcript (`data/conversation_history/<key>.json`, capped at
    `HISTORY_MAX_MESSAGES`) is the *dashboard's* record, not what the model
    sees; `history.tail_start` picks the tail in exchanges, not messages, so an
    exchange that used a tool is never split.
@@ -783,28 +783,34 @@ conversation. MMR at the fill fixed those cases without a second model.
 ## 8. Where data lives
 
 ```
-data/<Folder>/       notes: <id>.md (summary + frontmatter) + <id>.transcript.md
-data/pending/        transient live transcript while recording
-data/chroma/         Chroma index: notes, knowledge, per-agent knowledge_<key>,
-                     conversations_<key> (two key records per exchange) and
-                     facts_<key> (derived from them; rebuildable), plus the
-                     legacy shared conversations archive
-data/index.json      ordered record of every note (title, date, category)
-data/categories.json voice-created/renamed folders overlaid on the seed defaults
-data/history_<key>.json  each persona's transcript (sanitized on every save)
-data/gmail_client_secret.json  Google OAuth client (from the Cloud console)
-data/gmail_token.json          Gmail token, written by `python -m lib.gmail_auth`
+data/notes/<Folder>/       notes: <id>.md (summary + frontmatter) + <id>.transcript.md
+data/notes/_pending/       transient live transcript while recording
+data/notes/index.json      ordered record of every note (title, date, category)
+data/notes/categories.json voice-created/renamed folders overlaid on the seed defaults
+data/conversation_history/<key>.json  each persona's transcript (sanitized on every save)
+data/memory/chroma/        Chroma index: notes, knowledge, per-agent knowledge_<key>,
+                           conversations_<key> (two key records per exchange) and
+                           facts_<key> (derived from them; rebuildable), plus the
+                           legacy shared conversations archive
+data/memory/working_state.db   each persona's working record (campaigns, notebook, list)
+data/settings/             dashboard edits: agents.json, config_overrides.json,
+                           and agent_state.json (the active persona)
+data/gmail/client_secret.json  Google OAuth client (from the Cloud console)
+data/gmail/token.json          Gmail token, written by `python -m lib.gmail_auth`
 data/trading/trade_log.db      Tom's SQLite log of thinkorswim/Schwab fills
 data/trading/<broker>/         per broker: ticket.json, orders_log.json,
                                accounts.json (nicknames + chosen account), and
                                Schwab's tokens.json (the 7-day sign-in)
-data/working_state.db          each persona's working record (campaigns, notebook, list)
+data/agent.lock, display.lock  single-instance locks (transient)
 knowledge/           reference PDFs/text/video you ingest + manifest.json
 logs/                dated session logs
 ```
 
 Everything under `data/`, `logs/`, `knowledge/`, and `.env` is gitignored — the
-user's content and keys never enter version control.
+user's content and keys never enter version control. An install from before
+the topic folders (#49) is moved into them once, by `config.migrate_layout()`
+under the single-instance lock at the agent's (or standalone dashboard's)
+start; it never overwrites, and logs anything it leaves behind.
 
 Only one agent may run against this directory at a time. At startup
 `lib/single_instance/` takes an OS lock on `data/agent.lock` (`msvcrt` in
@@ -890,7 +896,7 @@ history never does.
 
 Audio thresholds, models, endpointing, barge-in sensitivity, the transcript
 cap, and the retrieval budgets/floor are constants in `config.py`, adjustable visually on the dashboard's
-Config page — edits persist to `data/config_overrides.json` and apply at the
+Config page — edits persist to `data/settings/config_overrides.json` and apply at the
 agent's next start.
 
 ### Roadmap (not yet built)
