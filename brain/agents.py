@@ -8,9 +8,9 @@ registry's `reads` grants are the one deliberate exception (a reviewer
 persona may be granted read access to a specialist's private stores).
 
 The registry below is the single source of truth: adding a fourth agent is one
-dict entry. The dashboard overlays user edits from data/agents.json onto these
-defaults at startup (load_agents), mirroring how categories.py overlays
-data/categories.json.
+dict entry. The dashboard overlays user edits from data/settings/agents.json
+onto these defaults at startup (load_agents), mirroring how categories.py
+overlays data/notes/categories.json.
 
 Pure data + pure functions — no I/O beyond load_agents, no anthropic imports —
 so everything here is trivially testable.
@@ -470,7 +470,7 @@ def readable_owners(key):
 
 
 def load_agents():
-    """Overlay dashboard edits from data/agents.json onto the built-in
+    """Overlay dashboard edits from data/settings/agents.json onto the built-in
     defaults. Idempotent (defaults are restored first); a missing/corrupt
     file or bad field is skipped, so the overlay can never break startup.
     Only _OVERLAYABLE fields apply — tool allowlists stay code."""

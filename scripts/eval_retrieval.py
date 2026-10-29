@@ -4,7 +4,7 @@ This is the instrument the CONTEXT_* thresholds are tuned with: a change to
 the scorer, the keys, the gate, the query rewrite or the extractor is judged
 here, on the failures that actually happened, before it is judged by ear.
 
-    python -m scripts.eval_retrieval                  # copy data/chroma, run the cases
+    python -m scripts.eval_retrieval                  # copy data/memory/chroma, run the cases
     python -m scripts.eval_retrieval --backfill       # also run backfill_keys on the copy
     python -m scripts.eval_retrieval --extract        # also run the fact extractor on the copy (model calls)
     python -m scripts.eval_retrieval --understand     # run the query rewrite per case (model calls)
@@ -12,7 +12,7 @@ here, on the failures that actually happened, before it is judged by ear.
     python -m scripts.eval_retrieval --set CONTEXT_CANDIDATES=24   # sweep a knob
     python -m scripts.eval_retrieval --verbose        # the per-candidate tables too
 
-Never opens data/chroma itself (the live agent holds it) and never takes the
+Never opens data/memory/chroma itself (the live agent holds it) and never takes the
 single-instance lock: everything happens in the copy, which is kept — a live
 Chroma handle blocks deleting it on Windows — and its path printed. Copy
 while the agent is idle; a snapshot taken mid-write can be torn.

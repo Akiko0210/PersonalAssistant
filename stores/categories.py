@@ -3,9 +3,9 @@ that used to live in config.py.
 
 The built-in seed folders below are defaults: at startup ensure_loaded()
 overlays any folders the user has created or renamed by voice (persisted in
-data/categories.json, same format as before), and add_category() /
+data/notes/categories.json, same format as before), and add_category() /
 rename_category() / delete_category() mutate the live dict and re-save. Each
-note (summary + transcript) is filed under data/<folder>/. "description"
+note (summary + transcript) is filed under data/notes/<folder>/. "description"
 tells the model what belongs in a category — both when auto-classifying a
 finished note and when resolving a folder name the user speaks.
 """
@@ -55,7 +55,7 @@ DEFAULT_CATEGORY = "general"
 
 def category_dir(slug):
     """Absolute path to a category's folder; unknown slugs fall back to default."""
-    return cfg.DATA_DIR / NOTE_CATEGORIES[valid_slug(slug)]["folder"]
+    return cfg.NOTES_DIR / NOTE_CATEGORIES[valid_slug(slug)]["folder"]
 
 
 def slug_of(info):

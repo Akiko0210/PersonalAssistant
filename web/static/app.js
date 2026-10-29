@@ -368,7 +368,7 @@ views.agents = async function () {
   function render() {
     main.innerHTML = header("Agents", sub) + `
       <div class="config-banner">
-        ⚠ Changes are written to <code>data/agents.json</code> and picked up when the agent
+        ⚠ Changes are written to <code>data/settings/agents.json</code> and picked up when the agent
         ${data.agent_running ? "is <strong>restarted</strong> (it is running now)" : "next starts"}.
         Tool access stays in code.
       </div>` +
@@ -622,7 +622,7 @@ views.config = async function () {
   function render() {
     main.innerHTML = header("Config", "Adjust the agent's tunables. Saved values apply the next time the agent starts.") + `
       <div class="config-banner" id="cfg-banner">
-        ⚠ Changes are written to <code>data/config_overrides.json</code> and picked up when the agent
+        ⚠ Changes are written to <code>data/settings/config_overrides.json</code> and picked up when the agent
         ${data.agent_running ? "is <strong>restarted</strong> (it is running now)" : "next starts"}.
       </div>` +
       groups.map(g => `

@@ -2,7 +2,7 @@
 
 Reference material the user drops into the project-root ``knowledge/`` folder is
 chunked, embedded once, and stored in a persistent Chroma collection (under
-``data/chroma``) separate from notes. PDFs and text are read directly; video and
+``data/memory/chroma``) separate from notes. PDFs and text are read directly; video and
 audio (``.mp4`` and friends) are transcribed by Whisper first, and their chunks
 carry the timestamp they were spoken at so a citation points at the moment to
 rewatch. The agent queries all of it on demand via the ``recall`` tool,

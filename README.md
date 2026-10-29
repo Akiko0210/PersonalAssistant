@@ -244,7 +244,7 @@ cut off mid-thought.
 ## Conversation memory
 
 **Each persona keeps its own conversation.** Alice, Bob, and Tom each have
-their own thread (`data/history_<name>.json`), saved after every turn and
+their own thread (`data/conversation_history/<name>.json`), saved after every turn and
 restored on the next start. What you tell one, the others cannot see: ask Tom
 what you discussed with Alice and he'll say he doesn't have access — and
 offer to ask her. Accept, and Alice answers from her own memory as a spoken
@@ -327,14 +327,18 @@ folder as two files: the AI summary (`<id>.md`, with title/date/category
 frontmatter) and the raw transcript (`<id>.transcript.md`).
 
 ```
-data/Trading/        notes filed under "Trading"  (<id>.md + <id>.transcript.md)
-data/TherapyBooks/   notes filed under "Therapy book"
-data/General/        everything else
-data/pending/        transient: live transcript while a session is recording
-data/chroma/         semantic search index (notes, knowledge, conversations,
-                     plus per-persona private collections)
-data/index.json      ordered record of every note (title, date, category)
-data/working_state.db  each persona's working record (Tom's journal, Linda's notebook, Alice's list)
+data/notes/Trading/       notes filed under "Trading"  (<id>.md + <id>.transcript.md)
+data/notes/TherapyBooks/  notes filed under "Therapy book"
+data/notes/General/       everything else
+data/notes/_pending/      transient: live transcript while a session is recording
+data/notes/index.json     ordered record of every note (title, date, category)
+data/conversation_history/<name>.json  each persona's conversation
+data/memory/chroma/       semantic search index (notes, knowledge, conversations,
+                          plus per-persona private collections)
+data/memory/working_state.db  each persona's working record (Tom's journal, Linda's notebook, Alice's list)
+data/settings/            dashboard edits: personas, tunables, the active persona
+data/gmail/               Gmail OAuth client and token
+data/trading/             trade log, statements, per-broker tickets and tokens
 knowledge/           reference PDFs/text/video you ingest + manifest.json (see below)
 logs/                dated session logs of everything that happened
 ```
@@ -360,7 +364,7 @@ manage folders **by voice** in conversation mode:
 - **Move a note** — "move my last note to Ideas", "put the grocery note in
   Recipes". The agent looks the note up, then moves its files.
 
-Voice-created and renamed folders are persisted to `data/categories.json` and
+Voice-created and renamed folders are persisted to `data/notes/categories.json` and
 overlaid on the defaults at startup.
 
 ## Trading knowledge base (PDFs and course videos)
@@ -398,7 +402,7 @@ skipped whenever you pass arguments, so `run.bat --selftest` and friends start
 immediately.
 
 Each file is chunked and embedded **once** into a persistent `knowledge` collection
-in `data/chroma`. Ingestion is idempotent: files are identified by content hash and
+in `data/memory/chroma`. Ingestion is idempotent: files are identified by content hash and
 recorded in `knowledge/manifest.json`, so re-scanning an unchanged folder is
 near-instant and never re-embeds.
 
@@ -450,10 +454,10 @@ send. Setup is one-time, per Google account:
 
 1. In the Google Cloud console (Google Auth Platform → Clients), create a
    Desktop OAuth client with the `gmail.readonly` and `gmail.compose` scopes,
-   download its JSON, and save it as `data/gmail_client_secret.json`.
+   download its JSON, and save it as `data/gmail/client_secret.json`.
 2. Start the agent: with no token it opens the browser consent flow before
    the voice loop (or run it standalone: `python -m lib.gmail_auth`). It
-   writes `data/gmail_token.json`, which then refreshes itself silently
+   writes `data/gmail/token.json`, which then refreshes itself silently
    forever (and syncs to your other machines with the rest of `data/`).
 
 The agent never waits for this. It starts straight away and does the sign-in

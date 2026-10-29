@@ -97,7 +97,7 @@ class TestNoteTo(unittest.TestCase):
     def test_an_inactive_persona_gets_it_in_its_saved_thread(self):
         c = make_claude(active="alice", history=[{"role": "user", "content": "hi"}])
         with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch.object(cfg, "DATA_DIR", Path(tmp)):
+                mock.patch.object(cfg, "HISTORY_DIR", Path(tmp)):
             hist.save(cfg.history_path("tom"), [
                 {"role": "user", "content": "any fills?"},
                 {"role": "assistant", "content": "None today."}])

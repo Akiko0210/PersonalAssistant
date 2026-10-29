@@ -10,9 +10,17 @@ from pathlib import Path
 # --- Paths -------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
-CHROMA_DIR = DATA_DIR / "chroma"
+# data/ is grouped by topic (#49) so a person browsing it finds notes, chats
+# and settings without scanning one long mixed list. migrate_layout() below
+# moves an install from the old flat layout once.
+NOTES_DIR = DATA_DIR / "notes"
+HISTORY_DIR = DATA_DIR / "conversation_history"
+MEMORY_DIR = DATA_DIR / "memory"
+SETTINGS_DIR = DATA_DIR / "settings"
+GMAIL_DIR = DATA_DIR / "gmail"
+CHROMA_DIR = MEMORY_DIR / "chroma"
 LOG_DIR = BASE_DIR / "logs"
-INDEX_PATH = DATA_DIR / "index.json"
+INDEX_PATH = NOTES_DIR / "index.json"
 # Single-instance lock: a second launch takes a lock on this file (see
 # lib/single_instance/) and exits if it's already held, so two agents
 # can't talk over each other or race on history.json and the Chroma index
@@ -23,15 +31,15 @@ LOCK_PATH = DATA_DIR / "agent.lock"
 PROJECT_DOC_PATH = BASE_DIR / "docs" / "PROJECT.md"
 # User-created / renamed folders are persisted here and overlaid on the built-in
 # NOTE_CATEGORIES defaults below at startup (see load_categories).
-CATEGORIES_PATH = DATA_DIR / "categories.json"
+CATEGORIES_PATH = NOTES_DIR / "categories.json"
 # Dashboard edits to the agent personas (agents.py registry) are persisted here
 # and overlaid on the built-in defaults at startup (see agents.load_agents) —
 # the same pattern as categories.json above.
-AGENTS_PATH = DATA_DIR / "agents.json"
+AGENTS_PATH = SETTINGS_DIR / "agents.json"
 # Which persona is currently active, written by llm.Claude.switch_to on every
 # switch so the dashboard can show who the user is talking to. Read-only
 # telemetry — nothing in the agent reads it back.
-AGENT_STATE_PATH = DATA_DIR / "agent_state.json"
+AGENT_STATE_PATH = SETTINGS_DIR / "agent_state.json"
 # The dashboard's port. The agent serves the dashboard from inside its own
 # process (dashboard.serve_embedded), live controls included; `python
 # -m web.server` standalone serves the same UI for browsing/config/ingest while
@@ -41,11 +49,13 @@ AGENT_STATE_PATH = DATA_DIR / "agent_state.json"
 DASHBOARD_PORT = 8765
 # Live transcripts are appended here while recording, then moved into the chosen
 # category folder when the note is saved (the category isn't known until the end).
-PENDING_DIR = DATA_DIR / "pending"
+# The underscore keeps it clear of every category folder: those are built from
+# letters and digits only (categories._folder_name).
+PENDING_DIR = NOTES_DIR / "_pending"
 # Reference material (trading books/PDFs/text) the user drops in to build a
 # searchable knowledge base. Kept at the project root (not under data/) so it's
 # easy to find and manage. Ingested once into a persistent Chroma collection —
-# which lives in data/chroma — and queried by retrieval each turn and by the
+# which lives in data/memory/chroma — and queried by retrieval each turn and by the
 # recall tool on demand, never pasted into the conversation.
 KNOWLEDGE_DIR = BASE_DIR / "knowledge"
 KNOWLEDGE_MANIFEST = KNOWLEDGE_DIR / "manifest.json"  # {sha256: {source,title,...}}
@@ -61,7 +71,7 @@ HISTORY_MAX_MESSAGES = 40   # messages kept when persisting/restoring a thread
 
 
 def history_path(key):
-    return DATA_DIR / f"history_{key}.json"
+    return HISTORY_DIR / f"{key}.json"
 
 
 # Legacy flat locations — only referenced by the one-time migration in notes.py.
@@ -98,7 +108,7 @@ DISPLAY_LOCK_PATH = DATA_DIR / "display.lock"
 # The category registry (seed folders, voice-created overlays, category_dir and
 # the add/rename/delete API) lives in categories.py — it is runtime-mutable
 # state, not configuration. Only its persistence path stays here (defined above
-# as CATEGORIES_PATH); the data/categories.json format is unchanged.
+# as CATEGORIES_PATH); the data/notes/categories.json format is unchanged.
 
 # Discord Notifier (sibling project) — read-only access to its captured data.
 DISCORD_DIR = BASE_DIR.parent / "Discord Notifier"
@@ -108,11 +118,11 @@ DISCORD_TRADES_PATH = DISCORD_DIR / "trades.txt"
 # --- Gmail (email tools) ------------------------------------------------------
 # OAuth artifacts live in data/ with the rest of the user's own state, so they
 # are gitignored and a credential can never enter version control. The consent
-# (python -m lib.gmail_auth) is per machine; copy gmail_token.json across by
+# (python -m lib.gmail_auth) is per machine; copy data/gmail/token.json across by
 # hand to skip repeating it. The client secret comes from the Google Cloud
 # console (Auth Platform -> Clients -> Download JSON).
-GMAIL_CLIENT_SECRET_PATH = DATA_DIR / "gmail_client_secret.json"
-GMAIL_TOKEN_PATH = DATA_DIR / "gmail_token.json"
+GMAIL_CLIENT_SECRET_PATH = GMAIL_DIR / "client_secret.json"
+GMAIL_TOKEN_PATH = GMAIL_DIR / "token.json"
 # The consent flow's loopback port. Deliberately NOT DASHBOARD_PORT: both
 # used to be 8765, so the OAuth listener and the dashboard fought over one
 # socket -- `python -m lib.gmail_auth` beside a running agent failed to bind,
@@ -252,7 +262,7 @@ FACTS_KNOWN_ENTITIES = 80            # entity keys shown so the rewrite can name
 # outside the retrieval ranking (stores/working_state.py). Anything that has to
 # win the ranking can lose it: the 9/30 campaign plan did, and so did the "red"
 # account nickname in 16 of 24 turns (docs/analysis/2026-10-01-tracking-failures.md).
-WORKING_STATE_PATH = DATA_DIR / "working_state.db"
+WORKING_STATE_PATH = MEMORY_DIR / "working_state.db"
 WORKING_RECORD_CHARS = 8000   # ~2k tokens shown per turn, prompt-cached between writes; a campaign's rules plus ~10 journal entries fit (the plan note itself is 4,300)
 WORKING_BODY_CHARS = 2000     # a record's current state; refused above, so two campaigns' rules can never fill the block on their own — the full plan stays a note
 WORKING_ENTRY_CHARS = 500     # one dated happening; stops a single entry from eating the block
@@ -579,7 +589,7 @@ def model_identity_block(label: str) -> str:
 # can be overridden; anything else in the file is ignored. A missing, corrupt,
 # or partially-invalid file must never break startup: every failure falls back
 # to the coded default.
-OVERRIDES_PATH = DATA_DIR / "config_overrides.json"
+OVERRIDES_PATH = SETTINGS_DIR / "config_overrides.json"
 
 
 def _cast_words(value):
@@ -659,7 +669,11 @@ def _load_overrides():
     for name in OVERRIDABLE:
         CONFIG_DEFAULTS[name] = globals()[name]
     from lib.atomic_io import read_json  # here, not at top: atomic_io is leaf-only
-    apply_overrides(read_json(OVERRIDES_PATH, {}))
+    # Read before migrate_layout() can run (this is import time), so the first
+    # start after #49 must still find the file where it used to be, or every
+    # dashboard tunable silently reverts for that run.
+    path = OVERRIDES_PATH if OVERRIDES_PATH.exists() else DATA_DIR / OVERRIDES_PATH.name
+    apply_overrides(read_json(path, {}))
 
 
 _load_overrides()
@@ -673,7 +687,64 @@ def ensure_dirs():
     DATA_DIR.mkdir(parents=True, exist_ok=True)  # needed before reading categories.json
     categories.load_categories()  # bring in any voice-created / renamed folders
     dirs = [DATA_DIR, CHROMA_DIR, LOG_DIR, PENDING_DIR, KNOWLEDGE_DIR,
-            BASE_DIR / "assets"]
+            HISTORY_DIR, SETTINGS_DIR, GMAIL_DIR, BASE_DIR / "assets"]
     dirs += [categories.category_dir(slug) for slug in categories.NOTE_CATEGORIES]
     for d in dirs:
         d.mkdir(parents=True, exist_ok=True)
+
+
+# --- Data layout migration (#49) ----------------------------------------------
+
+def _move(old, new, log):
+    """Move one file or directory; 1 if moved. Never overwrites: a destination
+    with content wins and the old copy stays, logged, for a person to settle."""
+    if not old.exists():
+        return 0
+    if new.is_dir() and not any(new.iterdir()):
+        new.rmdir()  # made empty by an ensure_dirs() that ran before the move
+    if new.exists():
+        log.warning("data layout: kept %s, %s already exists", old, new)
+        return 0
+    try:
+        new.parent.mkdir(parents=True, exist_ok=True)
+        old.replace(new)
+        return 1
+    except OSError as e:
+        log.error("data layout: could not move %s to %s: %s", old, new, e)
+        return 0
+
+
+def migrate_layout():
+    """Move an install's flat data/ into the topic folders; a no-op once done.
+    Callers hold the single-instance lock: moving files another agent has
+    open would split its state in two. Returns how many items moved."""
+    import logging
+    from stores import categories
+    log = logging.getLogger("agent")
+    # Where each file lived before data/ was grouped by topic. Note folders and
+    # history_<key>.json are found by name below. Built per call, not at
+    # import, so tests can repoint the paths.
+    flat = {"index.json": INDEX_PATH, "categories.json": CATEGORIES_PATH,
+            "pending": PENDING_DIR, "chroma": CHROMA_DIR,
+            "working_state.db": WORKING_STATE_PATH, "agents.json": AGENTS_PATH,
+            "agent_state.json": AGENT_STATE_PATH,
+            "config_overrides.json": OVERRIDES_PATH,
+            "gmail_client_secret.json": GMAIL_CLIENT_SECRET_PATH,
+            "gmail_token.json": GMAIL_TOKEN_PATH}
+    moved = sum(_move(DATA_DIR / old, new, log) for old, new in flat.items())
+    moved += sum(_move(p, history_path(p.stem.removeprefix("history_")), log)
+                 for p in DATA_DIR.glob("history_*.json"))
+    categories.load_categories()  # from its new home, before folders resolve
+    for meta in categories.NOTE_CATEGORIES.values():
+        # Note by note, not the folder: on a case-insensitive disk the seed
+        # "Trading" folder IS data/trading, the brokers' folder.
+        old_dir = DATA_DIR / meta["folder"]
+        for f in list(old_dir.glob("note_*")) if old_dir.is_dir() else ():
+            moved += _move(f, NOTES_DIR / meta["folder"] / f.name, log)
+        try:
+            old_dir.rmdir()  # only once emptied; anything else keeps it
+        except OSError:
+            pass
+    if moved:
+        log.info("data layout: moved %d item(s) into data/'s topic folders", moved)
+    return moved

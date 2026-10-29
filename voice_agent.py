@@ -1344,6 +1344,7 @@ def main():
             except Exception:  # noqa: BLE001 - never let the notice mask the exit
                 pass
         sys.exit(1)
+    cfg.migrate_layout()  # under the lock: no other agent has data/ open
     try:
         if args.selftest:
             selftest()
