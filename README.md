@@ -585,6 +585,11 @@ Tom keeps a log of your thinkorswim/Schwab fills in
   positions on the IRA."* Every figure is summed from the log. If you have
   several accounts and don't name one, Tom asks which. Linda can read the log
   too, for post-trade reviews.
+- **Export.** *"Tom, export my IRA trades from October"* saves the trades
+  the same question would read out, every one of them, as a spreadsheet
+  (`.csv`) in `data/exports/`, named `trades_<account>_<date>_<time>.csv`. Tom
+  says how many trades went in and the file name. Exports have their own
+  folder so one can never be taken for "my latest statement".
 - **Campaigns.** When Tom logs a fill that looks like part of a campaign in
   his journal, he says so and asks; say yes and the fill is linked, rolls
   included. *"How is the diagonal campaign doing?"* then sums exactly that

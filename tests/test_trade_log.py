@@ -2,6 +2,7 @@
 tie-out, alert/statement reconciliation, minimal zero-net position grouping,
 and the tools' honest-failure paths (unparseable lines, which account?)."""
 
+import csv
 import io
 import os
 import tempfile
@@ -133,8 +134,9 @@ class TestStatement(unittest.TestCase):
 class LogBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR
+        self._saved = tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR, tcfg.EXPORTS_DIR
         tcfg.TRADE_LOG_PATH = Path(self.tmp.name) / "trade_log.db"
+        tcfg.EXPORTS_DIR = Path(self.tmp.name) / "exports"
         # The readers fall back to the persona's saved account focus
         # (data/trading/<broker>/accounts.json); the user's real one made
         # "which account?" answer from one account instead of asking (#44).
@@ -144,7 +146,7 @@ class LogBase(unittest.TestCase):
         self.ctx = ToolContext(active_agent="tom")
 
     def tearDown(self):
-        tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR = self._saved
+        tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR, tcfg.EXPORTS_DIR = self._saved
         self.tmp.cleanup()
 
     def call(self, name, **args):
@@ -217,6 +219,58 @@ class TestTools(LogBase):
         self.assertFalse(writers & agents.AGENTS["linda"]["tools"])
         self.assertIn("assign_trades", agents.AGENTS["tom"]["tools"])
         self.assertNotIn("assign_trades", agents.AGENTS["linda"]["tools"])
+
+
+class TestExport(LogBase):
+    """query_trade_log export=true (#50): the same selection, every row of
+    it, as a CSV in its own folder."""
+
+    def setUp(self):
+        super().setUp()
+        self.call("import_statement", path=str(self.csv))
+
+    def rows(self):
+        [path] = tcfg.EXPORTS_DIR.glob("trades_*.csv")
+        with path.open(encoding="utf-8-sig", newline="") as f:
+            return list(csv.DictReader(f))
+
+    def test_every_selected_trade_is_saved_and_the_reply_says_so(self):
+        # The cap trims what the model reads, never the file.
+        with mock.patch.object(tcfg, "TRADE_QUERY_MAX_ROWS", 2):
+            reply = self.call("query_trade_log", account="699", export=True)
+        trades = trade_log.query(account="*****699SCHW")
+        self.assertTrue(reply.startswith(f"Exported all {len(trades)} trades "
+                                         "to trades_699SCHW_"))
+        rows = self.rows()
+        self.assertEqual([r["ref"] for r in rows], [t["ref"] for t in trades])
+        fly = rows[0]
+        self.assertEqual((fly["strategy"], fly["quantity"], fly["price"]),
+                         ("butterfly", "1", "18.75"))
+        self.assertIn("to open", fly["legs"])
+        # Raw numbers: the cash column sums to the log's own total.
+        cash = sum(float(r["cash"]) for r in rows if r["cash"])
+        self.assertAlmostEqual(cash, sum(t["amount"] or 0 for t in trades))
+
+    def test_filters_pick_the_rows(self):
+        self.call("query_trade_log", account="699", strategy="single",
+                  export=True)
+        self.assertEqual({r["strategy"] for r in self.rows()}, {"single"})
+
+    def test_nothing_matching_writes_nothing_and_says_so(self):
+        reply = self.call("query_trade_log", account="699", symbol="NDX",
+                          export=True)
+        self.assertIn("Nothing was exported", reply)
+        self.assertFalse(tcfg.EXPORTS_DIR.exists())
+
+    def test_no_file_unless_asked(self):
+        self.call("query_trade_log", account="699")
+        self.assertFalse(tcfg.EXPORTS_DIR.exists())
+
+    def test_exports_never_land_among_the_statements(self):
+        # import_statement takes the newest .csv in STATEMENTS_DIR.
+        real = self._saved[2]
+        self.assertNotIn(tcfg.STATEMENTS_DIR, (real, *real.parents))
+        self.assertNotIn(real, (tcfg.STATEMENTS_DIR, *tcfg.STATEMENTS_DIR.parents))
 
 
 class TestPositions(LogBase):

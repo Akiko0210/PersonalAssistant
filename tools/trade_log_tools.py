@@ -15,6 +15,7 @@ question gets the same answer however it is asked (2026-10-15: three
 queries over one day's data gave three different short legs).
 """
 
+import csv
 import logging
 import re
 from datetime import date, datetime, timedelta
@@ -162,6 +163,32 @@ def _totals_line(what, t):
         line += (f" (fees still pending on {t['pending']} alert-logged fills "
                  "until the next statement import)")
     return line
+
+
+# The export's columns: raw numbers, so a spreadsheet can sum them.
+_CSV_HEADER = ("account", "ref", "time", "symbol", "strategy", "quantity",
+               "price", "cash", "fees", "fills", "legs", "source", "position")
+
+
+def _export(trades, account, fx):
+    """Every selected trade, one row each, to a new file in EXPORTS_DIR.
+    Mode "x": a name already taken fails loudly rather than overwrite."""
+    tcfg.EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    who = re.sub(r"\W+", "", account or "all")     # "*****699SCHW" -> "699SCHW"
+    path = tcfg.EXPORTS_DIR / f"trades_{who}_{datetime.now():%Y-%m-%d_%H%M%S}.csv"
+    # utf-8-sig so Excel opens it as UTF-8 rather than guessing a code page.
+    with path.open("x", newline="", encoding="utf-8-sig") as f:
+        out = csv.writer(f)
+        out.writerow(_CSV_HEADER)
+        for t in trades:
+            legs = _trade_bits(t, fx[(t["account"], t["ref"])])["legs"]
+            out.writerow([
+                t["account"], t["ref"], t["executed_at"], t["symbol"],
+                t["strategy"], t["quantity"], t["price"], t["amount"],
+                t["fees"], t["fills"],
+                "; ".join(f"{q} {e} {k:g}{cp}{label}" for q, e, k, cp, label in legs),
+                t["source"], t["position_id"]])
+    return path
 
 
 # --- Filters -------------------------------------------------------------------
@@ -577,7 +604,8 @@ def _sync_account(eng, number, start=None):
         "one position's trades — the way to answer 'what's open in X' — or "
         "record=<campaign id> for the positions serving that campaign. "
         "Quote these totals rather than adding numbers yourself. tastytrade "
-        "trades aren't here (get_pnl)."
+        "trades aren't here (get_pnl). export=true also saves every selected "
+        "trade to a CSV file when the user asks to export or save them."
     ),
     "input_schema": {
         "type": "object",
@@ -587,7 +615,10 @@ def _sync_account(eng, number, start=None):
                        "position": {"type": "integer",
                                     "description": "A position's id."},
                        "record": {"type": "integer",
-                                  "description": "A campaign record's id."}},
+                                  "description": "A campaign record's id."},
+                       "export": {"type": "boolean",
+                                  "description": "Save the selection as a CSV "
+                                                 "in data/exports/."}},
     },
 }, display=display_heading("Trades from the trade log", broker="schwab"))
 def query_trade_log(ctx, args):
@@ -617,7 +648,8 @@ def query_trade_log(ctx, args):
                              refs=args.get("refs"),
                              positions=chosen and [p["id"] for p in chosen])
     if not trades:
-        return "No trades in the log match that."
+        return "No trades in the log match that." + (
+            " Nothing was exported." if args.get("export") else "")
     history = _history(t["account"] for t in trades)
     fx = _effects(history)
     shown = trades[-tcfg.TRADE_QUERY_MAX_ROWS:]
@@ -631,6 +663,10 @@ def query_trade_log(ctx, args):
            else "")
     if cut:
         lines.insert(0, f"({cut})")
+    if args.get("export"):  # first, so the reply leads with it
+        path = _export(trades, account, fx)
+        lines.insert(0, f"Exported all {len(trades)} trades to {path.name} in "
+                        "the data/exports folder.")
     totals = tpos.totals(trades)
     legs = tpos.net_legs(trades)
     line = _totals_line(f"{len(trades)} trades", totals)
