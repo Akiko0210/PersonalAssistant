@@ -104,6 +104,10 @@ TRADE_LOG_PATH = TRADING_DIR / "trade_log.db"
 # repo; point TRADE_STATEMENTS_DIR at one in .env instead.
 STATEMENTS_DIR = Path(os.getenv("TRADE_STATEMENTS_DIR")
                       or TRADING_DIR / "statements")
+# Trade-log exports (query_trade_log export=true) for the user's own
+# spreadsheets (#50). Its own folder, outside trading/: an export dropped
+# among the statements would be "the latest statement" and get imported.
+EXPORTS_DIR = app_config.DATA_DIR / "exports"
 # An alert is stamped with its email's send time, seconds after the fill. A
 # statement whose last row is that fill must still supersede the alert's row,
 # or the fill counts twice (alert # and statement REF # are different series).
