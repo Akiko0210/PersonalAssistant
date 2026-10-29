@@ -18,6 +18,10 @@ HISTORY_DIR = DATA_DIR / "conversation_history"
 MEMORY_DIR = DATA_DIR / "memory"
 SETTINGS_DIR = DATA_DIR / "settings"
 GMAIL_DIR = DATA_DIR / "gmail"
+# CSV exports for the user's own spreadsheets (lib/csv_export.py). Its own
+# folder, outside trading/: an export dropped among the statements would be
+# "the latest statement" and get imported.
+EXPORTS_DIR = DATA_DIR / "exports"
 CHROMA_DIR = MEMORY_DIR / "chroma"
 LOG_DIR = BASE_DIR / "logs"
 INDEX_PATH = NOTES_DIR / "index.json"

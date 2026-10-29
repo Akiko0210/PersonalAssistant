@@ -592,7 +592,10 @@ Tom keeps a log of your thinkorswim/Schwab fills in
 - **Export.** *"Tom, export my IRA trades from October"* saves the trades
   the same question would read out, every one of them, as a spreadsheet
   (`.csv`) in `data/exports/`, named `trades_<account>_<date>_<time>.csv`. Tom
-  says how many trades went in and the file name. Exports have their own
+  says how many trades went in and the file name. Any other table Tom shows
+  exports the same way — *"export my position table"*, *"save my open
+  positions as a spreadsheet"*, orders, P&L: the file holds exactly what the
+  display window showed, totals and notes included. Exports have their own
   folder so one can never be taken for "my latest statement".
 - **Campaigns.** When Tom logs a fill that looks like part of a campaign in
   his journal, he says so and asks; say yes and the fill is linked, rolls

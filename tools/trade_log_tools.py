@@ -15,7 +15,6 @@ question gets the same answer however it is asked (2026-10-15: three
 queries over one day's data gave three different short legs).
 """
 
-import csv
 import logging
 import re
 from datetime import date, datetime, timedelta
@@ -23,6 +22,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from display import card as blocks
+from lib import csv_export
 from lib.dates import PERIODS, period_range, with_weekday
 from stores import working_state
 from tools import tool
@@ -171,24 +171,19 @@ _CSV_HEADER = ("account", "ref", "time", "symbol", "strategy", "quantity",
 
 
 def _export(trades, account, fx):
-    """Every selected trade, one row each, to a new file in EXPORTS_DIR.
-    Mode "x": a name already taken fails loudly rather than overwrite."""
-    tcfg.EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    """Every selected trade, one row each — not just the card's capped rows,
+    which every other display tool's export writes (tools.dispatch)."""
+    rows = []
+    for t in trades:
+        legs = _trade_bits(t, fx[(t["account"], t["ref"])])["legs"]
+        rows.append([
+            t["account"], t["ref"], t["executed_at"], t["symbol"],
+            t["strategy"], t["quantity"], t["price"], t["amount"],
+            t["fees"], t["fills"],
+            "; ".join(f"{q} {e} {k:g}{cp}{label}" for q, e, k, cp, label in legs),
+            t["source"], t["position_id"]])
     who = re.sub(r"\W+", "", account or "all")     # "*****699SCHW" -> "699SCHW"
-    path = tcfg.EXPORTS_DIR / f"trades_{who}_{datetime.now():%Y-%m-%d_%H%M%S}.csv"
-    # utf-8-sig so Excel opens it as UTF-8 rather than guessing a code page.
-    with path.open("x", newline="", encoding="utf-8-sig") as f:
-        out = csv.writer(f)
-        out.writerow(_CSV_HEADER)
-        for t in trades:
-            legs = _trade_bits(t, fx[(t["account"], t["ref"])])["legs"]
-            out.writerow([
-                t["account"], t["ref"], t["executed_at"], t["symbol"],
-                t["strategy"], t["quantity"], t["price"], t["amount"],
-                t["fees"], t["fills"],
-                "; ".join(f"{q} {e} {k:g}{cp}{label}" for q, e, k, cp, label in legs),
-                t["source"], t["position_id"]])
-    return path
+    return csv_export.write(f"trades_{who}", _CSV_HEADER, rows)
 
 
 # --- Filters -------------------------------------------------------------------

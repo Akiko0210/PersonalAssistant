@@ -96,6 +96,13 @@ class ToolContext:
 
 _REGISTRY = {}  # name -> (schema, handler); insertion-ordered
 _DISPLAY = {}   # name -> (ctx, args) -> heading, for tools shown on the display
+_CARD_EXPORT = set()  # display tools whose export= writes their card
+
+# Every display tool can save its table: asked for the position table as a
+# CSV, Tom had to refuse while export lived on the trade log alone (#53).
+_EXPORT_ARG = {"type": "boolean", "description": (
+    "Also save this answer's table, as shown on the display, to a CSV in "
+    "data/exports/. Only when the user asks to export or save it.")}
 
 
 def tool(schema, display=None):
@@ -104,11 +111,17 @@ def tool(schema, display=None):
     `display`, a (ctx, args) -> heading function, puts every answer the tool
     gives on the display window under that heading: the card it left in
     ctx.card, built from the same figures as its returned string, or that
-    string itself when it built none."""
+    string itself when it built none. A display tool also takes export=,
+    which saves that card as a CSV — unless its schema declares its own
+    export (query_trade_log writes every row, not just the shown ones)."""
     def deco(fn):
         _REGISTRY[schema["name"]] = (schema, fn)
         if display:
             _DISPLAY[schema["name"]] = display
+            props = schema["input_schema"].setdefault("properties", {})
+            if "export" not in props:
+                props["export"] = _EXPORT_ARG
+                _CARD_EXPORT.add(schema["name"])
         return fn
     return deco
 
@@ -135,6 +148,8 @@ def dispatch(ctx, name, args):
         out = handler(ctx, args)
     except Exception as e:  # surface tool errors back to the model
         return f"Tool error: {e}"
+    if args.get("export") and name in _CARD_EXPORT:
+        out = _export_card(name, ctx.card, out)
     heading = _DISPLAY.get(name)
     if heading and ctx.show:
         try:
@@ -142,6 +157,24 @@ def dispatch(ctx, name, args):
         except Exception:  # the window is an aid; it must never cost the answer
             log.exception("display card for %s failed", name)
     return out
+
+
+def _export_card(name, card, out):
+    """`out`, led by what the export did. A failed write is said, never
+    raised: the answer itself must still reach the user."""
+    if not card:
+        return out + "\n(Nothing was exported: this answer has no table.)"
+    from display import card as blocks   # here: display imports trading
+    from lib import csv_export
+    rows = blocks.table(card)
+    try:
+        path = csv_export.write(name.removeprefix("get_"), blocks.TABLE_HEADER,
+                                rows)
+    except OSError as e:
+        log.exception("export of %s failed", name)
+        return out + f"\n(The export failed: {e}. Nothing was saved.)"
+    return (f"Exported {len(rows)} rows to {path.name} in the data/exports "
+            "folder.\n" + out)
 
 
 # Importing the tool modules populates the registry. Order sets the order the

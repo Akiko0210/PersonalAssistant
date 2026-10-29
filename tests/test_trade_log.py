@@ -134,9 +134,9 @@ class TestStatement(unittest.TestCase):
 class LogBase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR, tcfg.EXPORTS_DIR
+        self._saved = tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR, cfg.EXPORTS_DIR
         tcfg.TRADE_LOG_PATH = Path(self.tmp.name) / "trade_log.db"
-        tcfg.EXPORTS_DIR = Path(self.tmp.name) / "exports"
+        cfg.EXPORTS_DIR = Path(self.tmp.name) / "exports"
         # The readers fall back to the persona's saved account focus
         # (data/trading/<broker>/accounts.json); the user's real one made
         # "which account?" answer from one account instead of asking (#44).
@@ -146,7 +146,7 @@ class LogBase(unittest.TestCase):
         self.ctx = ToolContext(active_agent="tom")
 
     def tearDown(self):
-        tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR, tcfg.EXPORTS_DIR = self._saved
+        tcfg.TRADE_LOG_PATH, tcfg.TRADING_DIR, cfg.EXPORTS_DIR = self._saved
         self.tmp.cleanup()
 
     def call(self, name, **args):
@@ -230,7 +230,7 @@ class TestExport(LogBase):
         self.call("import_statement", path=str(self.csv))
 
     def rows(self):
-        [path] = tcfg.EXPORTS_DIR.glob("trades_*.csv")
+        [path] = cfg.EXPORTS_DIR.glob("trades_*.csv")
         with path.open(encoding="utf-8-sig", newline="") as f:
             return list(csv.DictReader(f))
 
@@ -260,11 +260,11 @@ class TestExport(LogBase):
         reply = self.call("query_trade_log", account="699", symbol="NDX",
                           export=True)
         self.assertIn("Nothing was exported", reply)
-        self.assertFalse(tcfg.EXPORTS_DIR.exists())
+        self.assertFalse(cfg.EXPORTS_DIR.exists())
 
     def test_no_file_unless_asked(self):
         self.call("query_trade_log", account="699")
-        self.assertFalse(tcfg.EXPORTS_DIR.exists())
+        self.assertFalse(cfg.EXPORTS_DIR.exists())
 
     def test_exports_never_land_among_the_statements(self):
         # import_statement takes the newest .csv in STATEMENTS_DIR.
