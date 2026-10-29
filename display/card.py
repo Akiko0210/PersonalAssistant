@@ -44,6 +44,26 @@ def total(label, value, kind=PNL):
     return {"label": label, "value": value, "kind": kind}
 
 
+TABLE_HEADER = ("section", "item", "status", "value", "details")
+
+
+def table(card):
+    """The card as flat spreadsheet rows, totals and notes included, every
+    value as the screen shows it — an export can't disagree with the voice
+    any more than the card can."""
+    def tot(heading, t):
+        return [(heading, t["label"], "TOTAL", t["value"], "")] if t else []
+
+    rows = tot("", card.get("total"))
+    for s in card["sections"]:
+        h = s.get("heading") or ""
+        rows += tot(h, s.get("total"))
+        rows += [(h, r["label"], r.get("badge") or "", r.get("value") or "",
+                  " · ".join(r["lines"])) for r in s["rows"]]
+        rows += [(h, n, "NOTE", "", "") for n in s["notes"]]
+    return rows + [("", n, "NOTE", "", "") for n in card["notes"]]
+
+
 def contract(root, expiration, strike, cp):
     """'SPX 7750 Put · Fri Nov 6' — the order the eye wants: what, then when.
     The weekday is written out (the model got it wrong when left to work it
