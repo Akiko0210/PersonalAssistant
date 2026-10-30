@@ -65,8 +65,8 @@ class TestStreamTradeTime(unittest.TestCase):
         self.assertAlmostEqual(q.as_of, 1793319334.675)
 
 
-def say(quote, env="live"):
-    return run("tom", "get_quote", {"symbol": "SPX"},
+def say(quote, env="live", symbol="SPX"):
+    return run("tom", "get_quote", {"symbol": symbol},
                engines={"schwab": FakeEngine("schwab", quote=quote, env=env)})
 
 
@@ -88,6 +88,19 @@ class TestGetQuoteWords(unittest.TestCase):
         out = say(Quote("$SPX", bid=7703.75, ask=7704.25, as_of=time.time()))
         self.assertIn("As of", out)
         self.assertNotIn("not live", out)
+
+    def test_futures_quote_names_its_contract(self):
+        out = say(Quote("/ESZ26", bid=7703.75, ask=7704.25, as_of=time.time()),
+                  symbol="/ES")
+        self.assertTrue(out.startswith("/ES (/ESZ26): bid 7,703.75"), out)
+        self.assertTrue(say(Quote("$SPX", last=1.0, as_of=time.time())
+                            ).startswith("SPX: "))   # an index keeps its name
+
+    def test_small_prices_keep_their_decimals(self):
+        out = say(Quote("/6EZ26", bid=1.12345, ask=1.1235, last=1.12, as_of=time.time()),
+                  symbol="/6E")
+        self.assertIn("bid 1.12345, ask 1.1235", out)
+        self.assertIn("last 1.12. ", out)                 # not 1.12000
 
     def test_no_time_from_the_broker_is_said(self):
         self.assertIn("no time", say(Quote("$SPX", last=7720.39)))

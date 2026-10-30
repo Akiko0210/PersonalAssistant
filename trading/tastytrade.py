@@ -10,7 +10,7 @@ broker-neutral dataclasses in models.py and this module's uniform surface:
     fetch_chain(client, underlying, ...), order_payload(ticket, chain),
     parse_dry_run(data), parse_order(data), parse_positions(items),
     parse_balance(raw), transactions(client, account, start, end, underlying),
-    env_label(), status(client)
+    env_label(), status(client), chainless_quote_symbol(underlying)
 
 and a Client whose account calls take the account number first
 (positions(account), balances(account), dry_run_order(account, payload), ...),
@@ -385,6 +385,11 @@ def underlying_api_symbol(chain):
     if chain.is_futures:
         return chain.expiration_contract.get(chain.expirations[0]) or chain.underlying
     return chain.underlying
+
+
+def chainless_quote_symbol(underlying):
+    """None: every underlying here, futures included, quotes via its chain."""
+    return None
 
 
 # --- orders ----------------------------------------------------------------

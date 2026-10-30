@@ -17,7 +17,8 @@ Same module surface as tastytrade.py, built on the Schwab Trader API
   fight over, and /quotes already carries bid/ask/mark, IV and the greeks
   for options. _Quotes caches them for SCHWAB_QUOTE_TTL_S.
 - Order entry covers EQUITY and OPTION only — no futures here, by Schwab's
-  design; fetch_chain says so for "/ES".
+  design; fetch_chain says so for "/ES". /quotes does serve futures, so an
+  /ES quote skips the chain (chainless_quote_symbol).
 - /previewOrder is a real dry run, so review_order keeps its meaning.
 
 Field names on the Schwab side were taken from the portal's OpenAPI specs
@@ -27,6 +28,7 @@ can correct them in one place.
 
 import base64
 import logging
+import re
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -374,6 +376,17 @@ def _quote_from(symbol, q):
                  theta=_f(q.get("theta")), vega=_f(q.get("vega")))
 
 
+def _asked_as(answered, asked):
+    """The symbol a /quotes entry was asked for. Asked for a futures root,
+    Schwab keys the answer by its contract ('/ES' -> '/ESZ26'), which would
+    leave '/ES' unanswered; the Quote keeps the contract as its symbol."""
+    if answered in asked:
+        return answered
+    return next((s for s in asked if tsym.is_futures(s) and
+                 re.fullmatch(re.escape(s) + r"[FGHJKMNQUVXZ]\d{1,2}", answered)),
+                answered)
+
+
 class _Quotes:
     """REST snapshots behind the QuoteService surface the engine uses.
     start() is always true (nothing to connect), subscribe() only notes the
@@ -419,7 +432,7 @@ class _Quotes:
             for sym, entry in (data or {}).items():
                 q = entry.get("quote") if isinstance(entry, dict) else None
                 if q:
-                    self._quotes[sym] = _quote_from(sym, q)
+                    self._quotes[_asked_as(sym, stale)] = _quote_from(sym, q)
 
     def refresh(self, pairs):
         self.prefetch([key for _, key in pairs])
@@ -495,6 +508,13 @@ def fetch_chain(client, underlying, start=None, end=None, every_strike=False):
 
 def underlying_api_symbol(chain):
     return chain.underlying_streamer
+
+
+def chainless_quote_symbol(underlying):
+    """Futures are quotable here though not tradable: fetch_chain refuses
+    them, so their quote skips the chain (#56). /quotes takes the root and
+    answers for the front contract — '/ES' comes back as '/ESZ26'."""
+    return underlying if tsym.is_futures(underlying) else None
 
 
 # --- orders -----------------------------------------------------------------

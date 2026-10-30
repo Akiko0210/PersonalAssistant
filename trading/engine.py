@@ -47,6 +47,9 @@ class TradingEngine:
     def underlying_quote(self, underlying, wait_s=2.5):
         """Live Quote for an underlying ('SPX', '/ES', 'AAPL')."""
         underlying = tsym.normalize_underlying(underlying)
+        direct = self.broker.chainless_quote_symbol(underlying)
+        if direct:   # quotable but not tradable here: no chain to load (#56)
+            return self.quotes.get(direct)
         chain = self.chain(underlying)
         streamer = chain.underlying_streamer
         if self.quotes.start():
