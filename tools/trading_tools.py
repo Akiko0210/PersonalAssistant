@@ -438,7 +438,8 @@ def get_balance(ctx, args):
     "name": "get_quote",
     "description": (
         "Real-time market quote (bid, ask, last) for an underlying symbol — "
-        "SPX, /ES or 'the e-mini', /MES, or any stock ticker like AAPL. Use "
+        "SPX, any stock ticker like AAPL, or any futures root like /ES ('the "
+        "e-mini'), /MES, /NQ, /CL (crude), /GC (gold), /ZB, /6E. Use "
         "whenever the user asks where an underlying is trading. Options are "
         "priced another way: build them as a ticket and call price_order."
     ),
@@ -469,12 +470,24 @@ def get_quote(ctx, args):
                 (f" ({why})" if why else "") + "." +
                 (" In sandbox mode real-time data is unavailable."
                  if eng.broker.env_label() == "sandbox" else ""))
+    def px(x):
+        # Under 10, two decimals erase the price: /6E 1.12345 read as 1.12,
+        # /NG 2.903 as 2.90 (#56). Up to five there, trailing zeros dropped.
+        if abs(x) >= 10:
+            return _fmt(x)
+        s = f"{x:.5f}".rstrip("0")
+        return s + "0" * max(0, 2 - len(s.split(".")[1]))
     bits = []
     if q.bid is not None and q.ask is not None:
-        bits.append(f"bid {_fmt(q.bid)}, ask {_fmt(q.ask)}, mid {_fmt(q.mid)}")
+        bits.append(f"bid {px(q.bid)}, ask {px(q.ask)}, mid {px(q.mid)}")
     if q.last is not None:
-        bits.append(f"last {_fmt(q.last)}")
-    return f"{symbol}: " + "; ".join(bits) + "." + _as_of(q)
+        bits.append(f"last {px(q.last)}")
+    # A futures quote names its contract ('/ES (/ESZ26)'): the root alone
+    # doesn't say which month was priced.
+    contract = (q.symbol or "").split(":")[0]
+    name = (f"{symbol} ({contract})" if tsym.is_futures(symbol) and contract
+            and contract != symbol else symbol)
+    return f"{name}: " + "; ".join(bits) + "." + _as_of(q)
 
 
 def _as_of(q):

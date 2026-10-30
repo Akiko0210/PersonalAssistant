@@ -319,6 +319,38 @@ class TestRestQuotes(unittest.TestCase):
         self.assertEqual(len(c.calls), 1)               # fresh enough: no second call
 
 
+class TestFuturesQuotes(unittest.TestCase):
+    """Tom quotes /ES without trading it (#56): asked for the root, Schwab
+    answers keyed by the front contract (live call, 2026-10-29)."""
+
+    class C:
+        def quotes(self, symbols):
+            return {"/ESZ26": {"quote": {"bidPrice": 7703.75, "askPrice": 7704.25,
+                                         "lastPrice": 7704.0}}}
+
+    def test_a_root_request_is_answered_under_the_root(self):
+        q = schwab.make_quotes(self.C()).get("/ES")
+        self.assertEqual(q.symbol, "/ESZ26")
+        self.assertEqual(q.bid, 7703.75)
+
+    def test_an_unrelated_contract_is_not_taken_for_the_root(self):
+        q = schwab.make_quotes(self.C()).get("/E")
+        self.assertIsNone(q)
+
+    def test_engine_quotes_futures_without_loading_a_chain(self):
+        from trading.engine import TradingEngine
+        eng = TradingEngine.__new__(TradingEngine)   # no Client, no sign-in
+        eng.broker, eng.quotes = schwab, schwab.make_quotes(self.C())
+        eng.chain = lambda *a, **k: self.fail("futures quote loaded a chain")
+        self.assertEqual(eng.underlying_quote("e-mini").symbol, "/ESZ26")
+
+    def test_only_futures_skip_the_chain(self):
+        from trading import tastytrade
+        self.assertEqual(schwab.chainless_quote_symbol("/MES"), "/MES")
+        self.assertIsNone(schwab.chainless_quote_symbol("SPX"))
+        self.assertIsNone(tastytrade.chainless_quote_symbol("/ES"))
+
+
 class TestLegacyFiles(unittest.TestCase):
     def test_tastytrades_old_ticket_and_log_move_under_its_folder(self):
         with tempfile.TemporaryDirectory() as tmp:
