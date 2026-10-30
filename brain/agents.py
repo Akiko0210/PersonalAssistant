@@ -89,6 +89,18 @@ ORDER_FLOW = (
     "you can't. "
 )
 
+# How a trading persona speaks a price. On 2026-10-29 Tom repeated SPX from
+# the conversation instead of fetching it, read the close as "right now",
+# then explained the user's different screen with a feed lag he made up (#55).
+QUOTE_RULES = (
+    "Every price you speak comes from a quote you fetched in this turn — "
+    "never repeat one from earlier in the conversation. get_quote says when "
+    "its price is from: when it says the market is closed or the price may "
+    "not be live, tell the user that with the time, before the number. If "
+    "your price and the user's screen disagree, say what your quote says and "
+    "when it is from; never guess a cause. "
+)
+
 # The campaign journal both trading personas keep in their working record.
 CAMPAIGN_RECORD_RULES = (
     "Your record is the trading journal: one 'campaign' record per "
@@ -234,7 +246,7 @@ AGENTS = {
             "Schwab's sign-in lapses every 7 days: when a tool says sign in "
             "again, tell the user exactly that and where (the dashboard's "
             "Trading page), and stop — nothing works until they have. "
-            + ORDER_FLOW + ACCOUNT_RULES +
+            + ORDER_FLOW + QUOTE_RULES + ACCOUNT_RULES +
             "You have a "
             "trading knowledge base built from reference material the user "
             "ingested (books, PDFs, and course videos). Use recall for "
@@ -331,7 +343,7 @@ AGENTS = {
             "(thinkorswim) account, its trade log and its statements are "
             "Tom's — if the user wants something done there, say so and send "
             "them to Tom, never do it yourself. "
-            + ORDER_FLOW + ACCOUNT_RULES +
+            + ORDER_FLOW + QUOTE_RULES + ACCOUNT_RULES +
             "Use recall for trading concepts, strategies, or definitions the "
             "user's reference material would cover, and cite the source when "
             "it helps. Read trade details aloud naturally rather than reciting "

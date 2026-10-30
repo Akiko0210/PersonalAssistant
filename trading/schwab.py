@@ -359,10 +359,16 @@ def _quote_from(symbol, q):
     """Quote from one /quotes entry's "quote" dict. Schwab's volatility is a
     percentage (14.2); Quote.iv is a fraction like dxFeed's (0.142)."""
     iv = _f(q.get("volatility"))
+    # Market time is the newer of the trade and the quote (epoch ms). After
+    # the bell $SPX still says tradeTime 4:32pm ET — only securityStatus
+    # says "Closed" (live call, 2026-10-29).
+    times = [t for t in (_f(q.get("tradeTime")), _f(q.get("quoteTime"))) if t]
     return Quote(symbol=symbol, bid=_f(q.get("bidPrice")), ask=_f(q.get("askPrice")),
                  last=_f(q.get("lastPrice")) if _f(q.get("lastPrice")) is not None
                  else _f(q.get("mark")),
                  updated_at=time.time(),
+                 as_of=max(times) / 1000 if times else None,
+                 closed=q.get("securityStatus") == "Closed",
                  iv=iv / 100 if iv is not None else None,
                  delta=_f(q.get("delta")), gamma=_f(q.get("gamma")),
                  theta=_f(q.get("theta")), vega=_f(q.get("vega")))
@@ -407,6 +413,7 @@ class _Quotes:
             data = self._client.quotes(stale)
         except Exception as e:
             self._last_error = str(e)
+            log.warning("Schwab quotes failed for %s: %s", ",".join(stale), e)
             return
         with self._lock:
             for sym, entry in (data or {}).items():
@@ -419,6 +426,10 @@ class _Quotes:
 
     def get(self, symbol, wait_s=0.0, greeks=False):
         self.prefetch([symbol])
+        if self._stale([symbol]):
+            # The refresh failed: the cached price is an old one dressed as
+            # new, so there is no quote — the caller says why (#55).
+            return None
         with self._lock:
             return self._quotes.get(symbol)
 

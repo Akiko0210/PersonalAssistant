@@ -58,6 +58,10 @@ SCHWAB_DEFAULT_CALLBACK = "https://127.0.0.1"
 # fresh is reused rather than re-fetched, so pricing a 4-leg ticket is one
 # /quotes call, not four, and two tools in one turn don't double it.
 SCHWAB_QUOTE_TTL_S = 5.0
+# A price whose market time is older than this, with no "closed" status from
+# the broker, is spoken as possibly not live. Two minutes: an active
+# underlying trades every second, and a thin one still prints well inside it.
+QUOTE_STALE_S = 120
 # /transactions takes at most one year per call; the P&L lookback (370 days
 # below) is clamped to it rather than paged.
 SCHWAB_TRANSACTIONS_MAX_DAYS = 365

@@ -33,6 +33,11 @@ class Quote:
     ask: float = None
     last: float = None
     updated_at: float = 0.0  # time.time() of the newest tick
+    # When the market priced it (epoch s, the broker's own clock), and
+    # whether the broker says that market is closed. updated_at is when *we*
+    # fetched — a 4pm close fetched at 4:42 is still the 4pm close (#55).
+    as_of: float = None
+    closed: bool = False
     # Options only, from dxFeed's Greeks event: per share, theta per day,
     # vega per vol point. None until one arrives.
     iv: float = None

@@ -26,7 +26,9 @@ KEEPALIVE_EVERY_S = 30
 FEED_CHANNEL = 1
 
 QUOTE_FIELDS = ["eventSymbol", "bidPrice", "askPrice"]
-TRADE_FIELDS = ["eventSymbol", "price"]
+# "time" is the trade's own time (epoch ms): on subscribe dxFeed replays the
+# last trade, so after hours the arrival time would call an old print live.
+TRADE_FIELDS = ["eventSymbol", "price", "time"]
 # dxFeed computes these per option contract; "volatility" is the implied vol.
 # GREEKS names the Quote attributes in the same order (Quote.iv = volatility).
 GREEKS_FIELDS = ["eventSymbol", "volatility", "delta", "gamma", "theta", "vega"]
@@ -263,6 +265,8 @@ class QuoteService:
                         q.ask = _f(values[j + 2])
                     elif etype == "Trade":
                         q.last = _f(values[j + 1])
+                        t = _f(values[j + 2])
+                        q.as_of = t / 1000 if t else q.as_of
                     else:
                         for k, name in enumerate(GREEKS, start=1):
                             setattr(q, name, _f(values[j + k]))
