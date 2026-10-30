@@ -138,6 +138,16 @@ FUTURES_MULTIPLIER = {"/ES": 50.0, "/MES": 5.0}
 # their ticker; instrument streamer symbols always come from the API).
 UNDERLYING_QUOTE_SYMBOL = {"/ES": "/ES:XCME", "/MES": "/MES:XCME"}
 
+# option_chain (#59): at most this many strikes are spoken back — past
+# twenty a listener loses the thread — and a delta search quotes at most
+# SCAN strikes on the side it searches, one /quotes call: on SPX at 5 wide
+# that is 300 points, past a 10-delta a month out.
+OPTION_CHAIN_MAX_STRIKES = 20
+OPTION_CHAIN_SCAN_STRIKES = 60
+# A delta search whose best strike misses the target by more than this says
+# so, rather than offering a 0.22 as "the 30-delta".
+OPTION_CHAIN_DELTA_MISS = 0.05
+
 # How long a normalized option chain stays cached (strikes/expirations do
 # not change intraday; new expirations appear overnight).
 CHAIN_CACHE_TTL_S = 15 * 60
