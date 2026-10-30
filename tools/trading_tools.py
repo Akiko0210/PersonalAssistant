@@ -544,6 +544,135 @@ def list_expirations(ctx, args):
 
 
 @tool({
+    "name": "option_chain",
+    "description": (
+        "Live quotes for a strip of option strikes on one expiration: each "
+        "strike's bid, ask, mid, delta and implied vol, in one fetch, with "
+        "no ticket built. Use it to find a strike by delta ('the 30-delta "
+        "put six days out'), to hear what strikes cost around the money, or "
+        "to scan a range of strikes. Quotes only. To price a spread or a "
+        "held position as a whole, build a ticket and price_order it."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "symbol": {"type": "string", "description": "Underlying, e.g. 'SPX'."},
+            "side": {"type": "string", "enum": ["put", "call"]},
+            "expiration": {"type": "string",
+                           "description": "ISO date; the nearest listed one is "
+                                          "used. Default: the nearest expiration."},
+            "delta": {"type": "number",
+                      "description": "Target delta, e.g. 0.30 or 30, sign not "
+                                     "needed: returns the strikes closest to it."},
+            "from_strike": {"type": "number"},
+            "to_strike": {"type": "number"},
+            "count": {"type": "integer",
+                      "description": "How many strikes (default 5 for a delta, "
+                                     "10 otherwise; at most 20)."},
+            "broker": BROKER_ARG,
+        },
+        "required": ["symbol", "side"],
+    },
+}, display=display_heading("Option chain"))
+def option_chain(ctx, args):
+    """A strip of strikes, quoted in one batch. Before it, finding "the
+    30-delta put" meant building a scratch ticket and re-pricing it strike
+    by strike — four tries, unasked, on 2026-10-29 (#59)."""
+    eng, err = _engine(ctx, args)
+    if err:
+        return err
+    symbol = tsym.normalize_underlying(args.get("symbol", ""))
+    cp = {"put": "P", "call": "C"}.get(str(args.get("side", "")).strip().lower().rstrip("s"))
+    if not symbol or not cp:
+        return "Which underlying, and puts or calls?"
+    kind = "put" if cp == "P" else "call"
+    try:
+        chain = eng.chain(symbol)
+    except Exception as e:
+        return f"Couldn't load the {symbol} chain: {e}"
+    exp, problem = chain.expirations[0], None
+    if args.get("expiration"):
+        try:
+            exp, problem = _expiration(eng, chain, str(args["expiration"])[:10])
+        except ValueError:
+            return f"'{args['expiration']}' isn't a date."
+    lo, hi = args.get("from_strike"), args.get("to_strike")
+    for k in (lo, hi):
+        problem = problem or (k is not None and _strike_listed(eng, chain, exp, float(k)))
+    if problem:
+        return problem
+    strikes = chain.strikes.get(exp) or []
+    target = args.get("delta")
+    if target is not None:
+        target = abs(float(target))
+        target = target / 100 if target > 1 else target
+    count = max(1, min(int(args.get("count") or (5 if target is not None else 10)),
+                       tcfg.OPTION_CHAIN_MAX_STRIKES))
+    spot, notes = None, []
+    if lo is not None or hi is not None:
+        a = float(lo) if lo is not None else strikes[0]
+        b = float(hi) if hi is not None else strikes[-1]
+        picked = [k for k in strikes if min(a, b) <= k <= max(a, b)]
+        if len(picked) > tcfg.OPTION_CHAIN_MAX_STRIKES:
+            notes.append(f"The first {tcfg.OPTION_CHAIN_MAX_STRIKES} of the "
+                         f"{len(picked)} strikes in that range.")
+            picked = picked[:tcfg.OPTION_CHAIN_MAX_STRIKES]
+    else:
+        try:
+            spot = eng.underlying_quote(symbol)
+        except Exception:
+            spot = None
+        center = spot.mid if spot and spot.mid is not None else strikes[len(strikes) // 2]
+        near = sorted(strikes, key=lambda k: abs(k - center))
+        if target is None:
+            picked = near[:count]
+        else:
+            # Below 0.5 the delta sought is out of the money: puts under the
+            # price, calls over it — and the other way round above 0.5.
+            under = (cp == "P") == (target <= 0.5)
+            picked = [k for k in near if (k <= center) == under][
+                :tcfg.OPTION_CHAIN_SCAN_STRIKES]
+    picked = sorted(picked)
+    infos = [chain.option(exp, k, cp) for k in picked]
+    quotes = tticket.batch_quotes(eng.leg_quote_fn(chain, greeks=True),
+                                  [i.streamer if i else None for i in infos])
+    got = [(k, q) for k, q in zip(picked, quotes) if q and q.mid is not None]
+    what = f"{symbol} {with_weekday(exp)} {kind}s"
+    if not got:
+        why = eng.quotes.last_error
+        return f"No live quotes for the {what} right now" + (f" ({why})." if why else ".")
+    if target is not None:
+        with_delta = [(k, q) for k, q in got if q.delta is not None]
+        if not with_delta:
+            return f"The {what} quotes carried no delta, so none can be picked by it."
+        def miss(kq):
+            return abs(abs(kq[1].delta) - target)
+        best_k, best_q = min(with_delta, key=miss)
+        got = sorted(sorted(with_delta, key=miss)[:count])
+        notes.insert(0, f"Closest to {target:.2f} delta: the {best_k:g} at "
+                        f"{best_q.delta:+.2f}.")
+        if miss((best_k, best_q)) > tcfg.OPTION_CHAIN_DELTA_MISS:
+            notes.append("Nothing nearer among the strikes quoted; name a "
+                         "strike range to look further.")
+
+    def greeks(q):
+        return ", ".join(x for x in (
+            q.delta is not None and f"delta {q.delta:+.2f}",
+            q.iv is not None and f"IV {q.iv * 100:.1f}%") if x)
+    lines = [f"{k:g}: bid {_fmt(q.bid)}, ask {_fmt(q.ask)}, mid {_fmt(q.mid)}" +
+             (f", {greeks(q)}" if greeks(q) else "") for k, q in got]
+    heading = what + (f", {symbol} at {_fmt(spot.mid)}" if spot and spot.mid else "")
+    as_of = _as_of(got[0][1]).strip()
+    ctx.card = blocks.card([blocks.section(heading, [
+        blocks.row(blocks.contract(symbol, exp, k, cp), f"mid {_fmt(q.mid)}",
+                   blocks.MONEY, lines=[f"Bid {_fmt(q.bid)} · ask {_fmt(q.ask)}",
+                                        greeks(q)])
+        for k, q in got])], notes=notes + [as_of, "Quotes only: no ticket built."])
+    return (f"{heading}. " + "; ".join(lines) + ". " + " ".join(notes) +
+            (" " if notes else "") + as_of + " Quotes only, no ticket built.")
+
+
+@tool({
     "name": "build_strategy",
     "description": (
         "Start a new order ticket from a named options strategy on an "

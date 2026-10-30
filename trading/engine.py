@@ -75,7 +75,14 @@ class TradingEngine:
             return self.quotes.get(streamer)
         prefetch = getattr(self.quotes, "prefetch", None)
         if prefetch:
-            get_quote.prefetch = prefetch   # Ticket.leg_quotes batches on it
+            get_quote.prefetch = prefetch   # ticket.batch_quotes batches on it
+        else:
+            # A stream: subscribe the whole batch at once, so forty strikes
+            # wait for their first ticks together, not one by one (#59).
+            def get_quote_prefetch(streamers):
+                if self.quotes.start():
+                    self.quotes.subscribe(streamers, greeks=greeks)
+            get_quote.prefetch = get_quote_prefetch
         return get_quote
 
     # --- accounts ----------------------------------------------------------

@@ -51,7 +51,7 @@ RECORD_RULES = (
 # The live-trading tools (tools/trading_tools.py). Which broker they reach is
 # the persona's `brokers` tuple, resolved inside the tools from
 # ctx.active_agent — so a persona can never be talked onto the other broker.
-TRADING_TOOLS = {"trading_status", "get_quote", "list_expirations",
+TRADING_TOOLS = {"trading_status", "get_quote", "list_expirations", "option_chain",
                  "build_strategy", "adjust_leg", "set_order_terms",
                  "price_order", "review_order", "submit_order", "list_orders",
                  "cancel_order", "get_positions", "get_pnl", "get_balance",
@@ -84,7 +84,11 @@ ORDER_FLOW = (
     "its greeks, review_order speaks the broker's dry run — and submit_order "
     "works only after the user has heard that review of the exact current "
     "ticket and explicitly said to go ahead; never set its confirmed flag "
-    "otherwise. You can price any option or spread, at any size, with its "
+    "otherwise. To look strikes up — a strike by delta, what strikes cost "
+    "around the money, a range of strikes — call option_chain: it quotes "
+    "them all at once and builds no ticket. Build a ticket only to price a "
+    "spread or a held position, or to trade; never build one just to search "
+    "strikes. You can price any option or spread, at any size, with its "
     "greeks: build it as a ticket and price_order it — never tell the user "
     "you can't. "
 )

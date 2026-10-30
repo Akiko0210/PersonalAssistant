@@ -30,6 +30,16 @@ from trading import strategies as tstrat
 from trading.models import Leg
 
 
+def batch_quotes(get_quote, streamers):
+    """[Quote-or-None] per streamer symbol (a None stays None). A get_quote
+    with a `prefetch` attribute is handed every symbol first, so a strip of
+    strikes or a 4-leg ticket is one Schwab request, one stream subscribe."""
+    prefetch = getattr(get_quote, "prefetch", None)
+    if prefetch:
+        prefetch([s for s in streamers if s])
+    return [get_quote(s) if s else None for s in streamers]
+
+
 @dataclass
 class Ticket:
     underlying: str
@@ -134,11 +144,8 @@ class Ticket:
         handed every symbol first, so a 4-leg ticket is one request."""
         infos = [chain.option(leg.expiration, leg.strike, leg.cp[0])
                  for leg in self.legs]
-        prefetch = getattr(get_quote, "prefetch", None)
-        if prefetch:
-            prefetch([i.streamer for i in infos if i])
-        return [(leg, get_quote(info.streamer) if info else None)
-                for leg, info in zip(self.legs, infos)]
+        return list(zip(self.legs, batch_quotes(
+            get_quote, [i.streamer if i else None for i in infos])))
 
     def net_mid(self, chain, get_quote):
         """Net mid across legs, per contract: positive = credit to you.
