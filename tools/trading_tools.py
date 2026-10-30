@@ -25,11 +25,12 @@ Design rules:
   the choice. Orders act on exactly one account, named in the review.
 """
 
-from datetime import date, timedelta
+import time
+from datetime import date, datetime, timedelta
 
 from brain import agents
 from display import card as blocks
-from lib.dates import PERIODS, period_range, with_weekday
+from lib.dates import PERIODS, period_range, with_weekday, zone_name
 from tools import tool
 from trading import accounts as taccounts
 from trading import config as tcfg
@@ -465,14 +466,34 @@ def get_quote(ctx, args):
     if q is None or (q.bid is None and q.last is None):
         why = eng.quotes.last_error
         return (f"No quote available for {symbol} right now" +
-                (f" ({why})" if why else "") +
-                ". In sandbox mode real-time data is unavailable.")
+                (f" ({why})" if why else "") + "." +
+                (" In sandbox mode real-time data is unavailable."
+                 if eng.broker.env_label() == "sandbox" else ""))
     bits = []
     if q.bid is not None and q.ask is not None:
         bits.append(f"bid {_fmt(q.bid)}, ask {_fmt(q.ask)}, mid {_fmt(q.mid)}")
     if q.last is not None:
         bits.append(f"last {_fmt(q.last)}")
-    return f"{symbol}: " + "; ".join(bits) + "."
+    return f"{symbol}: " + "; ".join(bits) + "." + _as_of(q)
+
+
+def _as_of(q):
+    """When the price is from, in words. Without it Tom read the 4pm close as
+    "right now" forty minutes after the bell, then invented a feed lag to
+    explain the user's screen (2026-10-29, #55)."""
+    def clock(ts):
+        dt = datetime.fromtimestamp(ts).astimezone()
+        return dt.strftime("%I:%M %p ").lstrip("0") + zone_name(dt)
+    if q.closed:
+        return (" Market closed: this is the last price, not a live one" +
+                (f" (last update {clock(q.as_of)})" if q.as_of else "") + ".")
+    if not q.as_of:
+        return " The broker gave no time for this price."
+    age = time.time() - q.as_of
+    if age > tcfg.QUOTE_STALE_S:
+        return (f" Last update {clock(q.as_of)}, {round(age / 60)} minutes ago"
+                " — may not be live.")
+    return f" As of {clock(q.as_of)}."
 
 
 @tool({

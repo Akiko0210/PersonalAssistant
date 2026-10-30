@@ -140,12 +140,16 @@ class FakeEngine:
     account it reached."""
 
     def __init__(self, key, realized=0.0, accounts=None, positions=(),
-                 marks=None, orders=(), variant=None, price=None):
+                 marks=None, orders=(), variant=None, price=None, quote=None,
+                 env="live"):
         from trading import accounts as taccounts
         self.key = key
         # For the ticket tools: a broker variant (WindowedBroker) serving the
         # chain through the real chains.py cache, and the underlying's price.
-        self.variant, self.price = variant, price
+        # get_quote reads `quote` whole when given (its time and status).
+        self.variant, self.price, self.quote = variant, price, quote
+        self.broker = SimpleNamespace(env_label=lambda: env)
+        self.quotes = SimpleNamespace(last_error=None)
         self._acc = taccounts
         self.by_account = accounts or {f"{key}-1": realized}
         self.calls = []
@@ -188,7 +192,7 @@ class FakeEngine:
                                     every_strike=every_strike)
 
     def underlying_quote(self, underlying):
-        return Quote(symbol=underlying, bid=self.price, ask=self.price)
+        return self.quote or Quote(symbol=underlying, bid=self.price, ask=self.price)
 
     def pnl_report(self, account, start, end, underlying=None):
         from trading.models import PnLReport
