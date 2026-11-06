@@ -849,7 +849,7 @@ def set_order_terms(ctx, args):
                     "In sandbox mode real-time option quotes are unavailable; "
                     "set an explicit price instead.")
         tk.apply_net_price(net)
-        said.append(f"priced at mid: {tk.limit_price:.2f} {tk.price_effect}")
+        said.append(f"priced at mid: {tk.limit_price:.2f} {tk.price_effect} per spread")
     elif args.get("price") is not None:
         effect = args.get("price_effect")
         if effect not in ("Credit", "Debit"):
@@ -874,7 +874,8 @@ def set_order_terms(ctx, args):
     "description": (
         "Price the current ticket from live market quotes: each leg's bid, "
         "ask and mid, implied volatility and greeks (delta, gamma, theta, "
-        "vega), and the whole ticket's net mid and net greeks. Quotes only — "
+        "vega), the net mid per spread with the spread count and dollar "
+        "total, and the whole ticket's net greeks. Quotes only — "
         "no broker check, so any size prices whatever the account's buying "
         "power, and nothing is placed or changed. Use it whenever the user "
         "asks what an option or spread is worth or for its greeks, including "
@@ -916,10 +917,14 @@ def price_order(ctx, args):
                                    f"Leg {i}: {leg.action}, {leg.size}",
                                    f"Bid {_fmt(q.bid)} · ask {_fmt(q.ask)}",
                                    greeks.capitalize()]))
-    net = tk.net_of(quotes)
+    net = tk.net_per_spread(quotes)
     net_price = (f"{abs(net):.2f} {'credit' if net > 0 else 'debit'}"
                  if net is not None else None)
-    lines.append(f"Net mid {net_price} for the ticket as built" if net_price else
+    spreads = tk.spread_count()
+    whole = (f"{spreads} spread{'' if spreads == 1 else 's'}, "
+             f"${_fmt(abs(net) * spreads * tsym.multiplier(tk.underlying, 'Equity Option'))} total"
+             if net_price else None)
+    lines.append(f"Net mid {net_price} per spread; {whole}" if net_price else
                  "No net price: a leg has no live quote (the sandbox has no "
                  "real-time option quotes)")
     ng = tk.net_greeks(quotes)
@@ -931,9 +936,10 @@ def price_order(ctx, args):
                  "No net greeks: the quotes carried none for at least one leg")
     ctx.card = blocks.card(
         [blocks.section(f"{tk.underlying} {tk.strategy or 'custom'}", rows)],
-        total=net_price and blocks.total("Net mid, ticket as built", net_price,
+        total=net_price and blocks.total("Net mid, per spread", net_price,
                                          blocks.MONEY),
-        notes=[lines[-1] + ".", "Quotes only: nothing placed, buying power "
+        notes=[whole and whole + ".", lines[-1] + ".",
+               "Quotes only: nothing placed, buying power "
                "not checked.", "" if net_price else lines[-2] + "."])
     return ("Live pricing, quotes only (nothing placed, buying power not "
             "checked). " + ". ".join(lines) + ".")

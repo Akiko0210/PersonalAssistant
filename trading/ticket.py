@@ -20,6 +20,7 @@ price, and a time-in-force. It is:
 
 import hashlib
 import json
+import math
 import time
 from dataclasses import dataclass, field, asdict
 
@@ -147,14 +148,28 @@ class Ticket:
         return list(zip(self.legs, batch_quotes(
             get_quote, [i.streamer if i else None for i in infos])))
 
+    def spread_count(self):
+        """Copies of the spread on this ticket: the gcd of its leg sizes, so
+        2x2 is two spreads and a 1-2-1 butterfly is one, not two."""
+        return math.gcd(*(leg.size for leg in self.legs)) or 1
+
     def net_mid(self, chain, get_quote):
-        """Net mid across legs, per contract: positive = credit to you.
-        None if any leg has no usable quote."""
-        return self.net_of(self.leg_quotes(chain, get_quote))
+        """Net mid per spread: positive = credit to you. None if any leg has
+        no usable quote."""
+        return self.net_per_spread(self.leg_quotes(chain, get_quote))
+
+    def net_per_spread(self, quotes):
+        """The price a trader or broker means, over leg_quotes() output: an
+        order's limit and a statement's @price are both per spread. Reading
+        the ticket total as this overstated 2-lot values and limits twofold
+        (#29)."""
+        total = self.net_of(quotes)
+        return None if total is None else total / self.spread_count()
 
     @staticmethod
     def net_of(quotes):
-        """net_mid over leg_quotes() output already in hand."""
+        """The whole ticket's net, every leg times its size. Not a price: use
+        net_per_spread for one."""
         total = 0.0
         for leg, q in quotes:
             mid = q.mid if q else None
