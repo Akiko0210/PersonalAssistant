@@ -24,6 +24,11 @@ if "%~1"=="" (
 )
 
 python voice_agent.py %*
+
+REM A plain launch also hands the session just ended to the claude CLI for a
+REM write-up (logs\session_<date>_<HHMM>_analyzed.md). It takes minutes, so it
+REM runs in its own minimized window: this one can close without killing it.
+if "%~1"=="" start "Session analysis" /min python -m scripts.analyze_session
 echo.
 echo Agent exited.
 pause

@@ -31,5 +31,10 @@ if [ $# -eq 0 ]; then
 fi
 
 "$PY" voice_agent.py "$@"
+
+# A plain launch also hands the session just ended to the claude CLI for a
+# write-up (logs/session_<date>_<HHMM>_analyzed.md). It takes minutes, so it
+# runs detached: closing this terminal doesn't kill it.
+[ $# -eq 0 ] && nohup "$PY" -m scripts.analyze_session >/dev/null 2>&1 &
 echo
 echo "Agent exited."
