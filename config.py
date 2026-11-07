@@ -229,6 +229,7 @@ CONTEXT_RECENT_EXCHANGES = 2      # previous exchanges sent verbatim; older ones
 CONTEXT_CANDIDATES = 16           # exchanges per retriever per store before fusion — more than fits, so ranking has a choice; at 12 the list read-back sat just outside the pool for a short question that had borrowed its previous turn (scripts/eval_retrieval.py, 2026-09-18)
 CONTEXT_MMR_LAMBDA = 0.7          # fill by marginal score, λ·score − (1−λ)·cosine to what is already kept (MMR); 1.0 = plain score order, which let nine near-duplicate "about the list" exchanges fill the budget ahead of the list itself (2026-09-17). 0.7 keeps the list and both harness controls
 CONTEXT_CONVO_CHARS = 4000        # ~1k tokens of past exchanges per turn
+CONTEXT_PROJECT_CHARS = 5000      # ~1.25k tokens more in project focus (#63), for the project's own exchanges and facts; on top, so focus can't push anything out of the ordinary pull. Replay of 2026-11-02: at 4000 the save missed the Background when the question said the wrong name, at 5000 it made it. One conversation's evidence: retune from the context log
 CONTEXT_KB_CHARS = 3000           # ~750 tokens of reference chunks; also takes the conversation budget's leftover
 CONTEXT_HIT_CHARS = 800           # per-exchange cap so one long reply can't eat the budget
 CONTEXT_MIN_SIMILARITY = 0.25     # cosine gate for dense hits (a real cosine: the store is cosine space — until 2026-09-18 similarity() read 0.5+cos/2 and this never fired); MiniLM puts unrelated short texts at 0.0-0.2 — retune from scripts/eval_retrieval.py
