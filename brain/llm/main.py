@@ -214,6 +214,7 @@ class Claude:
         # "make Tom smarter" survives switching away and back but never
         # bleeds into the other personas.
         self._model_overrides = {}
+        self._focus_spoken = set()  # personas whose lasting focus was said this session
         self._setup_failover()
         # Everything tool handlers may touch (see tools/); also carries the
         # pending conversation note and the active conversation model (which the
@@ -294,6 +295,15 @@ class Claude:
         except Exception as e:  # noqa: BLE001 - a broken record must not end the turn
             log.warning("working record for %s unavailable: %s", owner, e)
             return ""
+
+    def _focused_project(self, owner):
+        """The record `owner` is focused on, or None (tests stub this). Must
+        never cost the turn either: a failure reads as no focus."""
+        try:
+            return working_state.focused(owner)
+        except Exception as e:  # noqa: BLE001 - a broken record must not end the turn
+            log.warning("focus for %s unavailable: %s", owner, e)
+            return None
 
     def _bound(self, factory, model):
         """`factory` over the client serving `model`. A provider whose key is
@@ -519,7 +529,8 @@ class Claude:
         # tool call.
         pull = context.build_context(task, owner=key, memory=self.memory,
                                      facts=self.facts, kb=self.kb,
-                                     focus=self._ctx.focus)
+                                     focus=self._ctx.focus,
+                                     project=self._focused_project(key))
         system = system_blocks(
             DELEGATION_PROMPT.format(name=hat["name"], role=hat["role"])
             + "\n\n" + agents.instructions(key) + focus_prompt_block(self._ctx.focus),
@@ -529,10 +540,12 @@ class Claude:
         # No order mutation either — review-before-submit means the USER hears
         # the review and says go, and a background worker is out of earshot by
         # definition; it could otherwise satisfy the review gate by talking to
-        # itself. Read-only trading tools stay available.
+        # itself. Read-only trading tools stay available. No focus changes: the
+        # user would never hear them, and their next question would land in a
+        # project they didn't choose.
         tools = api_tools(include=hat["tools"] - {
             "switch_agent", "ask_agent", "set_conversation_model",
-            "submit_order", "cancel_order"})
+            "submit_order", "cancel_order", "focus_project"})
         messages = [{"role": "user", "content": task}]
         log.info("delegated task -> %s (%s)", key, model)
         resp = self._tool_loop(
@@ -827,6 +840,7 @@ class Claude:
             # Deferred flows (the conversation-note save) flush themselves later
             # with persist=True, since they finish after this point.
             self.flush_tool_events()
+            self._label_turn()
             self._save_history()  # every turn — survives crashes and quits alike
             # set_conversation_model changes _ctx.convo_model without going
             # through switch_to, so the state file would otherwise go stale the
@@ -834,6 +848,17 @@ class Claude:
             # turn, next to the history save that already happens here.
             self._write_agent_state()
             self._unsettled = True
+
+    def _label_turn(self):
+        """Stamp this turn's user message with the project in focus as the
+        turn ENDS, so the turn that enters a project belongs to it and the
+        turn that leaves does not. On the message, like `ts`, because the
+        index may write this exchange again later (a settle, a self-note)
+        when focus has moved on; llm.cached strips it from the wire."""
+        in_focus = self._focused_project(self.active)
+        i = hist.tail_start(self.history, 0)
+        if in_focus and i < len(self.history) and self.history[i].get("role") == "user":
+            self.history[i]["project"] = in_focus["id"]
 
     def _pull_context(self, user_text, wire_from):
         """The Background for this turn. The utterance is first read against
@@ -845,6 +870,14 @@ class Claude:
         recent = [t for m in self.history[hist.tail_start(
                       self.history, cfg.QUERY_RECENT_EXCHANGES):-1]
                   if (t := ConversationMemory._message_text(m))]
+        in_focus = self._focused_project(self.active)
+        # Focus outlives the session, and hidden state is invisible to this
+        # user: the first reply after a restart says it is still on. Queued
+        # with the failover notices so it can't depend on the model saying so.
+        if self.active not in self._focus_spoken:
+            self._focus_spoken.add(self.active)
+            if in_focus:
+                self._notices.put(f"We're still focused on {in_focus['title']}.")
         q = understanding.understand(
             self._rewriter(), user_text, recent,
             now=self.history[-1].get("ts", ""),
@@ -856,7 +889,8 @@ class Claude:
         self._ctx.tail_ids = frozenset(in_tail)
         return context.build_context(q, owner=self.active, memory=self.memory,
                                      facts=self.facts, kb=self.kb,
-                                     exclude_ids=in_tail, focus=self._ctx.focus)
+                                     exclude_ids=in_tail, focus=self._ctx.focus,
+                                     project=in_focus)
 
     # --- what the user heard -------------------------------------------------
     def settle_reply(self, reply, heard):

@@ -46,6 +46,13 @@ CREATE TABLE IF NOT EXISTS entries (
     model     TEXT);                    -- the writer's live model
 CREATE INDEX IF NOT EXISTS records_owner ON records (owner, status);
 CREATE INDEX IF NOT EXISTS entries_record ON entries (record_id, ts);
+-- The record a persona is focused on (#63). Here rather than in session state
+-- because "continue a little bit" the next morning has to land on the same
+-- project, and in the same store as the record so closing one can end its
+-- focus in one transaction: a closed project can never still be in focus.
+CREATE TABLE IF NOT EXISTS focus (
+    owner     TEXT PRIMARY KEY,
+    record_id INTEGER NOT NULL REFERENCES records ON DELETE CASCADE);
 """
 
 _PREAMBLE = (
@@ -53,6 +60,14 @@ _PREAMBLE = (
     "by you with update_record, add_entry and close_record. It is current and "
     "authoritative: where the Background or an older exchange disagrees with "
     "it, the record wins.\n")
+
+_FOCUS_LINE = (
+    "In focus: #{id} {title}. The user asked to work on this project, so its "
+    "conversations and facts come first in your Background; the rest of your "
+    "memory is still there. Work on it (rules, decisions, changes) goes in "
+    "#{id}, never a new record. Before telling the user something was not "
+    "done or not saved, call recall and say what you checked. Stay in focus "
+    "until the user says otherwise.\n")
 
 
 @contextmanager
@@ -162,7 +177,38 @@ def close(owner, rid, outcome, *, model=None):
                    "VALUES (?, ?, ?, ?)", (rid, now, "Closed: " + outcome, model))
         db.execute("UPDATE records SET status = 'closed', updated = ? "
                    "WHERE id = ?", (now, rid))
+        db.execute("DELETE FROM focus WHERE record_id = ?", (rid,))
     _wrote(owner, rid, "closed", row["title"], len(outcome))
+
+
+def focus_on(owner, rid):
+    """Put the writer's open record `rid` in focus, replacing any other."""
+    with _db() as db:
+        row = _own(db, owner, rid)
+        if row["status"] != "open":
+            raise ValueError(f"Record #{rid} is closed, so it can't be focused. "
+                             "Its memory is still searchable.")
+        db.execute("INSERT OR REPLACE INTO focus (owner, record_id) VALUES (?, ?)",
+                   (owner, rid))
+    log.info("focus %s -> #%d %r", owner, rid, row["title"])
+
+
+def leave_focus(owner):
+    """End `owner`'s focus; returns the record that was in focus, or None."""
+    was = focused(owner)
+    if was:
+        with _db() as db:
+            db.execute("DELETE FROM focus WHERE owner = ?", (owner,))
+        log.info("focus %s left #%d %r", owner, was["id"], was["title"])
+    return was
+
+
+def focused(owner):
+    """The record `owner` is focused on, as a dict, or None."""
+    with _db() as db:
+        row = db.execute("SELECT r.* FROM focus f JOIN records r ON r.id = f.record_id "
+                         "WHERE f.owner = ?", (owner,)).fetchone()
+    return dict(row) if row else None
 
 
 # --- reads ----------------------------------------------------------------------
@@ -241,24 +287,21 @@ def block(owner):
     first, title-only once a full header no longer fits), then each record's
     last WORKING_RECENT_ENTRIES entries, then the newest of the rest. Rendered
     in creation order, entries oldest first, so the bytes only change when a
-    record does and the block stays prompt-cached. "" when nothing is open."""
+    record does and the block stays prompt-cached. A record in focus goes
+    first, with its whole journal, ahead of every other record's header: this
+    block is what focus means for the persona's own notes. "" when nothing is
+    open."""
+    in_focus = focused(owner)
     with _db() as db:
         recs = _records(db, (owner,), "AND status = 'open' ORDER BY id")
         if not recs:
             return ""
         entries = _entries(db, [r["id"] for r in recs])
-    left = cfg.WORKING_RECORD_CHARS - len(_PREAMBLE)
+    focus_line = (_FOCUS_LINE.format(id=in_focus["id"], title=in_focus["title"])
+                  if in_focus else "")
+    focus_id = in_focus["id"] if in_focus else None
+    left = cfg.WORKING_RECORD_CHARS - len(_PREAMBLE) - len(focus_line)
     full, shown = set(), set()
-    # Stamps have one-second resolution, so ties fall back to the row id —
-    # "newest" must not be arbitrary when a turn writes twice in a second.
-    by_update = sorted(recs, key=lambda r: (r["updated"], r["id"]), reverse=True)
-    for r in by_update:
-        h = _header(r)
-        if len(h) < left:
-            full.add(r["id"])
-            left -= len(h) + 1
-        else:  # a title is always shown: knowing a record exists is the point
-            left -= len(_title_line(r)) + 1
     def take(e):
         nonlocal left
         cost = len(_entry_line(e)) + 1
@@ -267,6 +310,21 @@ def block(owner):
         shown.add(e["id"])
         left -= cost
         return True
+    # Stamps have one-second resolution, so ties fall back to the row id —
+    # "newest" must not be arbitrary when a turn writes twice in a second.
+    by_update = sorted(recs, key=lambda r: (r["id"] == focus_id, r["updated"], r["id"]),
+                       reverse=True)
+    for r in by_update:
+        h = _header(r)
+        if len(h) < left:
+            full.add(r["id"])
+            left -= len(h) + 1
+        else:  # a title is always shown: knowing a record exists is the point
+            left -= len(_title_line(r)) + 1
+        if r["id"] == focus_id:
+            for e in reversed(entries[focus_id]):
+                if not take(e):
+                    break
     for r in by_update:
         for e in reversed(entries[r["id"]][-cfg.WORKING_RECENT_ENTRIES:]):
             take(e)
@@ -276,7 +334,7 @@ def block(owner):
     for e in rest:
         if not take(e):
             break
-    lines = [_PREAMBLE]
+    lines = [_PREAMBLE + focus_line]
     for r in recs:
         lines.append(_header(r) if r["id"] in full else
                      _title_line(r) + f" (details: read_record {r['id']})")

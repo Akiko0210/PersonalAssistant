@@ -105,16 +105,20 @@ class FactStore(HybridStore):
 
     # --- reading --------------------------------------------------------------
     def query_rows(self, query: str, n: int = None, owner=None, *,
-                   window=None) -> Rows:
+                   window=None, project=None) -> Rows:
         """Current facts of `owner` (and grants) nearest `query`, dense and
-        lexical, optionally inside a time window — the same shape the
-        exchange index returns, so brain/context.py fuses both alike."""
+        lexical, optionally inside a time window and/or labeled with one
+        project — the same shape the exchange index returns, so
+        brain/context.py fuses both alike."""
         n = n or cfg.CONTEXT_CANDIDATES
         where = and_where(self._current_where(),
-                          time_where(window) if window is not None else None)
+                          time_where(window) if window is not None else None,
+                          {"project": project} if project is not None else None)
 
         def keep(meta):
-            return self._is_current(meta) and (window is None or in_window(meta, window))
+            return (self._is_current(meta)
+                    and (window is None or in_window(meta, window))
+                    and (project is None or meta.get("project") == project))
         sources = [(cfg.agent_facts_collection(k), False, 1)
                    for k in agents.readable_owners(owner)]
         rows = self._collect(sources, query, n, where, keep)
@@ -199,12 +203,16 @@ class FactStore(HybridStore):
         return [chroma_store.Hit(0.0, d, m or {}, i) for i, d, m in rows]
 
     # --- writing --------------------------------------------------------------
-    def apply(self, owner, ops, *, xid, ts, epoch=None, approx=False) -> tuple:
+    def apply(self, owner, ops, *, xid, ts, epoch=None, approx=False,
+              project=None) -> tuple:
         """Write the extractor's operations for exchange `xid`. add: a new
         record. update: a new record for the entity (provenance accumulates:
         the old fact's sources plus this exchange) and the old one marked
         superseded by it. supersede: the old one marked superseded by the
         exchange. Marks are metadata-only updates (chromadb merges them).
+        `project` labels what this exchange writes; an update made outside
+        focus keeps the label of the fact it replaces, or a project's plan
+        would drop out of it the first time it came up elsewhere.
         Returns (added, updated, superseded)."""
         name = cfg.agent_facts_collection(owner)
         col = self._col_for(name)
@@ -228,8 +236,9 @@ class FactStore(HybridStore):
                     continue
                 entity = prev.get("entity") or slug(op.get("entity"))
                 sources = f"{prev.get('source_ids', '')},{xid}".strip(",")
+                label = project or prev.get("project")
             else:
-                entity, sources = slug(op.get("entity")), xid
+                entity, sources, label = slug(op.get("entity")), xid, project
             if not entity or skipped({"agent": owner, "entity": entity}, op["value"]):
                 continue
             fid = fact_id(owner, xid, entity, op["value"])
@@ -238,6 +247,7 @@ class FactStore(HybridStore):
             metas.append({"agent": owner, "kind": "fact", "entity": entity,
                           "ts": ts, "approx": bool(approx),
                           **({"epoch": epoch} if epoch is not None else {}),
+                          **({"project": label} if label else {}),
                           "source_ids": sources, "superseded_by": ""})
             if op["op"] == "update":
                 marks.append((op["id"], fid))
@@ -367,7 +377,8 @@ def learn(ask, memory, facts, owner, xid, doc, meta):
     if ops is None:
         return None
     counts = facts.apply(owner, ops, xid=xid, ts=meta.get("ts") or "",
-                         epoch=meta.get("epoch"), approx=meta.get("approx", False))
+                         epoch=meta.get("epoch"), approx=meta.get("approx", False),
+                         project=meta.get("project"))
     memory.mark_extracted(owner, xid)
     return counts
 

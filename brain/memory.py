@@ -387,6 +387,8 @@ class ConversationMemory(HybridStore):
                            and b.get("name")})
             if used:
                 meta["tools"] = ",".join(used)
+            if user_msg.get("project"):
+                meta["project"] = user_msg["project"]
             out.append((exchange_id(owner, user_msg), "\n".join(lines), meta))
         return out
 
@@ -477,7 +479,7 @@ class ConversationMemory(HybridStore):
 
     # --- retrieval ------------------------------------------------------------
     def query_rows(self, query: str, n: int = None, caller=None, *,
-                   window=None) -> Rows:
+                   window=None, project=None) -> Rows:
         """Dense and lexical hits from every archive `caller` may read: its
         own conversations_<key> (plus grants) and the legacy shared
         collection, whose rows are tagged legacy so the reader knows they
@@ -485,13 +487,19 @@ class ConversationMemory(HybridStore):
         retriever; a persona's collection holds two key records per exchange,
         so it is read twice as deep to keep `n` meaning exchanges once they
         collapse. `window` — (lo, hi) epoch seconds — restricts both lists to
-        exactly-timed exchanges inside it."""
+        exactly-timed exchanges inside it. `project` restricts them to that
+        record's labeled exchanges, which the legacy archive never has."""
         n = n or cfg.MEMORY_SEARCH_RESULTS
-        where = time_where(window) if window is not None else None
-        keep = (lambda m: in_window(m, window)) if window is not None else None
+        where = and_where(time_where(window) if window is not None else None,
+                          {"project": project} if project is not None else None)
+
+        def keep(meta):
+            return ((window is None or in_window(meta, window))
+                    and (project is None or meta.get("project") == project))
         sources = [(cfg.agent_memory_collection(k), False, 2)
                    for k in agents.readable_owners(caller)]
-        sources.append((cfg.MEMORY_COLLECTION, True, 1))
+        if project is None:
+            sources.append((cfg.MEMORY_COLLECTION, True, 1))
         return self._collect(sources, query, n, where, keep)
 
     def rank(self, query: str, *, caller, window=None, exclude_ids=(), now=None):
