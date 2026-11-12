@@ -75,7 +75,8 @@ def run_one(case_id, ref, label, rep=0, *, model=True, judge=True):
     """One case on one version from a fresh clone; returns the run summary."""
     case_path = find_case(case_id)
     case = json.loads(case_path.read_text(encoding="utf-8"))
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    # The random tail keeps suites running side by side from sharing a folder.
+    stamp = f"{datetime.now():%Y%m%d-%H%M%S}-{os.urandom(2).hex()}"
     run_dir = testenv_root() / "runs" / f"{stamp}_{case_id}_{label}_{rep}"
     commit = export_code(ref, run_dir)
     snapshot.clone(testenv_root() / "snapshots" / case["snapshot"], run_dir)
@@ -151,7 +152,7 @@ def summarize(case, trace, run_dir):
 def compare(case_ids, baseline, candidate, repeats=3, *, model=True, judge=True, out=None):
     """Each case `repeats` times on both refs, alternating which goes first.
     Writes report.json and report.md and returns the report's folder."""
-    out = Path(out or testenv_root() / "reports" / datetime.now().strftime("%Y%m%d-%H%M%S"))
+    out = Path(out or testenv_root() / "reports" / f"{datetime.now():%Y%m%d-%H%M%S}-{os.urandom(2).hex()}")
     out.mkdir(parents=True, exist_ok=True)
     results, snaps = [], set()
     for case_id in case_ids:
