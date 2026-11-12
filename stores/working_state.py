@@ -20,6 +20,7 @@ worker, a delegation thread and the foreground turn may all touch it.
 
 import logging
 import sqlite3
+from collections import namedtuple
 from contextlib import contextmanager
 
 import config as cfg
@@ -281,27 +282,42 @@ def listing(caller, closed=10):
     return [_title_line(r) for r in rows]
 
 
-def block(owner):
-    """The always-shown block for `owner`: every open record, packed into
-    WORKING_RECORD_CHARS by a fixed order — headers (most recently updated
-    first, title-only once a full header no longer fits), then each record's
-    last WORKING_RECENT_ENTRIES entries, then the newest of the rest. Rendered
-    in creation order, entries oldest first, so the bytes only change when a
-    record does and the block stays prompt-cached. A record in focus goes
-    first, with its whole journal, ahead of every other record's header: this
-    block is what focus means for the persona's own notes. "" when nothing is
-    open."""
+Packed = namedtuple("Packed", "recs entries focus_line full shown")
+
+
+def _short_line(r):
+    return _title_line(r) + f" (details: read_record {r['id']})"
+
+
+def _pack(owner):
+    """Which parts of `owner`'s open records fit WORKING_RECORD_CHARS, or
+    None when nothing is open. `full` holds the ids shown with their body,
+    `shown` the entry ids shown. The order things claim the budget:
+
+    1. Every record's title. Knowing a record exists is the point.
+    2. The record in focus, whole: its body, then its journal newest first.
+       This block is what focus means for the persona's own notes.
+    3. Every record's newest WORKING_RECENT_ENTRIES entries, before any body.
+       An entry is where a step gets recorded as done; a body is the plan
+       as first written. With bodies first, 10.7k of bodies filled Tom's
+       8k on 2026-11-12, so none of his 32 entries was shown. One of them
+       said his upside-calendar rule was already spent, and he recited it
+       as pending.
+    4. Bodies, most recently updated first.
+    5. The rest of the journals, newest first."""
     in_focus = focused(owner)
     with _db() as db:
         recs = _records(db, (owner,), "AND status = 'open' ORDER BY id")
         if not recs:
-            return ""
+            return None
         entries = _entries(db, [r["id"] for r in recs])
     focus_line = (_FOCUS_LINE.format(id=in_focus["id"], title=in_focus["title"])
                   if in_focus else "")
     focus_id = in_focus["id"] if in_focus else None
     left = cfg.WORKING_RECORD_CHARS - len(_PREAMBLE) - len(focus_line)
+    left -= sum(len(_short_line(r)) + 1 for r in recs)
     full, shown = set(), set()
+
     def take(e):
         nonlocal left
         cost = len(_entry_line(e)) + 1
@@ -310,41 +326,93 @@ def block(owner):
         shown.add(e["id"])
         left -= cost
         return True
+
+    def widen(r):  # title line -> full header, if the difference fits
+        nonlocal left
+        extra = len(_header(r)) - len(_short_line(r))
+        if extra <= left:
+            full.add(r["id"])
+            left -= extra
     # Stamps have one-second resolution, so ties fall back to the row id —
     # "newest" must not be arbitrary when a turn writes twice in a second.
     by_update = sorted(recs, key=lambda r: (r["id"] == focus_id, r["updated"], r["id"]),
                        reverse=True)
-    for r in by_update:
-        h = _header(r)
-        if len(h) < left:
-            full.add(r["id"])
-            left -= len(h) + 1
-        else:  # a title is always shown: knowing a record exists is the point
-            left -= len(_title_line(r)) + 1
-        if r["id"] == focus_id:
-            for e in reversed(entries[focus_id]):
-                if not take(e):
-                    break
+    if focus_id is not None:
+        widen(by_update[0])
+        for e in reversed(entries[focus_id]):
+            if not take(e):
+                break
     for r in by_update:
         for e in reversed(entries[r["id"]][-cfg.WORKING_RECENT_ENTRIES:]):
             take(e)
+    for r in by_update:
+        widen(r)
     rest = sorted((e for es in entries.values() for e in es
                    if e["id"] not in shown),
                   key=lambda e: (e["ts"], e["id"]), reverse=True)
     for e in rest:
         if not take(e):
             break
-    lines = [_PREAMBLE + focus_line]
-    for r in recs:
-        lines.append(_header(r) if r["id"] in full else
-                     _title_line(r) + f" (details: read_record {r['id']})")
-        lines += [_entry_line(e) for e in entries[r["id"]] if e["id"] in shown]
-    total = sum(len(es) for es in entries.values())
-    hidden = total - len(shown)
+    return Packed(recs, entries, focus_line, full, shown)
+
+
+def block(owner):
+    """The always-shown block for `owner`: every open record, packed into
+    WORKING_RECORD_CHARS by _pack's order. Rendered in creation order,
+    entries oldest first, so the bytes only change when a record does and
+    the block stays prompt-cached. "" when nothing is open."""
+    p = _pack(owner)
+    if p is None:
+        return ""
+    lines = [_PREAMBLE + p.focus_line]
+    for r in p.recs:
+        lines.append(_header(r) if r["id"] in p.full else _short_line(r))
+        lines += [_entry_line(e) for e in p.entries[r["id"]] if e["id"] in p.shown]
+    total = sum(len(es) for es in p.entries.values())
+    hidden = total - len(p.shown)
     if hidden:
         lines.append(f"({hidden} older entries not shown — read_record(id) "
                      "for a record's full history.)")
-    if hidden or len(full) < len(recs):
-        log.info("working record for %s truncated: %d/%d entries, %d titles only",
-                 owner, len(shown), total, len(recs) - len(full))
+    if hidden or len(p.full) < len(p.recs):
+        log.info("working record for %s truncated: %d/%d entries; titles only: %s; "
+                 "entries hidden in: %s", owner, len(p.shown), total,
+                 " ".join(f"#{r['id']}" for r in p.recs if r["id"] not in p.full) or "none",
+                 " ".join(f"#{i}" for i, es in p.entries.items()
+                          if any(e["id"] not in p.shown for e in es)) or "none")
     return "\n".join(lines)
+
+
+def open_titles(owner):
+    """{id: title} of `owner`'s open records."""
+    with _db() as db:
+        return {r["id"]: r["title"] for r in
+                _records(db, (owner,), "AND status = 'open' ORDER BY id")}
+
+
+def unshown(owner, rid, budget):
+    """The parts of open record `rid` that block() leaves out, as text for
+    the turn's Background: its body when only the title fit, then the
+    entries that didn't fit, newest first while `budget` lasts (shown
+    oldest first). "" when the block already shows all of it."""
+    p = _pack(owner)
+    rec = next((r for r in p.recs if r["id"] == rid), None) if p else None
+    if rec is None:
+        return ""
+    body = rec["body"] if rid not in p.full and rec["body"] else ""
+    left = budget - len(body)
+    hidden = [e for e in p.entries[rid] if e["id"] not in p.shown]
+    picked = []
+    for e in reversed(hidden):
+        line = _entry_line(e)
+        if len(line) + 1 > left:
+            break
+        picked.insert(0, line)
+        left -= len(line) + 1
+    if not body and not picked:
+        return ""
+    dropped = len(hidden) - len(picked)
+    return "\n".join(
+        [f"#{rid} {rec['title']} — what the record block above leaves out:"]
+        + ([body] if body else [])
+        + ([f"  ({dropped} older entries: read_record {rid})"] if dropped else [])
+        + picked)

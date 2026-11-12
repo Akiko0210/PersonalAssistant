@@ -887,10 +887,32 @@ class Claude:
         # recall excludes the same tail, so it can never hand the model its
         # own current answers back as "past conversations".
         self._ctx.tail_ids = frozenset(in_tail)
-        return context.build_context(q, owner=self.active, memory=self.memory,
+        pull = context.build_context(q, owner=self.active, memory=self.memory,
                                      facts=self.facts, kb=self.kb,
                                      exclude_ids=in_tail, focus=self._ctx.focus,
                                      project=in_focus)
+        detail = self._record_detail(self.active, q.text, in_focus)
+        if detail:
+            pull.block = f"{detail}\n\n{pull.block}" if pull.block else detail
+        return pull
+
+    def _record_detail(self, owner, text, in_focus=None):
+        """What the record block leaves out of the records this turn names
+        (context.records_about), for the top of the Background (tests stub
+        this). The record in focus is already shown whole. Like the block,
+        it must never cost the turn."""
+        try:
+            ids = [r for r in context.records_about(text, working_state.open_titles(owner))
+                   if not in_focus or r != in_focus["id"]]
+            parts = [p for r in ids if (p := working_state.unshown(
+                owner, r, cfg.WORKING_DETAIL_CHARS // len(ids)))]
+        except Exception as e:  # noqa: BLE001 - a broken record must not end the turn
+            log.warning("record detail for %s unavailable: %s", owner, e)
+            return ""
+        if parts:
+            log.info("record detail for %s: %s (%d chars)", owner,
+                     " ".join(f"#{r}" for r in ids), sum(map(len, parts)))
+        return "\n\n".join(parts)
 
     # --- what the user heard -------------------------------------------------
     def settle_reply(self, reply, heard):

@@ -5,8 +5,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from brain import agents
+from brain import agents, context
+from brain.llm.main import Claude
 import config as cfg
 from stores import working_state as ws
 from tests.llm_fixtures import make_claude, system_text, text_reply, tool_reply
@@ -105,6 +107,45 @@ class TestPacking(RecordBase):
             self.assertIn(f"Campaign {i}", block)
         self.assertIn("(details: read_record", block)
 
+    def _overflow(self):
+        """Tom's 11/12 shape in miniature: an older campaign whose newest
+        news is an entry, then long, more recently updated write-ups."""
+        ira = ws.create("tom", "IRA call calendar",
+                        body="Rule: add upside calendars once. " + "r" * 1400)
+        ws.add_entry("tom", ira, "Upside calendars added 10/27; the rule is used up.")
+        for i in range(4):
+            ws.create("tom", f"Incident write-up {i}", body="w" * 1500)
+        cfg.WORKING_RECORD_CHARS = 3000
+        return ira
+
+    def test_every_records_newest_entries_beat_any_body(self):  # #67
+        ira = self._overflow()
+        block = ws.block("tom")
+        self.assertIn("the rule is used up", block)
+        self.assertIn(f"(details: read_record {ira})", block)   # its body lost, its news kept
+        self.assertEqual(block.count("w" * 1500), 1)            # one write-up still fits
+
+    def test_unshown_gives_back_exactly_what_the_block_left_out(self):
+        ira = self._overflow()
+        out = ws.unshown("tom", ira, 3000)
+        self.assertIn("Rule: add upside calendars once.", out)  # the hidden body
+        self.assertNotIn("used up", out)                         # already in the block
+        cfg.WORKING_RECORD_CHARS = 100_000
+        self.assertEqual(ws.unshown("tom", ira, 3000), "")       # nothing hidden
+
+    def test_unshown_keeps_the_newest_hidden_entries_within_budget(self):
+        rid = ws.create("tom", "Busy campaign")
+        for i in range(30):
+            ws.add_entry("tom", rid, f"step {i:02d} " + "x" * 80)
+        cfg.WORKING_RECORD_CHARS = 1200
+        block, out = ws.block("tom"), ws.unshown("tom", rid, 600)
+        shown = {i for i in range(30) if f"step {i:02d}" in block}
+        given = {i for i in range(30) if f"step {i:02d}" in out}
+        self.assertFalse(shown & given)                  # nothing said twice
+        self.assertEqual(max(given), min(shown) - 1)     # the newest of the hidden first
+        self.assertIn("older entries: read_record", out)
+        self.assertLessEqual(len(out), 600 + 200)
+
     def test_the_block_is_stable_between_writes(self):
         # Its bytes are prompt-cached: rendering must not change unless a
         # record does.
@@ -147,7 +188,52 @@ class TestTools(RecordBase):
                          "Your working record is empty.")
 
 
+class TestRecordsAbout(unittest.TestCase):
+    TITLES = {10: "Blue November 4th diagonal", 26: "IRA 7800 call calendar — Oct 27/23",
+              29: "Rooftop Butterfly — strategy development",
+              30: "Blue October Put Diagonal", 49: "Campaign vs Position rule",
+              45: "SPX Campaign Entry/Exit Rules (DTE + vol) — development"}
+
+    def about(self, text):
+        return context.records_about(text, self.TITLES)
+
+    def test_a_named_record_is_found_plurals_and_all(self):
+        self.assertEqual(self.about("is adding upside call calendars on the IRA "
+                                    "7800 calendar still pending?"), [26])
+        self.assertEqual(self.about("where are we on the rooftop butterfly"), [29])
+        self.assertEqual(self.about("what legs did we agree for the Blue October "
+                                    "put diagonal"), [30])
+
+    def test_a_concept_question_names_nothing(self):
+        self.assertEqual(self.about("what's the difference between a calendar "
+                                    "and a diagonal spread"), [])
+        self.assertEqual(self.about("good morning"), [])
+
+    def test_never_more_than_two(self):
+        self.assertLessEqual(len(self.about("blue diagonal campaign rules development")), 2)
+
+
 class TestInThePrompt(RecordBase):
+    def test_a_named_records_hidden_parts_open_the_background(self):  # #67
+        rid = ws.create("tom", "IRA call calendar",
+                        body="Rule: add upside calendars once. " + "r" * 1400)
+        for i in range(3):
+            ws.create("tom", f"Write-up {i}", body="w" * 1500)
+        cfg.WORKING_RECORD_CHARS = 2500
+        c = make_claude(active="tom")
+        c._record_detail = Claude._record_detail.__get__(c)
+        c.history = [{"role": "user", "content": "q", "ts": "2026-11-12T10:00:00-08:00"}]
+        pull = context.ContextPull(block="BACKGROUND")
+        with mock.patch.object(context, "build_context", return_value=pull):
+            got = c._pull_context("is the IRA call calendar rule done?", 0)
+        self.assertTrue(got.block.startswith(f"#{rid} IRA call calendar"))
+        self.assertIn("Rule: add upside calendars once.", got.block)
+        self.assertTrue(got.block.endswith("BACKGROUND"))
+        with mock.patch.object(context, "build_context",
+                               return_value=context.ContextPull(block="BACKGROUND")):
+            self.assertEqual(c._pull_context("what is a calendar?", 0).block, "BACKGROUND")
+
+
     def test_the_record_sits_between_the_static_prompt_and_the_background(self):
         c = make_claude(active="tom")
         c._record_block = lambda owner: f"RECORD OF {owner}"

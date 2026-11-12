@@ -90,6 +90,7 @@ def make_claude(responses=None, *, active=None, convo_model=_UNSET,
     c._extractor = lambda: (lambda system, prompt: '{"ops": []}')
     c._record_block = lambda owner: ""  # no working record unless a test installs one
     c._focused_project = lambda owner: None  # likewise: never the real store
+    c._record_detail = lambda owner, text, in_focus=None: ""
     c._focus_spoken = set()
     c._setup_failover()  # real failovers; a test wanting a clock calls it again
     c._ctx = ToolContext(
