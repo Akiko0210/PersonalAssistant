@@ -23,7 +23,9 @@ because the thresholds in config.py are tuned from those lines, not guessed.
 """
 
 import logging
+import math
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -265,6 +267,33 @@ def render(candidates) -> str:
                 attrs += f' tools="{c.meta["tools"]}"'
         items.append(f"<item {attrs}>\n{text}\n</item>")
     return HEADER + "\n\n" + "\n".join(items)
+
+
+def records_about(text, titles):
+    """The ids of open records whose titles `text` clearly names: at least
+    two of a title's words, carrying WORKING_MATCH_MIN of its IDF weight
+    (IDF across the persona's own open titles, so "campaign" on three of
+    them counts for less than "IRA" on one). At most two, and only those
+    within 80% of the best; a record the words merely brush gets nothing.
+    `titles` is {id: title}."""
+    from brain.memory import tokens  # here: brain.memory imports this module
+
+    def words(s):  # "calendars" names "calendar"
+        return {w[:-1] if len(w) > 4 and w.endswith("s") else w for w in tokens(s)}
+    named = {rid: words(t) for rid, t in titles.items()}
+    df = Counter(w for ws in named.values() for w in ws)
+    idf = {w: math.log(1 + len(named) / n) for w, n in df.items()}
+    asked = words(text)
+    scores = {}
+    for rid, ws in named.items():
+        hit = ws & asked
+        if len(hit) >= 2:
+            scores[rid] = sum(idf[w] for w in hit) / sum(idf[w] for w in ws)
+    best = max(scores.values(), default=0.0)
+    if best < cfg.WORKING_MATCH_MIN:
+        return []
+    return sorted((r for r, s in scores.items() if s >= 0.8 * best),
+                  key=lambda r: -scores[r])[:2]
 
 
 def project_candidates(q, project, *, owner, memory, facts, exclude_ids, now):
