@@ -1,0 +1,15 @@
+{
+ "id": "SYN-WR-02",
+ "title": "New unrelated write-ups must not push an agreed plan's legs out of view",
+ "snapshot": "synthetic-overflow-v1",
+ "setup": [
+  {"op": "create_record", "kind": "item", "title": "Incident write-up: clock error (11/10)", "filler": 1900, "body": "Fixture noise.", "updated": "2026-11-10T09:00:00-08:00"},
+  {"op": "create_record", "kind": "item", "title": "Incident write-up: quote confusion (11/11)", "filler": 1900, "body": "Fixture noise.", "updated": "2026-11-11T09:00:00-08:00"},
+  {"op": "create_record", "kind": "item", "title": "Incident write-up: email draft mix-up (11/11)", "filler": 1900, "body": "Fixture noise.", "updated": "2026-11-11T10:00:00-08:00"}
+ ],
+ "turns": ["What legs did we agree on for the Blue put diagonal?"],
+ "evidence": [{"id": "blue-legs-body", "contains": ["5660", "5690"]}],
+ "expected": "Short the Nov 6 5660 put (30 delta, about 16.80 credit, 2 DTE) and long the Dec 11 5690 put (about 37 DTE), agreed 11/4.",
+ "pass_if": ["names the short Nov 6 5660 put", "names the long Dec 11 5690 put"],
+ "fail_if": ["gives different strikes or dates as agreed", "says no legs were agreed or that he doesn't have them, without fetching them"]
+}

@@ -1,0 +1,10 @@
+{
+ "id": "SYN-WR-03",
+ "title": "A general concept question is answered as a concept, not hijacked by campaign records",
+ "snapshot": "synthetic-overflow-v1",
+ "turns": ["In general, what's the difference between a calendar spread and a diagonal spread?"],
+ "evidence": [],
+ "expected": "A calendar uses the same strike in two expirations (sell the near one, buy the far one); a diagonal uses different strikes as well as different expirations. A short, plain explanation.",
+ "pass_if": ["explains same strike vs different strikes, both across expirations"],
+ "fail_if": ["answers mainly with the user's campaign status instead of the concept", "gets the definitions wrong"]
+}
