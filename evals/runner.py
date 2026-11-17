@@ -134,7 +134,10 @@ def summarize(case, trace, run_dir):
         "model": convo[-1]["model"] if convo else None,
         "requested_model": convo[-1].get("requested_model") if convo else None,
         "commit": trace.get("commit"), "run_dir": str(run_dir),
-        "refused": trace.get("refused"), "error": (trace.get("error") or "")[-800:] or None,
+        "refused": trace.get("refused"),
+        # A worker that died before writing its trace leaves only stderr.
+        "error": (trace.get("error") or (trace.get("worker_stderr") if trace.get("worker_exit")
+                                         else "") or "")[-800:] or None,
         "reply": (trace.get("turns") or [{}])[-1].get("reply"),
         "verdict": (trace.get("judge") or {}).get("verdict"),
         "reason": (trace.get("judge") or {}).get("reason"),

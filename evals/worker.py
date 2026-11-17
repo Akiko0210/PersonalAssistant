@@ -29,7 +29,7 @@ import traceback
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
-from evals import gateway, sandbox, snapshot  # noqa: E402
+from evals import gateway, replay, sandbox, snapshot  # noqa: E402
 
 OWNER = "tom"
 _CLIP = 6000   # chars of one tool result kept in the trace
@@ -184,7 +184,14 @@ def main(run_dir, case_path, *, model_on=True, build=False):
         cfg.QUERY_MODEL = cfg.QUERY_FALLBACK_MODEL
         cfg.FACTS_MODEL = cfg.FACTS_FALLBACK_MODEL
         sandboxed = []
-        sandbox.install_fixtures(tools._REGISTRY, case.get("fixtures", {}), sandboxed)
+        fixtures = dict(case.get("fixtures", {}))
+        sandbox.install_fixtures(tools._REGISTRY, fixtures, sandboxed)
+        if case.get("as_of"):   # a real incident, asked again as of its moment
+            trace["replay"] = replay.apply(case, cfg, run_dir)
+            if case.get("positions_from_log"):
+                fixtures.setdefault("get_positions", (
+                    "(Reconstructed from the trade log as of this moment.) "
+                    + trace["replay"]["positions_at_moment"]))
         trace["setup_ids"] = run_setup(case.get("setup"), cfg)
 
         tool_calls, holder = [], {}
