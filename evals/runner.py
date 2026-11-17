@@ -178,10 +178,35 @@ def compare(case_ids, baseline, candidate, repeats=3, *, model=True, judge=True,
     return out
 
 
+def regrade(report_dir, case_ids):
+    """Grade `case_ids` again from their saved traces, against the case files
+    as they are now. That is for a ground truth corrected after a suite ran:
+    Tom's answers stay exactly as given, and only the verdict is redone. The
+    report notes which cases were regraded."""
+    path = Path(report_dir) / "report.json"
+    report = json.loads(path.read_text(encoding="utf-8"))
+    for r in report["results"]:
+        if r["case"] not in case_ids:
+            continue
+        case = json.loads(find_case(r["case"]).read_text(encoding="utf-8"))
+        trace_path = Path(r["run_dir"]) / "trace.json"
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        trace["judge"] = grade(case, trace, Path(r["run_dir"]))
+        trace_path.write_text(json.dumps(trace, indent=1, default=str), encoding="utf-8")
+        r.update(verdict=trace["judge"].get("verdict"), reason=trace["judge"].get("reason"),
+                 regraded=True)
+    report.setdefault("regraded", []).extend(sorted(set(case_ids)))
+    path.write_text(json.dumps(report, indent=1), encoding="utf-8")
+    (Path(report_dir) / "report.md").write_text(render_md(report), encoding="utf-8")
+
+
 def render_md(report):
     lines = [f"# Paired run: {report['baseline']} vs {report['candidate']}", "",
              f"Repeats per case: {report['repeats']}; model calls: {report['model']}; "
              f"master snapshots unchanged: {report['snapshots_unchanged']}", ""]
+    if report.get("regraded"):
+        lines += [f"Regraded after a ground-truth correction (answers unchanged): "
+                  f"{', '.join(report['regraded'])}", ""]
     by_case = {}
     for r in report["results"]:
         by_case.setdefault(r["case"], []).append(r)
