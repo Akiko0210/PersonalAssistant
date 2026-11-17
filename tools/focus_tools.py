@@ -45,7 +45,8 @@ def focus_prompt_block(focus) -> str:
         "strategy (e.g. double_diagonal, butterfly, credit_spread) and/or an "
         "underlying (e.g. SPX, RUT) — until clear_focus. Use when the user "
         "says to focus on, concentrate on, or only look at certain trades. "
-        "Each field accepts one value or a list."
+        "Each field accepts one value or a list. To work inside one of your "
+        "records, use focus_project instead."
     ),
     "input_schema": {
         "type": "object",

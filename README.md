@@ -288,6 +288,20 @@ persona's private collection — private material never shows up in another
 persona's searches. Tom additionally has **focus mode**: "focus on my double
 diagonals" narrows his retrieval to that strategy until you say to clear it.
 
+Tom can also **focus on a project**, which is any open record in his journal:
+"let's work on the Rooftop Butterfly". He says when focus changes, and if you
+restart while it's on, his first reply says it's still on. While focused:
+
+- each exchange and the facts it produces are labeled with the project;
+- each turn he reads the project's own memories on top of his usual ones, so a
+  question about something else still gets its usual answer;
+- the project's record is shown in full, and his notes go there rather than
+  into a new record.
+
+Say "back to normal" to leave, or name another project to move. Deleting a
+project ("delete the Rooftop project") closes its record: it can't be focused
+again, but everything he learned there stays in his memory.
+
 **Each persona also keeps a working record of what it's tracking for you** —
 Tom a journal of the campaigns you're running (the plan's rules, decisions
 and the reasons behind them), Linda her Coaches Notebook (your check-ins and

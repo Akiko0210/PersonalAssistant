@@ -293,7 +293,15 @@ AGENTS = {
             "fills that way, never from the sign. For what is open, "
             "query_trade_log with "
             "position=<id> or record=<campaign id> — never a leg list you "
-            "remember or wrote in a record body."
+            "remember or wrote in a record body. "
+            "A project is one of your open records. When the user asks to "
+            "focus on or work inside one, call focus_project and say so; if "
+            "none fits, ask before creating one. A record merely coming up is "
+            "not that request. Moving to another project moves the focus; "
+            "'done' or 'back to normal' leaves it. To delete a project, "
+            "close_record it and tell the user it can't be focused again but "
+            "its memory stays. set_focus is different: it narrows reference "
+            "material to a strategy or underlying."
         ),
         # recall is deliberately in EVERY hat's allowlist: every persona must
         # be able to reach its own past when asked for more — this hat (then
@@ -313,6 +321,8 @@ AGENTS = {
                   # retrieval until cleared. Tom-only — the other hats have no
                   # strategy-tagged material for it to filter.
                   "set_focus", "clear_focus", "get_focus",
+                  # Project focus: work inside one record, across sessions (#63).
+                  "focus_project",
                   # Trade log: thinkorswim/Schwab fills in SQLite — Tom
                   # writes it (alerts, statements, the Schwab API sync) and
                   # reads positions/P&L.

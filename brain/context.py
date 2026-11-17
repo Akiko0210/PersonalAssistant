@@ -267,8 +267,38 @@ def render(candidates) -> str:
     return HEADER + "\n\n" + "\n".join(items)
 
 
+def project_candidates(q, project, *, owner, memory, facts, exclude_ids, now):
+    """The focused project's own exchanges and facts, one ranking (#63). This
+    is what focus adds to a turn, on top of the ordinary pull and with its own
+    budget, so it can't push anything out. A score boost on one shared ranking
+    was tried against the real 2026-11-02 conversation and failed both ways:
+    too weak to reach the save when the question said the wrong name, and,
+    once strengthened, it left 1 of 10 usual memories for a question about
+    another position, which is a filter by another name.
+
+    It searches with the project's title in the words. "Did we save the draft"
+    has nothing in it to find a Rooftop save with, and telling the rewrite
+    model the title did not help: the recent turns said "SPX", so it kept
+    saying "SPX" (replay, 2026-11-06)."""
+    text = f"{project['title']} {q.text}"
+    found = []
+    try:
+        rows = memory.query_rows(text, cfg.CONTEXT_CANDIDATES + len(exclude_ids), owner,
+                                 window=q.window, project=project["id"])
+        found += fuse(rows.dense, rows.lexical, now=now, exclude_ids=exclude_ids,
+                      gated=q.window is None, by_recency=q.window is None)
+        if facts is not None:
+            rows = facts.query_rows(text, cfg.CONTEXT_CANDIDATES, owner,
+                                    window=q.window, project=project["id"])
+            found += fuse(rows.dense, rows.lexical, now=now, source="fact",
+                          gated=q.window is None, by_recency=q.window is None)
+    except Exception as e:  # noqa: BLE001 - the ordinary pull still stands
+        log.warning("project retrieval failed: %s", e)
+    return sorted(found, key=lambda c: -c.score)
+
+
 def build_context(query, *, owner, memory, kb, facts=None, exclude_ids=(),
-                  focus=None, now=None) -> ContextPull:
+                  focus=None, now=None, project=None) -> ContextPull:
     """The Background for one turn. `query` is a brain.query.Query (a plain
     string is taken as its text). Never raises and always logs: a turn must
     not die on its own memory, so each store is queried under its own guard
@@ -276,11 +306,15 @@ def build_context(query, *, owner, memory, kb, facts=None, exclude_ids=(),
     entities the query names come first, by key; then exchanges and the
     remaining facts, one fused ranking, fill CONTEXT_CONVO_CHARS; knowledge
     takes CONTEXT_KB_CHARS plus whatever that left over. With a time window
-    both memory stores are filtered to it and the relevance gate is off."""
+    both memory stores are filtered to it and the relevance gate is off.
+    `project` is the record in project focus, as a dict: everything above runs
+    exactly as without it, and its own memories (project_candidates) then fill
+    CONTEXT_PROJECT_CHARS more and are listed first. `focus` is the older,
+    separate knowledge-base narrowing (tools/focus_tools.py)."""
     q = query if isinstance(query, Query) else Query(text=str(query))
     t0 = time.monotonic()
     pull = ContextPull(query=q.text)
-    pinned, ranked, chunks = [], [], []
+    pinned, ranked, chunks, own = [], [], [], []
     try:
         rows = memory.query_rows(q.text, cfg.CONTEXT_CANDIDATES + len(exclude_ids),
                                  owner, window=q.window)
@@ -311,18 +345,30 @@ def build_context(query, *, owner, memory, kb, facts=None, exclude_ids=(),
             chunks.append(c)
     except Exception as e:  # noqa: BLE001
         log.warning("knowledge retrieval failed: %s", e)
+    if project is not None:
+        own = project_candidates(q, project, owner=owner, memory=memory, facts=facts,
+                                 exclude_ids=exclude_ids, now=now)
     try:
         left = _fill(pinned + ranked, cfg.CONTEXT_CONVO_CHARS, cap=cfg.CONTEXT_HIT_CHARS)
         _fill(chunks, cfg.CONTEXT_KB_CHARS + left)
+        # After the ordinary fill, so what it keeps can't change; what it
+        # already shows isn't shown twice.
+        shown = {c.id for c in pinned + ranked if c.kept}
+        own = [c for c in own if c.id not in shown]
+        _fill(own, cfg.CONTEXT_PROJECT_CHARS, cap=cfg.CONTEXT_HIT_CHARS)
         if q.window is not None:
             ranked.sort(key=lambda c: c.meta.get("epoch") or 0)  # a stretch reads in order
-        pull.candidates = pinned + ranked + chunks
+            own.sort(key=lambda c: c.meta.get("epoch") or 0)
+        pull.candidates = pinned + own + ranked + chunks
         pull.block = render(pull.candidates)
     except Exception as e:  # noqa: BLE001
         log.warning("context assembly failed; answering without Background: %s", e)
         pull.block = ""
     pull.ms = (time.monotonic() - t0) * 1000
     log_pull(pull, len(pinned))
+    if project is not None:
+        log.info("project #%s added %d of %d candidates (%d chars)", project["id"],
+                 sum(c.kept for c in own), len(own), sum(c.chars for c in own if c.kept))
     return pull
 
 

@@ -541,6 +541,9 @@ central list or dispatch chain.
   A hard metadata filter on private collections, soft (fall back to
   unfiltered) on common; the active focus is folded into the system prompt so
   the model knows its retrieval is narrowed. Session state, never persisted.
+- **project focus** (`focus_project` in `working_state_tools.py`, Tom only):
+  work inside one open record, across sessions. Adds to retrieval rather than
+  narrowing it, which is why it can persist where `set_focus` can't. §7.
 - **model** (`model_tools.py`): `get_current_model` — a live read of which
   model and provider are answering, and as which persona. It resolves the same
   expression `converse()` routes the API call with, so it cannot disagree with
@@ -759,6 +762,26 @@ prompt-caching layout).
    overlayable field — a dashboard persona once replaced Linda's coded one,
    check-in instruction included. Every write logs one `records` line, which
    `scripts/audit_sessions.py` counts per persona per day.
+7. **Project focus** (#63) — one memory, with one record lifted out of it on
+   the user's say-so. A project is an open record; the `focus` table in
+   `working_state.db` holds which one, so it survives a restart and closing
+   the record ends it in the same transaction. A turn ending in focus stamps
+   `project` on its user message (like `ts`, stripped by `llm.cached`), and the
+   exchange and the facts it produces carry that label; a fact updated outside
+   focus keeps its label. `build_context` then runs the ordinary pull untouched
+   and adds `project_candidates`: the project's own records, searched with its
+   title in the words, filling `CONTEXT_PROJECT_CHARS` on top. In regular mode
+   labels are ignored. Three decisions came from replaying the 2026-11-02
+   Rooftop failure, where "did we save the draft?" found no trace of a save:
+   telling the rewrite model the project's name didn't help, because the recent
+   turns said "SPX"; a score boost on the shared ranking was either too weak or,
+   once strengthened, left 1 of 10 usual memories for a question about another
+   position; a separate budget does neither, so everything the ordinary pull
+   keeps is still kept. In focus, `update_record` with no id is refused rather
+   than creating or overwriting, since an id-less call is what made the
+   duplicate on 2026-11-01. Delegations can't change focus. Older conversations
+   have no label and stay reachable through the ordinary pull. Focus only helps
+   once the user asks for it: Tom never enters it himself.
 
 Every turn logs the rewrite (`query` logger), one `context pull` line and,
 with `CONTEXT_DEBUG_LOG`, the per-candidate table and the block itself
