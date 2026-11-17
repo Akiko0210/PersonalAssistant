@@ -44,7 +44,11 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
   padding: 20px 14px;
   display: flex; flex-direction: column; gap: 18px;
   position: sticky; top: 0; height: 100vh;
+  /* A short (non-fullscreen) window is shorter than the nav; without this the
+     lower links, Trading included, were clipped and unreachable. */
+  overflow-y: auto;
 }
+.sidebar > * { flex-shrink: 0; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px; }
 .brand-icon { font-size: 26px; }
 .brand-name { font-weight: 700; font-size: 17px; letter-spacing: 0.2px; }
