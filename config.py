@@ -271,7 +271,12 @@ WORKING_STATE_PATH = MEMORY_DIR / "working_state.db"
 WORKING_RECORD_CHARS = 8000   # ~2k tokens shown per turn, prompt-cached between writes; a campaign's rules plus ~10 journal entries fit (the plan note itself is 4,300)
 WORKING_BODY_CHARS = 2000     # a record's current state; refused above, so two campaigns' rules can never fill the block on their own — the full plan stays a note
 WORKING_ENTRY_CHARS = 500     # one dated happening; stops a single entry from eating the block
-WORKING_RECENT_ENTRIES = 2    # each open record's newest entries shown before the rest compete by date, so a busy campaign can't push a quiet one out
+WORKING_RECENT_ENTRIES = 2    # each open record's newest entries, claimed before any body (#67), so a "done" note can't be pushed out by unrelated write-ups
+# A record the turn clearly names gets what the block above left out (its
+# body, its older entries) in the Background — uncached, so the record
+# block's bytes and prompt cache don't change turn to turn (#67).
+WORKING_DETAIL_CHARS = 3000   # per turn, shared by at most two named records; a full body (≤2000) plus a few entries
+WORKING_MATCH_MIN = 0.5       # share of a title's distinctive words the turn must name (IDF-weighted, 2+ words); "calendar vs diagonal" names 20% of a campaign title and gets nothing
 
 # --- Text-to-speech (local: SAPI / NSSpeechSynthesizer / Piper) ---------------
 TTS_RATE = 175                # words per minute
