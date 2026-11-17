@@ -1,0 +1,10 @@
+{
+ "id": "SYN-WR-01",
+ "title": "A completed one-time adjustment must not read as pending (the completion note is the third-newest entry of an older record)",
+ "snapshot": "synthetic-overflow-v1",
+ "turns": ["Is the upside call calendar adjustment on the IRA 5800 calendar still pending?"],
+ "evidence": [{"id": "ira-done-entry", "contains": ["Done 10/27", "5870"]}],
+ "expected": "No. It was done on 10/27: two Nov 6/10 5870 call calendars were added for 19.40 debit and filled. It was a one-time adjustment, so it is used up and nothing is pending.",
+ "pass_if": ["says the upside adjustment is already done (on 10/27)", "does not present adding upside call calendars as a step still to take"],
+ "fail_if": ["says or implies it is still pending or waiting on a market move", "says it was not done", "says he can't tell, without giving the 10/27 completion"]
+}
