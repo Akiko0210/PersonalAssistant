@@ -31,6 +31,9 @@ def main(argv=None):
     c.add_argument("--repeats", type=int, default=3)
     c.add_argument("--no-model", action="store_true")
     c.add_argument("--no-judge", action="store_true")
+    g = sub.add_parser("regrade", help="re-judge saved answers after a ground-truth fix")
+    g.add_argument("report", help="report folder")
+    g.add_argument("cases", nargs="+")
     for cmd in (r, c):
         cmd.add_argument("--tom-model", help="answer with this Claude model instead of "
                          "Tom's configured one (or its stand-in)")
@@ -65,6 +68,9 @@ def main(argv=None):
     elif a.cmd == "run":
         print(json.dumps(runner.run_one(a.case, a.ref, "single", model=not a.no_model,
                                         judge=not a.no_judge), indent=1))
+    elif a.cmd == "regrade":
+        runner.regrade(a.report, a.cases)
+        print(f"report: {Path(a.report) / 'report.md'}")
     elif a.cmd == "compare":
         out = runner.compare(a.cases, a.baseline, a.candidate, a.repeats,
                              model=not a.no_model, judge=not a.no_judge)

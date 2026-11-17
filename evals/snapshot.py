@@ -14,10 +14,12 @@ vector segments (the legacy archive's lost index) are listed and stay
 missing. The point is to reproduce what Tom has, not a repaired version.
 """
 
+import ast
 import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -114,6 +116,34 @@ def _counts(root):
     return out
 
 
+_TOOL_LINE = re.compile(r"^(\S+ \S+),\d+ llm\s+INFO\s+tool_use "
+                        r"(update_record|add_entry|close_record) (\{.*\})$")
+_RECORD_LINE = re.compile(r"^\S+ \S+,\d+ records\s+INFO\s+record (\w+) #(\d+) (\w+) ")
+
+
+def record_writes(log_dir):
+    """Every working-record write the session logs saw, oldest first, as
+    {ts, owner, id, action, args}. A record's body is overwritten in place,
+    so these lines are the only history of what it said before; the replay
+    (evals/replay.py) rebuilds a body as of any moment from them. Each
+    tool_use line is paired with the `record <owner> #<id>` line the store
+    logs right after it, which names the persona the args don't."""
+    out, pending = [], None
+    for path in sorted(Path(log_dir).glob("session_*.log")):
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if m := _TOOL_LINE.match(line):
+                try:
+                    pending = (m.group(1), m.group(2), ast.literal_eval(m.group(3)))
+                except (ValueError, SyntaxError):
+                    pending = None
+            elif pending and (m := _RECORD_LINE.match(line)):
+                ts, tool, args = pending
+                out.append({"ts": ts, "owner": m.group(1), "id": int(m.group(2)),
+                            "action": m.group(3), "tool": tool, "args": args})
+                pending = None
+    return out
+
+
 def _files(root):
     return {p.relative_to(root).as_posix(): p
             for p in sorted(root.rglob("*")) if p.is_file() and p.name != "manifest.json"}
@@ -140,6 +170,11 @@ def capture(source_root, dest, *, note=""):
         if not changed:
             consistent = True
             break
+    writes = record_writes(source_root / "logs")
+    if writes:
+        out = dest / "logs" / "record_writes.jsonl"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("\n".join(json.dumps(w) for w in writes), encoding="utf-8")
     try:
         commit = subprocess.run(["git", "-C", str(source_root), "rev-parse", "HEAD"],
                                 capture_output=True, text=True).stdout.strip()
