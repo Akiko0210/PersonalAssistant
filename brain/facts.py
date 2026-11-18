@@ -115,7 +115,7 @@ class FactStore(HybridStore):
 
         def keep(meta):
             return self._is_current(meta) and (window is None or in_window(meta, window))
-        sources = [(cfg.agent_facts_collection(k), False, 1)
+        sources = [(cfg.agent_facts_collection(k), 1)
                    for k in agents.readable_owners(owner)]
         rows = self._collect(sources, query, n, where, keep)
         return rows._replace(

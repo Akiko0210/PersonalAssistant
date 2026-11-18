@@ -273,8 +273,7 @@ not whichever items happened to rank. The `recall` tool is there for digging
 deeper: a follow-up the Background raised, the exact exchanges behind a fact,
 or a stretch of time ("what did we talk about this morning around 9:40?",
 "yesterday") read back in order. Conversations from before the per-persona
-split live in a shared legacy archive every persona can read, labelled as
-such. Every turn is logged (`query`, `context pull` and `remembered exchange`
+split are kept in a shared archive on disk that no persona reads. Every turn is logged (`query`, `context pull` and `remembered exchange`
 lines in the session log, with the full candidate table when
 `CONTEXT_DEBUG_LOG` is on) so the thresholds can be tuned from what was
 actually retrieved; `scripts/rebuild_facts.py` regenerates a persona's facts

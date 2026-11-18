@@ -259,8 +259,6 @@ def render(candidates) -> str:
                 attrs += f' age="{label}"'
             if c.source == "fact" and c.meta.get("source_ids"):
                 attrs += f' from="{c.meta["source_ids"]}"'
-            if c.meta.get("legacy"):
-                attrs += ' note="summary from the shared archive, before per-persona memory"'
             if c.meta.get("tools"):
                 attrs += f' tools="{c.meta["tools"]}"'
         items.append(f"<item {attrs}>\n{text}\n</item>")

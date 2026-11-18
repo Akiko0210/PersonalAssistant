@@ -123,11 +123,11 @@ def main():
         sit at rank 1 with a perfect lexical score and deflate every other
         record's relative BM25. Hence strictly-before. The cut is on `epoch`,
         so a persona's seeded day-summaries (no epoch) drop out of its dense
-        list; the legacy archive has no epochs and is left whole."""
+        list."""
         now = None
 
         def _query_archive(self, name, query, rows, where=None):
-            if self.now is not None and name != cfg.MEMORY_COLLECTION:
+            if self.now is not None:
                 cut = {"epoch": {"$lt": self.now}}
                 where = {"$and": [where, cut]} if where else cut
             return super()._query_archive(name, query, rows, where)

@@ -129,17 +129,20 @@ class TestRetrieval(unittest.TestCase):
         rows = self.mem.query_rows("NVDA", caller="alice")
         self.assertEqual(len(rows.lexical), 1)
 
-    def test_a_persona_reads_only_its_own_and_the_legacy_archive(self):
+    def test_a_persona_reads_only_its_own_collection(self):
         self.mem.query_rows("anything", caller="tom")
-        self.assertEqual(set(self.cols),
-                         {cfg.agent_memory_collection("tom"), cfg.MEMORY_COLLECTION})
+        self.assertEqual(set(self.cols), {cfg.agent_memory_collection("tom")})
 
-    def test_legacy_rows_are_labelled_in_the_tool_result(self):
-        self.cols[cfg.MEMORY_COLLECTION] = FakeCol(
-            [("archived summary text", {"date": "2026-07-25"}, 0.3)])
-        out = self.mem.search("summary", caller="alice")
-        self.assertIn("[2026-07-25 (from the shared archive", out)
-        self.assertIn("archived summary text", out)
+    def test_the_shared_archive_is_never_read_not_even_as_a_fallback(self):
+        # As for a brand-new persona (#74): its own memory is empty, the
+        # pre-isolation archive holds a perfect match — still nothing back.
+        archive = FakeCol([("SPX butterfly summary", {"date": "2026-07-30"}, 0.1)])
+        self.cols["conversations"] = archive
+        rows = self.mem.query_rows("SPX butterfly", caller="tom")
+        self.assertEqual((rows.dense, rows.lexical), ([], []))
+        self.assertNotIn("SPX butterfly summary",
+                         self.mem.search("SPX butterfly", caller="tom"))
+        self.assertEqual(archive.queries, 0)
 
     def test_fetch_reads_exchanges_by_id_oldest_first(self):
         a = user("first thing", ts="2026-09-18T09:24:00-07:00")
@@ -201,8 +204,8 @@ class TestArchiveFailureIsHonest(unittest.TestCase):
     def test_it_does_not_retry_forever(self):
         self._break_chroma()
         self.mem.search("anything", caller="alice")
-        # Two collections (own + legacy), two attempts each.
-        self.assertEqual(self.ensure_calls, 4)
+        # One collection (its own), two attempts.
+        self.assertEqual(self.ensure_calls, 2)
 
 
 class TestCompanionKeys(unittest.TestCase):
