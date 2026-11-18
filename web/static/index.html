@@ -27,6 +27,9 @@
       <span class="mute-state">Microphone</span>
       <span class="mute-action">checking…</span>
     </button>
+    <!-- Shown while a persona waits on the user's answer (a folder question),
+         on every page: a typed reply's destination must never be a guess. -->
+    <a class="asking-link" id="asking-link" href="#/conversation" aria-live="polite" hidden></a>
     <div class="nav-links">
       <a href="#/overview" data-view="overview"><span class="nav-ico">◧</span>Overview</a>
       <a href="#/agents" data-view="agents"><span class="nav-ico">🎭</span>Agents</a>

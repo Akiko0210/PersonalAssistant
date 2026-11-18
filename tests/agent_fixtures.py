@@ -116,6 +116,8 @@ def make_agent(*, heard=(), utterances=None, poll_frames=None, await_seq=None,
     agent.stt = FakeSTT(heard)
     agent.llm = FakeLLM()
     agent._speaking_voice = ""
+    agent._speaking_name = None
+    agent.asking = None
     # A pending resume as _save_interrupted leaves it: the tail is the whole
     # reply, nothing heard yet.
     agent._interrupted_reply = interrupted_remaining

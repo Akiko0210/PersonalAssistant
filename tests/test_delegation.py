@@ -307,13 +307,19 @@ class TestInterjectionDelivery(unittest.TestCase):
         self.assertIn("no TOTAL row", shell.notes[0][1])
         self.assertIn("wasn't imported", shell.spoken[0][0])
 
-    def test_deferred_while_muted(self):
+    def test_delivered_while_muted(self):
+        # Mute stops listening, not speaking: a muted user typing on the
+        # dashboard never heard Bob's prepared note (2026-11-17 16:50, #76).
         shell = _Shell()
         shell.audio.muted.set()
-        shell.interjections.put({"agent": "bob", "text": "x", "note": None})
+        note = {"title": "Two Working Plans", "category": "Trading"}
+        shell.interjections.put({"agent": "bob", "text": "", "note": note,
+                                 "excerpt": None})
+        shell.interjections.put({"agent": "bob", "text": "done", "note": None})
         Agent._deliver_interjections(shell)
-        self.assertEqual(shell.spoken, [])
-        self.assertFalse(shell.interjections.empty())  # still queued
+        self.assertEqual(shell.saved, [(note, "Bob", None)])
+        self.assertIn("Bob came back — done", [t for t, _ in shell.spoken])
+        self.assertTrue(shell.interjections.empty())
 
     def test_deferred_while_user_speech_is_buffered(self):
         shell = _Shell()
@@ -413,3 +419,52 @@ class TestDelegationSnapshot(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFolderQuestionAnswer(unittest.TestCase):
+    """The folder question (Agent._ask) takes a typed answer too: a muted user
+    can only type, and a background note now reaches them (#76)."""
+
+    def ask(self, script):
+        """Run _ask with collect_utterance replaced by `script`, a list of
+        callables run one per wait (each may queue a message or set the wake);
+        every wait ends with no speech. Returns (answer, asking seen)."""
+        from tests.agent_fixtures import make_agent
+        agent = make_agent()
+        agent._speaking_name = "Bob"
+        seen, steps = [], iter(script)
+
+        def collect(interrupt=None, endpoint_ms=None, wake=None):
+            seen.append(agent.asking)
+            next(steps, lambda a: None)(agent)
+            return None
+        agent.audio.collect_utterance = collect
+        answer = Agent._ask(agent, "Which folder, Trading or Ideas?")
+        self.assertIsNone(agent.asking)  # cleared once answered
+        return answer, seen, agent
+
+    @staticmethod
+    def typed(text):
+        def step(agent):
+            agent.typed.put((text, "iratom"))
+            agent.interject.set()
+        return step
+
+    def test_a_typed_message_is_the_answer(self):
+        answer, seen, _ = self.ask([self.typed("Trading")])
+        self.assertEqual(answer, "Trading")
+        self.assertEqual(seen[0], {"name": "Bob",
+                                   "question": "Which folder, Trading or Ideas?"})
+
+    def test_a_background_result_does_not_end_the_question(self):
+        def result_lands(agent):
+            agent.interjections.put({"agent": "alice", "text": "x", "note": None})
+            agent.interject.set()
+        answer, seen, agent = self.ask([result_lands, self.typed("Ideas")])
+        self.assertEqual(answer, "Ideas")
+        self.assertEqual(len(seen), 2)               # it kept waiting
+        self.assertEqual(agent.interjections.qsize(), 1)  # spoken at the next gap
+
+    def test_no_answer_is_empty_as_before(self):
+        answer, _, _ = self.ask([])
+        self.assertEqual(answer, "")
