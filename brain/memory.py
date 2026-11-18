@@ -15,10 +15,11 @@ different question that top-k over exchanges answers badly; brain/facts.py
 derives it from these records and can be rebuilt from them. Both stores read
 through HybridStore below.
 
-Isolation is structural: a caller reads its own collection (plus registry
-`reads` grants) and the pre-isolation shared `conversations` archive, whose
-summary records predate per-agent memory and are labelled as legacy. There is
-no parameter through which a persona can name another's collection.
+Isolation is structural: a caller reads its own collection plus registry
+`reads` grants, and nothing else. There is no parameter through which a
+persona can name another's collection. The pre-isolation shared
+`conversations` collection is kept on disk and read by no one (#74): a fresh
+assistant once opened on July's summaries as if they were its own past.
 """
 
 import hashlib
@@ -102,7 +103,7 @@ def _reply_half(doc) -> str:
 def _exchange_hit(h):
     """A companion row read back as its exchange: the parent's id (what the
     fusion and exclude_ids key on) and the whole text (what the model reads).
-    Parents and legacy summaries pass through untouched."""
+    Parents and seeded summaries pass through untouched."""
     parent = h.meta.get("exchange")
     if not parent:
         return h
@@ -264,14 +265,14 @@ class HybridStore:
             return {}
 
     def _collect(self, sources, query: str, n: int, where=None, keep=None) -> Rows:
-        """Dense and lexical hits over `sources` — [(collection name, legacy?,
-        dense rows per `n`)] — merged into one Rows. One embedding space, so
+        """Dense and lexical hits over `sources` — [(collection name, dense
+        rows per `n`)] — merged into one Rows. One embedding space, so
         dense distances merge honestly; BM25 scores do not merge across
         collections, which is why the fusion normalises them per turn. Never
         raises: a broken collection reports through `error` and the others
         still answer."""
         dense, lexical, total, error = [], [], 0, None
-        for name, legacy, per in sources:
+        for name, per in sources:
             rows, count, err = self._query_archive(name, query, per * n, where)
             if count is None:
                 error = error or err
@@ -287,9 +288,6 @@ class HybridStore:
             vecs = self._vectors(name, {h.id for h in rows + lex})
             rows = [h._replace(vec=vecs.get(h.id)) for h in rows]
             lex = [h._replace(vec=vecs.get(h.id)) for h in lex]
-            if legacy:
-                rows = [h._replace(meta={**h.meta, "legacy": True}) for h in rows]
-                lex = [h._replace(meta={**h.meta, "legacy": True}) for h in lex]
             dense.extend(rows)
             lexical.extend(lex)
         dense.sort(key=lambda h: h.score)
@@ -479,9 +477,8 @@ class ConversationMemory(HybridStore):
     def query_rows(self, query: str, n: int = None, caller=None, *,
                    window=None) -> Rows:
         """Dense and lexical hits from every archive `caller` may read: its
-        own conversations_<key> (plus grants) and the legacy shared
-        collection, whose rows are tagged legacy so the reader knows they
-        predate per-agent memory. `n` counts exchanges per collection and
+        own conversations_<key> plus grants — never the shared pre-isolation
+        archive, not even as a fallback for an empty memory. `n` counts exchanges per collection and
         retriever; a persona's collection holds two key records per exchange,
         so it is read twice as deep to keep `n` meaning exchanges once they
         collapse. `window` — (lo, hi) epoch seconds — restricts both lists to
@@ -489,9 +486,8 @@ class ConversationMemory(HybridStore):
         n = n or cfg.MEMORY_SEARCH_RESULTS
         where = time_where(window) if window is not None else None
         keep = (lambda m: in_window(m, window)) if window is not None else None
-        sources = [(cfg.agent_memory_collection(k), False, 2)
+        sources = [(cfg.agent_memory_collection(k), 2)
                    for k in agents.readable_owners(caller)]
-        sources.append((cfg.MEMORY_COLLECTION, True, 1))
         return self._collect(sources, query, n, where, keep)
 
     def rank(self, query: str, *, caller, window=None, exclude_ids=(), now=None):
@@ -533,9 +529,7 @@ class ConversationMemory(HybridStore):
                 shown.sort(key=lambda c: c.meta.get("epoch") or 0)
             out = []
             for c in shown:
-                tag = (" (from the shared archive, before per-agent memory)"
-                       if c.meta.get("legacy") else "")
-                out.append(f"[{context.when(c.meta)}{tag}] "
+                out.append(f"[{context.when(c.meta)}] "
                            f"{' '.join(c.doc.split())[:800]}")
             order = " (oldest first)" if window is not None else ""
             text = f"From past conversations{span}{order}:\n" + "\n\n".join(out)

@@ -526,8 +526,8 @@ central list or dispatch chain.
   `search_discord_messages`, `get_recent_trades`.
 - **time** (`time_tools.py`): `get_current_time`.
 - **memory** (`memory_tools.py`): `recall` — the one tool past the Background:
-  the caller's OWN exchange index (plus the pre-isolation shared archive,
-  labelled; never another persona's) by topic, by time window, or by exchange
+  the caller's OWN exchange index (never another persona's, never the
+  pre-isolation shared archive) by topic, by time window, or by exchange
   id (a fact's `from`), plus the reference material the caller may read
   (common + private), cited. §7.
 - **working record** (`working_state_tools.py`, Tom/Linda/Alice):
@@ -704,8 +704,9 @@ prompt-caching layout).
    turn: a failure or a `QUERY_TIMEOUT_S` timeout retrieves on the raw words.
    Records whose stamp is a flush time rather than a speech time (the old
    staging file's) are marked `approx`, render as "on or before …", and never
-   satisfy a window. The pre-isolation `conversations` collection stays
-   readable by all as legacy summaries.
+   satisfy a window. The pre-isolation `conversations` collection stays on
+   disk, untouched, and no persona reads it, not even as a fallback (#74): a
+   brand-new assistant once opened on July's summaries as its own past.
 3. **Fact store** (`brain/facts.py`, `facts_<key>`) — what is TRUE NOW,
    derived from the exchanges. Retrieval over exchanges answers "what was
    said"; it answers "what is the current state of X" badly by construction,
@@ -799,7 +800,7 @@ data/conversation_history/<key>.json  each persona's transcript (sanitized on ev
 data/memory/chroma/        Chroma index: notes, knowledge, per-agent knowledge_<key>,
                            conversations_<key> (two key records per exchange) and
                            facts_<key> (derived from them; rebuildable), plus the
-                           legacy shared conversations archive
+                           pre-isolation shared conversations archive (kept, never read)
 data/memory/working_state.db   each persona's working record (campaigns, notebook, list)
 data/settings/             dashboard edits: agents.json, config_overrides.json,
                            and agent_state.json (the active persona)

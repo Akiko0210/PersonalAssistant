@@ -206,9 +206,8 @@ KB_MEDIA_MODEL = "small.en"
 # --- Conversation memory --------------------------------------------------------
 # Each persona's exchanges live in conversations_<key> (agent_memory_collection
 # above): one record per user↔assistant exchange, written the moment its turn
-# ends. The pre-isolation shared collection is read-only legacy — its summary
-# records are readable by every persona and labelled as such.
-MEMORY_COLLECTION = "conversations"  # legacy shared archive, read-only
+# ends. The pre-isolation shared "conversations" collection stays on disk,
+# untouched, and no persona reads it (#74).
 # The "look deeper" tool must never look shallower than the Background it goes
 # beyond: it returned 3 while the block weighed 12 candidates (2026-09-17).
 MEMORY_SEARCH_RESULTS = 8            # exchanges the recall tool returns
