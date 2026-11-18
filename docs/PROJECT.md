@@ -574,7 +574,15 @@ central list or dispatch chain.
 - **agents** (`agent_tools.py`): `switch_agent` — hand the user over to another
   persona (deferred via `pending_switch`, so the goodbye finishes in the old
   voice); `ask_agent` — delegate a task to another persona in the background
-  (deferred via `pending_delegations`; result spoken as an interjection — §4).
+  (deferred via `pending_delegations`; result spoken as an interjection — §4);
+  `create_agent` (Tom only, #72) — a new persona under a new name, a copy of
+  the caller with a fresh context: its coded entry is the caller's coded
+  parent's (tools, brokers and record rules follow Tom's code), it starts with
+  the caller's dashboard edits, and every store, thread and record is keyed by
+  the new key, so all start empty. Listed in
+  `data/settings/created_agents.json`, apart from `agents.json` so a dashboard
+  reset can't delete one; refused unless the user's message says the name.
+  No delete yet, by request.
 - **trading** (`trading_tools.py`): `trading_status`, `get_quote`,
   `list_expirations`, `build_strategy`, `adjust_leg`, `set_order_terms`,
   `price_order` (live quotes + dxFeed greeks per leg and net; no broker

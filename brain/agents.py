@@ -10,9 +10,12 @@ persona may be granted read access to a specialist's private stores).
 The registry below is the single source of truth: adding a fourth agent is one
 dict entry. The dashboard overlays user edits from data/settings/agents.json
 onto these defaults at startup (load_agents), mirroring how categories.py
-overlays data/notes/categories.json.
+overlays data/notes/categories.json. Assistants the user creates by voice
+(create_agent) are clones of a coded entry under a new name, listed in
+data/settings/created_agents.json.
 
-Pure data + pure functions — no I/O beyond load_agents, no anthropic imports —
+Pure data + pure functions — no I/O beyond the settings files (load_agents,
+defaults, create_agent), no anthropic imports —
 so everything here is trivially testable.
 """
 
@@ -323,6 +326,9 @@ AGENTS = {
                   # Gmail (broker/market mail); send gated as on Alice.
                   "search_email_threads", "get_email_thread",
                   "create_email_draft", "send_email",
+                  # A fresh-context copy of Tom under a new name (#72); the
+                  # copies carry it too, since they carry this whole set.
+                  "create_agent",
                   *RECORD_TOOLS},
         "reads": (),
         "brokers": ("schwab",),
@@ -452,8 +458,18 @@ _DEFAULTS = copy.deepcopy(AGENTS)
 
 
 def defaults():
-    """A deep copy of the coded registry defaults (dashboard 'reset' view)."""
-    return copy.deepcopy(_DEFAULTS)
+    """The registry before dashboard edits — coded entries plus created
+    clones — as a fresh copy (dashboard 'reset' view)."""
+    from lib.atomic_io import read_json  # here, not at top: keeps this module pure-data
+    out = copy.deepcopy(_DEFAULTS)
+    for key, spec in read_json(cfg.CREATED_AGENTS_PATH, {}, expect=dict).items():
+        parent = _DEFAULTS.get(spec.get("parent")) if isinstance(spec, dict) else None
+        if parent and key not in out:
+            # The parent's CODE entry, not a snapshot: tools, brokers and
+            # record rules stay Tom's, so a fix to Tom reaches his copies.
+            out[key] = {**copy.deepcopy(parent), "name": spec.get("name") or key,
+                        "aliases": (key,), "parent": spec["parent"]}
+    return out
 
 
 def registry_model(key):
@@ -492,8 +508,9 @@ def load_agents():
     defaults. Idempotent (defaults are restored first); a missing/corrupt
     file or bad field is skipped, so the overlay can never break startup.
     Only _OVERLAYABLE fields apply — tool allowlists stay code."""
-    for key, agent in _DEFAULTS.items():
-        AGENTS[key] = copy.deepcopy(agent)
+    # Cleared and refilled in place: every module holds this same dict.
+    AGENTS.clear()
+    AGENTS.update(defaults())
     from lib.atomic_io import read_json  # here, not at top: keeps this module pure-data
     data = read_json(cfg.AGENTS_PATH, {}, expect=dict)
     for key, edits in data.items():
@@ -524,6 +541,36 @@ def load_agents():
             if field == "tts_voice" and value is not None:
                 value = str(value).strip() or None
             agent[field] = value
+
+
+def create_agent(name, creator):
+    """Create assistant `name` as a copy of `creator` with a fresh context;
+    returns its key. Raises ValueError with a speakable reason.
+
+    "The exact same settings": the copy starts with the creator's dashboard
+    edits as its own, on top of the creator's coded entry. Nothing else
+    crosses over — history, memory, facts and the working record are all
+    keyed by the new key, so they start empty; that is the fresh context."""
+    from lib.atomic_io import read_json, write_json_atomic
+    name = (name or "").strip()
+    if not re.fullmatch(r"[A-Za-z]{2,20}", name):
+        raise ValueError("a new assistant's name must be one word, letters only.")
+    key = name.lower()
+    taken = resolve(key)
+    if taken:
+        raise ValueError(f"{name} already answers for {AGENTS[taken]['name']}.")
+    overlay = read_json(cfg.AGENTS_PATH, {}, expect=dict)
+    edits = overlay.get(creator)
+    if isinstance(edits, dict) and set(edits) - {"aliases"}:
+        overlay[key] = {f: v for f, v in edits.items() if f != "aliases"}
+        write_json_atomic(cfg.AGENTS_PATH, overlay)
+    created = read_json(cfg.CREATED_AGENTS_PATH, {}, expect=dict)
+    # A copy of a copy is a copy of the coded original.
+    created[key] = {"name": name[0].upper() + name[1:],
+                    "parent": AGENTS[creator].get("parent", creator)}
+    write_json_atomic(cfg.CREATED_AGENTS_PATH, created)
+    load_agents()
+    return key
 
 
 def alias_map():
