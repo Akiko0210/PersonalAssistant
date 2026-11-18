@@ -531,8 +531,8 @@ class Claude:
         # definition; it could otherwise satisfy the review gate by talking to
         # itself. Read-only trading tools stay available.
         tools = api_tools(include=hat["tools"] - {
-            "switch_agent", "ask_agent", "set_conversation_model",
-            "submit_order", "cancel_order"})
+            "switch_agent", "ask_agent", "create_agent",
+            "set_conversation_model", "submit_order", "cancel_order"})
         messages = [{"role": "user", "content": task}]
         log.info("delegated task -> %s (%s)", key, model)
         resp = self._tool_loop(

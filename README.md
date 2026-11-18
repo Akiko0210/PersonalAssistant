@@ -251,6 +251,13 @@ offer to ask her. Accept, and Alice answers from her own memory as a spoken
 interjection. Each thread's transcript is kept on disk for the dashboard
 (`HISTORY_MAX_MESSAGES` in `config.py`).
 
+**A fresh copy of Tom.** Say "Tom, create an agent called Noah" and Noah
+appears: Tom's role, tools, accounts, model and voice, with an empty thread
+and no memory, like starting a new session. Say "Noah, …" or "switch to Noah"
+to switch over; Noah keeps a separate conversation from then on and survives a
+restart. The name must be one word that no persona already answers to. There
+is no delete yet.
+
 **What the model actually sees each turn is chosen by relevance, not by a
 window.** Every user/assistant exchange is embedded into that persona's own
 `conversations_<name>` collection in Chroma as the turn ends, and — after the

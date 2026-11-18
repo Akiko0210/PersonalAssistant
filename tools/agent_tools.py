@@ -14,7 +14,10 @@ folder question then straddled turn boundaries — where it once swallowed a
 minutes (session_2026-07-31.log, 11:31-11:48). A delegated task never moves
 the user, so there is nothing to bounce back from.
 
-Both are deferred via the ToolContext (pending_switch / pending_delegations),
+A third, create_agent, makes a new persona: a fresh-context copy of the
+caller under a new name (agents.create_agent).
+
+Both moves are deferred via the ToolContext (pending_switch / pending_delegations),
 same pattern as save_conversation_note -> pending_note: the agent acts after
 the current reply is spoken, so the acknowledgement comes out in the current
 voice and the machinery never runs mid-tool-loop.
@@ -24,6 +27,8 @@ The regex router in agents.match_address catches explicit addressing ("Bob,
 put Bob on?") — the active model recognises the intent and calls it, which
 costs nothing extra since that model call was already happening.
 """
+
+import re
 
 from brain import agents
 from tools import tool
@@ -46,8 +51,9 @@ from tools import tool
         "properties": {
             "agent": {
                 "type": "string",
-                "enum": sorted(agents.AGENTS),
-                "description": "Which assistant to hand the conversation to.",
+                # No enum: the schema is built at import, before load_agents
+                # adds the assistants the user created (create_agent).
+                "description": "Which assistant to hand the conversation to, by name.",
             },
             "forward": {
                 "type": "string",
@@ -92,8 +98,7 @@ def switch_agent(ctx, args):
         "properties": {
             "agent": {
                 "type": "string",
-                "enum": sorted(agents.AGENTS),
-                "description": "Which assistant does the task.",
+                "description": "Which assistant does the task, by name.",
             },
             "task": {
                 "type": "string",
@@ -125,3 +130,41 @@ def ask_agent(ctx, args):
     return (f"Queued for {name}, who will work on it in the background and "
             f"speak up when done. Tell the user briefly that you've asked "
             f"{name} and that you can keep talking meanwhile.")
+
+
+@tool({
+    "name": "create_agent",
+    "description": (
+        "Create a new assistant: a copy of you — same role, instructions, "
+        "tools, accounts and voice — under a new name, starting with a fresh "
+        "conversation and none of your memory. Use it ONLY when the user's "
+        "current message asks for a new assistant by name ('create an agent "
+        "called Noah'); the call is refused otherwise. Assistants can't be "
+        "deleted, so never create one the user didn't ask for."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "The new assistant's name: one word, as the user said it.",
+            },
+        },
+        "required": ["name"],
+    },
+})
+def create_agent(ctx, args):
+    name = (args.get("name") or "").strip()
+    # The user_text gate, as on ask_agent: creation is permanent, so it
+    # happens only when the user's own words carry the name.
+    if not name or not re.search(rf"\b{re.escape(name)}\b", ctx.user_text or "", re.I):
+        return ("Not created: the user didn't say that name. Ask them what to "
+                "call the new assistant.")
+    try:
+        key = agents.create_agent(name, ctx.active_agent)
+    except ValueError as e:
+        return f"Not created: {e} Ask the user for another name."
+    new = agents.AGENTS[key]["name"]
+    return (f"Created {new}, a copy of you with a fresh conversation. Tell the "
+            f"user in one line that {new} is ready and that saying '{new}' or "
+            f"'switch to {new}' brings them over.")

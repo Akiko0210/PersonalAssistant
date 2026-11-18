@@ -40,6 +40,10 @@ CATEGORIES_PATH = NOTES_DIR / "categories.json"
 # and overlaid on the built-in defaults at startup (see agents.load_agents) —
 # the same pattern as categories.json above.
 AGENTS_PATH = SETTINGS_DIR / "agents.json"
+# Assistants created by voice (create_agent): {key: {name, parent}}. Kept apart
+# from agents.json so the dashboard's "reset to defaults" — which drops a
+# persona's agents.json entry — can never delete an assistant.
+CREATED_AGENTS_PATH = SETTINGS_DIR / "created_agents.json"
 # Which persona is currently active, written by llm.Claude.switch_to on every
 # switch so the dashboard can show who the user is talking to. Read-only
 # telemetry — nothing in the agent reads it back.
