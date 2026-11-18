@@ -313,7 +313,15 @@ save is **delegated**: Tom hands the task to Bob, who works in the background
 while your conversation continues uninterrupted. When the note is ready, Bob
 speaks up in his own voice at the next pause. If the request named a folder,
 he files it there and says so; otherwise he asks which folder. You never leave
-the conversation you were in.
+the conversation you were in. This works while muted too: muting stops the
+agent listening, not speaking.
+
+**Answering a folder question by typing.** While Bob (or whoever is saving)
+waits for your folder answer, the dashboard says so in words: a box right
+above the Conversation page's message box reads "Bob is asking: … Type your
+answer here, or say it.", and a link in the sidebar points there from any
+page. Your next typed message is that answer, not a new message to the
+assistant you were talking to.
 
 A persona contacts another one **only when you name them** in that message.
 Asked "do you remember…", it answers from its own working record and

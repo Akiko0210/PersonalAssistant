@@ -115,6 +115,20 @@ code, pre { font-family: ui-monospace, Consolas, "Cascadia Mono", monospace; }
 .send-btn:hover:not(:disabled) { filter: brightness(1.12); }
 .send-btn:disabled { opacity: .45; cursor: default; }
 .send-btn:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+/* A persona waiting on the user's answer: the one place a typed message is
+   NOT a new turn, so it is said in words, big, right above the box (#76). */
+.asking-note {
+  flex: 1 0 100%; font-size: 18px; font-weight: 700; line-height: 1.4;
+  padding: 12px 14px; border-radius: 10px;
+  background: var(--accent-soft); border: 1.5px solid var(--accent); color: var(--ink);
+}
+.asking-link {
+  display: block; margin: 8px 4px 0; padding: 12px 14px; min-height: 46px;
+  font-size: 17px; font-weight: 700; line-height: 1.35; text-decoration: none;
+  background: var(--accent); color: #fff; border-radius: 10px;
+}
+.asking-link:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+.asking-link[hidden] { display: none; }  /* display: block above beats the attribute */
 .send-note { flex: 1 0 100%; font-size: 15px; min-height: 20px; line-height: 1.4; }
 .send-note.ok { color: var(--good); font-weight: 650; }
 .send-note.err { color: var(--critical); font-weight: 650; }

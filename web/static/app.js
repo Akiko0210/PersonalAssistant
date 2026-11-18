@@ -150,10 +150,25 @@ function renderMute() {
           { on: micState.muted, live: true });
 }
 
+/* Who is waiting on the user's answer (the agent's folder question), or
+   null. The question is spoken once; for a user who can't scan the screen
+   the answer's destination is spelled out in words, in the sidebar on every
+   page and again right above the message box (#76). */
+function asker() {
+  return micState && micState.asking ? (micState.asking.name || "The agent") : null;
+}
+
+function renderAsking() {
+  const link = $("#asking-link"), who = asker();
+  link.hidden = !who;
+  link.textContent = who ? `${who} is asking you something — answer on the Conversation page` : "";
+}
+
 async function pollControl() {
   try { micState = await api("/api/control"); }
   catch { micState = null; }
   renderMute();
+  renderAsking();
   renderComposer();
 }
 
@@ -169,10 +184,15 @@ function renderComposer() {
   // the same distinction the server's two 409s draw.
   const live = !!(micState && typeof micState.muted === "boolean");
   input.disabled = btn.disabled = !live;
+  const who = live ? asker() : null, ask = $("#chat-asking");
+  ask.hidden = !who;
+  ask.textContent = who
+    ? `${who} is asking: ${micState.asking.question} Type your answer here, or say it.` : "";
   // The availability goes in the placeholder, not the status line — that line
   // belongs to the last send, and the two would fight over it.
   input.placeholder =
-    live ? "Type to the agent…"
+    who ? `Your answer to ${who}…`
+    : live ? "Type to the agent…"
       : micState && micState.agent_running
         ? "Chat lives on the agent's own dashboard — open port 8765"
         : "The agent isn't running — start it to chat";
@@ -822,6 +842,7 @@ views.conversation = async function () {
     `<div class="agent-tabs">${agentBtns}</div>
      <div class="chat">${msgs || '<div class="card empty">No conversation history yet</div>'}</div>
      <form class="composer" id="chat-form">
+       <div class="asking-note" id="chat-asking" role="status" hidden></div>
        <input type="text" id="chat-text" aria-label="Message to the agent"
               placeholder="Type to the agent…" autocomplete="off" disabled>
        <button class="send-btn" id="chat-send" type="submit" disabled>Send</button>
@@ -845,6 +866,7 @@ views.conversation = async function () {
     ev.preventDefault();
     const input = $("#chat-text"), text = input.value.trim();
     if (!text || $("#chat-send").disabled) return;
+    const who = asker();  // whom this message answers, read before it goes
     try {
       // Send the viewed persona along, or a message typed into Bob's thread
       // is answered by whoever happens to be active.
@@ -852,6 +874,12 @@ views.conversation = async function () {
                     convoAgent ? { text, agent: convoAgent } : { text });
       input.value = "";
       note.className = "send-note ok";
+      if (who) {
+        // An answer to a question, not a turn: it goes to the asker and is
+        // never a message in this thread, so no pending bubble waits on it.
+        note.textContent = `Sent — that answers ${who}.`;
+        return;
+      }
       note.textContent = "Sent — the agent answers aloud.";
       // Show it in the transcript straight away. It isn't in history yet (the
       // agent writes that only once it has answered), so it's marked pending

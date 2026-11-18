@@ -489,7 +489,10 @@ MAX_MESSAGE_CHARS = 4000  # sanity bound; a "message" is a question, not a docum
 
 
 def _control_state(agent, **extra):
-    return {"muted": agent.audio.muted.is_set(), "mode": agent.status, **extra}
+    # `asking`: who waits on the user's answer, and the question — shown by
+    # the message box, so a typed reply's destination is never a guess (#76).
+    return {"muted": agent.audio.muted.is_set(), "mode": agent.status,
+            "asking": agent.asking, **extra}
 
 
 def _ctl_mute(agent, payload):
@@ -531,7 +534,8 @@ def api_control(agent):
     the buttons rather than guessing at a microphone it can't see."""
     if agent is not None:
         return {"agent_running": True, **_control_state(agent)}
-    return {"agent_running": agent_running(), "muted": None, "mode": None}
+    return {"agent_running": agent_running(), "muted": None, "mode": None,
+            "asking": None}
 
 
 def api_display(agent):

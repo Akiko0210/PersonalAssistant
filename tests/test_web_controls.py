@@ -35,7 +35,7 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(agent.audio.muted.is_set())
         self.assertEqual(body, {"ok": True, "muted": True,
-                                "mode": "conversation_mode"})
+                                "mode": "conversation_mode", "asking": None})
 
     def test_mute_rejects_non_boolean_payloads(self):
         agent = make_control_agent()
@@ -87,11 +87,19 @@ class DispatchTests(unittest.TestCase):
         agent.audio.muted.set()
         self.assertEqual(dashboard.api_control(agent),
                          {"agent_running": True, "muted": True,
-                          "mode": "conversation_mode"})
+                          "mode": "conversation_mode", "asking": None})
         with mock.patch.object(dashboard, "agent_running", return_value=False):
             self.assertEqual(dashboard.api_control(None),
                              {"agent_running": False, "muted": None,
-                              "mode": None})
+                              "mode": None, "asking": None})
+
+    def test_state_says_who_is_asking(self):
+        # The page puts this beside the message box (#76): the user must know
+        # their next message answers Bob, not the persona they were with.
+        agent = make_control_agent()
+        agent.asking = {"name": "Bob", "question": "Which folder?"}
+        self.assertEqual(dashboard.api_control(agent)["asking"],
+                         {"name": "Bob", "question": "Which folder?"})
 
 
 class TypedMessageTests(unittest.TestCase):

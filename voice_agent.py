@@ -123,6 +123,7 @@ class Agent:
         # Which voice the reply is in, read on the main thread and cached so the
         # button thread can pick a contrasting one without touching COM.
         self._speaking_voice = self.tts.current_voice()
+        self._speaking_name = None  # whose voice that is (_use_voice)
         self.store = NoteStore()
         # Absorb any newly added trading PDFs before we start listening. This is an
         # idempotent scan: unchanged files are skipped by content hash without
@@ -195,6 +196,11 @@ class Agent:
         # (text, target-persona-or-None). Drained one per turn at utterance
         # boundaries, same as interjections.
         self.typed: "queue.Queue[tuple]" = queue.Queue()
+        # {"name", "question"} while _ask waits for the user's answer, else
+        # None: the dashboard shows who is asking, next to the box a typed
+        # answer goes in (#76). Replaced whole, never edited — handler
+        # threads only read it.
+        self.asking = None
 
     # --- command plumbing ----------------------------------------------------
     def _push(self, cmd):
@@ -566,6 +572,7 @@ class Agent:
         the reply it was speaking over."""
         self.tts.set_voice(hat["tts_voice"], hat["tts_rate"])
         self._speaking_voice = self.tts.current_voice()
+        self._speaking_name = hat["name"]
 
     def _switch_agent(self, key):
         """Flip the active persona everywhere it shows: model/tools/prompt
@@ -625,9 +632,12 @@ class Agent:
         """Speak queued background-task results. Called only at utterance
         boundaries — after a reply finishes, or when a finished worker ends
         the idle wait — and it stands down whenever the user already holds
-        the floor: buffered speech or a muted microphone leaves the queue
-        untouched for the next boundary. A voice barge-in mid-delivery does
-        the same: the user took the floor, the rest of the queue waits."""
+        the floor: buffered speech leaves the queue untouched for the next
+        boundary. A voice barge-in mid-delivery does the same: the user took
+        the floor, the rest of the queue waits. Mute is no reason to wait: it
+        stops the agent listening, not speaking. A muted user typing on the
+        dashboard hears every reply, yet Bob's prepared note sat unsaid all
+        session behind this check (session_2026-11-17.log 16:50, #76)."""
         # The wake event is SHARED with the typed-message queue, so clearing
         # it here must not swallow a message that arrived while the agent was
         # speaking. Re-arm when one is still waiting: without this, a message
@@ -637,7 +647,7 @@ class Agent:
         self.interject.clear()
         if not self.typed.empty():
             self.interject.set()
-        if self.audio.muted.is_set() or self.audio.has_buffered_speech():
+        if self.audio.has_buffered_speech():
             return
         while True:
             try:
@@ -1104,16 +1114,37 @@ class Agent:
         return final
 
     def _ask(self, prompt: str, endpoint_ms: int = None) -> str:
-        """Speak a prompt, capture one spoken reply, and return its transcript.
-        Interruptible by voice (start answering and your speech becomes the reply),
-        but NOT by action commands — mute / note-taking shouldn't disrupt the
-        folder-destination question, so commands=False keeps it playing through."""
-        interrupted = self.say(prompt, commands=False, save_resume=False)
-        if not interrupted:
-            self.audio.flush()
-        utt = self.audio.collect_utterance(
-            interrupt=self.interrupt, endpoint_ms=endpoint_ms or cfg.CONVO_ENDPOINT_MS
-        )
+        """Speak a prompt and return the user's answer: spoken, or typed on
+        the dashboard. A muted user can only type, and once background notes
+        reached them (#76) the folder question had to be answerable that way.
+        Interruptible by voice (start answering and your speech becomes the
+        reply), but NOT by action commands — mute / note-taking shouldn't
+        disrupt the folder-destination question, so commands=False keeps it
+        playing through. While it waits, `asking` tells the dashboard who is
+        asking, so the user knows their next message answers them."""
+        self.asking = {"name": self._speaking_name, "question": prompt}
+        try:
+            interrupted = self.say(prompt, commands=False, save_resume=False)
+            if not interrupted:
+                self.audio.flush()
+            while True:
+                utt = self.audio.collect_utterance(
+                    interrupt=self.interrupt,
+                    endpoint_ms=endpoint_ms or cfg.CONVO_ENDPOINT_MS,
+                    wake=self.interject)
+                if utt is not None or not self.interject.is_set():
+                    break
+                try:
+                    text, _ = self.typed.get_nowait()
+                except queue.Empty:
+                    # A background result woke the wait; it is spoken at the
+                    # next gap, after this answer.
+                    self.interject.clear()
+                    continue
+                self.log.info("you (typed folder choice): %s", text)
+                return text
+        finally:
+            self.asking = None
         signals = self._drain()
         if "quit" in signals:
             self.running = False
