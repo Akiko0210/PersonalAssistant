@@ -70,7 +70,7 @@ def get_current_model(ctx, args):
         "Options: 'haiku' is fastest and lowest-latency (the default); 'sonnet' "
         "reasons more strongly with a little more delay; 'opus' is the most "
         "capable but the slowest and most expensive. 'deepseek' is an external "
-        "budget model (DeepSeek V4 Flash, by far the cheapest); 'deepseek pro' "
+        "budget model (DeepSeek Flash, by far the cheapest); 'deepseek pro' "
         "is DeepSeek's strongest. Map the user's words to the closest option "
         "(e.g. 'the smart/best model' -> opus, 'faster' -> haiku, 'the cheap "
         "one' -> deepseek). The change takes effect immediately, for this "

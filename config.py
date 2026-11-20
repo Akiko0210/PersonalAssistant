@@ -252,11 +252,11 @@ CONTEXT_DEBUG_LOG = True          # candidate table + full block at DEBUG on the
 # the facts already known and says what became true (brain/facts.py): six
 # to-do items arrived in six exchanges on 2026-09-18 and top-k retrieval could
 # reach one of them; a list is one fact, kept current.
-QUERY_MODEL = "deepseek-v4-flash"    # on the turn's critical path; DeepSeek Flash by the user's choice (2026-09-22) — needs DEEPSEEK_API_KEY, else the turn falls back to the raw words
+QUERY_MODEL = "deepseek-flash"       # on the turn's critical path; DeepSeek Flash by the user's choice (2026-09-22) — needs DEEPSEEK_API_KEY, else the turn falls back to the raw words
 QUERY_RECENT_EXCHANGES = 4           # exchanges the rewrite reads for pronouns and topic
 QUERY_TIMEOUT_S = 8.0                # past this the turn retrieves on the raw utterance
 QUERY_FALLBACK_MODEL = "claude-haiku-4-5"   # takes over while QUERY_MODEL's provider fails: the rewrite is on the turn's critical path, so the fast one
-FACTS_MODEL = "deepseek-v4-flash"    # async; DeepSeek Flash by the user's choice (2026-09-22). Sonnet 5 was the measured baseline (harness, 7/7); re-measure after any change
+FACTS_MODEL = "deepseek-flash"       # async; DeepSeek Flash by the user's choice (2026-09-22). Sonnet 5 was the measured baseline (harness, 7/7); re-measure after any change
 FACTS_FALLBACK_MODEL = "claude-sonnet-5-5"  # takes over while FACTS_MODEL's provider fails: off the speaking path, so the careful one (Sonnet was the 7/7 baseline)
 FACTS_TIMEOUT_S = 60.0               # one extraction; there was none, and a hung call held the single memory worker for 901 s (2026-10-01) — the 99th percentile is 8 s
 FACTS_CANDIDATES = 12                # current facts the extractor sees by hybrid search on the exchange, so an addition becomes an update, not a duplicate
@@ -400,14 +400,17 @@ CONVO_MODELS = {
     # brain/llm/deepseek.py) — same Messages API, same tool_use/tool_result
     # blocks, so the whole tool loop and history machinery work unchanged.
     # Cheapest by far; needs DEEPSEEK_API_KEY in .env or the switch is refused.
-    "deepseek": "deepseek-v4-flash",      # cheap + fast external option
+    # DeepSeek's own floating name for its latest Flash: V4 Flash was retired
+    # 2026-09-10 and its old id only "temporarily" routes on (issue #80), so a
+    # pinned version id would break all three Flash users at once.
+    "deepseek": "deepseek-flash",         # cheap + fast external option
     "deepseek pro": "deepseek-v4-pro",    # DeepSeek's strongest
 }
 CONVO_MODEL_LABELS = {
     "claude-haiku-4-5": "Haiku 4.5",
     "claude-sonnet-5-5": "Sonnet 5.5",
     "claude-opus-5-5": "Opus 5.5",
-    "deepseek-v4-flash": "DeepSeek V4 Flash",
+    "deepseek-flash": "DeepSeek Flash",   # no version: the name floats
     "deepseek-v4-pro": "DeepSeek V4 Pro",
 }
 CONVO_MODEL = CONVO_MODELS["haiku"]   # low latency for back-and-forth (default)

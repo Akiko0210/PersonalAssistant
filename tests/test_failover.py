@@ -15,7 +15,7 @@ from tests.test_balance_failover import broke
 from tools import dispatch
 
 HAIKU = cfg.CONVO_MODELS["haiku"]
-FLASH = "deepseek-v4-flash"
+FLASH = "deepseek-flash"
 
 
 def timeout():

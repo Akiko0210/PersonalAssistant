@@ -314,7 +314,7 @@ class TestConverseSeams(unittest.TestCase):
             return c.client
         c.client_for = client_for
         del c._rewriter  # the fixture's stub; exercise the real one
-        with mock.patch.object(cfg, "QUERY_MODEL", "deepseek-v4-flash"):
+        with mock.patch.object(cfg, "QUERY_MODEL", "deepseek-flash"):
             reply = c.converse("hi")
         self.assertEqual(reply, "DeepSeek isn't available, so memory lookups "
                                 "switched to Anthropic. fine")
