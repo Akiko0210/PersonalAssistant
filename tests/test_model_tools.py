@@ -186,7 +186,7 @@ class TestModelProvider(unittest.TestCase):
             self.assertEqual(cfg.model_provider(mid), "anthropic")
 
     def test_deepseek_models_route_to_deepseek(self):
-        for mid in ("deepseek-v4-flash", "deepseek-v4-pro"):
+        for mid in ("deepseek-flash", "deepseek-v4-pro"):
             self.assertEqual(cfg.model_provider(mid), "deepseek")
 
     def test_every_convo_model_has_a_provider_and_label(self):

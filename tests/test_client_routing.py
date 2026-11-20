@@ -35,13 +35,13 @@ class TestClientFor(unittest.TestCase):
         env = {k: v for k, v in os.environ.items() if k != "DEEPSEEK_API_KEY"}
         with patch.dict(os.environ, env, clear=True):
             with self.assertRaises(RuntimeError) as ctx:
-                Claude.client_for(shell, "deepseek-v4-flash")
+                Claude.client_for(shell, "deepseek-flash")
         self.assertIn("DEEPSEEK_API_KEY", str(ctx.exception))
 
     def test_deepseek_client_built_once_and_reused(self):
         shell = _Shell()
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key"}):
-            first = Claude.client_for(shell, "deepseek-v4-flash")
+            first = Claude.client_for(shell, "deepseek-flash")
             second = Claude.client_for(shell, "deepseek-v4-pro")
         self.assertIs(first, second)          # one client serves both models
         self.assertIsNot(first, shell.client)  # and it isn't the Anthropic one
