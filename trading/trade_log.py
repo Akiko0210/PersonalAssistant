@@ -11,10 +11,10 @@ they get here. Legs live in their own table, as signed per-contract
 quantities, so no reader ever re-parses text.
 
 The fill-line grammar is thinkorswim's, proven on all 110 fills of the
-2026-09-20 statement against that statement's own per-leg trade history.
-Anything outside it — iron condors, straddles, futures options — parses to
-None and is refused rather than guessed: one wrong leg silently corrupts
-every position P&L after it.
+2026-09-20 statement against that statement's own per-leg trade history
+(iron condors on the 2026-11-22 one, #82). Anything outside it — straddles,
+futures options — parses to None and is refused rather than guessed: one
+wrong leg silently corrupts every position P&L after it.
 """
 
 import re
@@ -37,11 +37,14 @@ _SPREADS = {
     "DIAGONAL": ("diagonal", (1, -1)),
     "BUTTERFLY": ("butterfly", (1, -2, 1)),
     "CONDOR": ("condor", (1, -1, -1, 1)),
+    # "SOLD -1 IRON CONDOR NVDA ... 165/170/160/135 CALL/PUT": the call wing,
+    # then the put wing, each inner strike first (#82).
+    "IRON CONDOR": ("iron_condor", (1, -1, 1, -1)),
     "DBL DIAG": ("double_diagonal", (1, 1, -1, -1)),
 }
-# "custom": an API-synced order of a shape the fill grammar has no word for
-# (an iron condor). Its legs come exact from the broker, so it is held, not
-# refused — the refusal above guards against misreading text, not shapes.
+# "custom": an API-synced order of a shape the fill grammar has no word for.
+# Its legs come exact from the broker, so it is held, not refused — the
+# refusal above guards against misreading text, not shapes.
 STRATEGIES = tuple(s for s, _ in _SPREADS.values()) + ("custom",)
 
 _MONTHS = {m: i for i, m in enumerate(
@@ -88,6 +91,13 @@ def parse_fill(line):
     types = [t[0] for t in m["types"].split("/")]
     if strategy == "calendar":              # one strike, two expirations
         strikes *= 2
+    if strategy == "iron_condor":
+        # One example backs the leg order; a line whose wings aren't laid
+        # out like it (calls then puts, inner strike first) is refused.
+        if (types != ["C", "P"] or len(strikes) != 4
+                or not strikes[0] < strikes[1] or not strikes[2] > strikes[3]):
+            return None
+        types = ["C", "C", "P", "P"]
     if len(types) == 1:
         types *= n
     if len(exps) == 1:

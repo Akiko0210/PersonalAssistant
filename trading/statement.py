@@ -1,8 +1,8 @@
 """Schwab/thinkorswim account-statement CSV -> trade-log orders.
 
 Only the Cash Balance section is read. It lists every cash event in the
-account, one row per fill (TRD) or expiration (RAD), each with its REF #,
-fees and amount. The statement's later sections are filtered by symbol or
+account, one row per fill (TRD) or expiration or assignment (RAD), each
+with its REF #, fees and amount. The statement's later sections are filtered by symbol or
 carry no REF #.
 
 Before anything reaches the log, the rows are checked against the
@@ -19,9 +19,12 @@ from trading import trade_log
 _HEADER_RE = re.compile(
     r"Account Statement for (?P<account>\S+) .*?since (?P<since>\d+/\d+/\d+)")
 # "Removed due to Expiration PUT ... EXP: -1.0 .SPXW260410P6500": the signed
-# change to the position, then the option's symbol.
+# change to the position, then the option's symbol. An assignment says
+# "ASG: 1.0" in the same place, and closes the option leg the same way; it
+# is logged as an expiration (#82). The shares it delivers are an EXP cash
+# row, outside the option log.
 _EXPIRY_RE = re.compile(
-    r"EXP: (?P<qty>-?\d+(?:\.\d+)?) \.(?P<root>[A-Z]+)(?P<ymd>\d{6})"
+    r"(?:EXP|ASG): (?P<qty>-?\d+(?:\.\d+)?) \.(?P<root>[A-Z]+)(?P<ymd>\d{6})"
     r"(?P<cp>[CP])(?P<strike>\d+(?:\.\d+)?)")
 
 

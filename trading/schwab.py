@@ -689,7 +689,8 @@ def transactions(client, account, start, end, underlying=None):
 
 _LOG_STRATEGY = {"NONE": "single", "VERTICAL": "vertical", "CALENDAR": "calendar",
                  "DIAGONAL": "diagonal", "BUTTERFLY": "butterfly",
-                 "CONDOR": "condor", "DOUBLE_DIAGONAL": "double_diagonal"}
+                 "CONDOR": "condor", "IRON_CONDOR": "iron_condor",
+                 "DOUBLE_DIAGONAL": "double_diagonal"}
 
 
 def log_account(number):
