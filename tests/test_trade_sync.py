@@ -103,6 +103,11 @@ class TestRows(unittest.TestCase):
                  for i in (1, 2, 3)]
         rows, _ = schwab.trade_log_rows(FakeClient(three, orders=[]), N, "a", "b")
         self.assertEqual(rows[0]["strategy"], "custom")
+        # #82: an iron condor gets the same name the statement import gives it.
+        ic = [{"orderId": 8, "complexOrderStrategyType": "IRON_CONDOR",
+               "filledQuantity": 1.0, "status": "FILLED"}]
+        rows, _ = schwab.trade_log_rows(FakeClient(three, orders=ic), N, "a", "b")
+        self.assertEqual(rows[0]["strategy"], "iron_condor")
 
     def test_stock_orders_are_skipped_and_counted(self):
         stock = [trade(7, 1, "2026-10-14T20:00:00+0000",
