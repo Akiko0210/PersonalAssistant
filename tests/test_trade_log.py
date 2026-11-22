@@ -69,6 +69,16 @@ class TestParseFill(unittest.TestCase):
          "7520/7350/7480/7340 PUT @67.75 CBOE",
          [("2026-06-30", 7520, "P", -4), ("2026-06-30", 7350, "P", -4),
           ("2026-06-26", 7480, "P", 4), ("2026-06-26", 7340, "P", 4)], 27100.0),
+        # #82, from the 2026-11-22 statement; its per-leg trade history
+        # shows the same four legs (165C/160P sold, 170C/135P bought).
+        ("SOLD -1 IRON CONDOR NVDA 100 (Weeklys) 13 NOV 26 "
+         "165/170/160/135 CALL/PUT @3.10 MIAX",
+         [("2026-11-13", 165, "C", -1), ("2026-11-13", 170, "C", 1),
+          ("2026-11-13", 160, "P", -1), ("2026-11-13", 135, "P", 1)], 310.0),
+        ("BOT +1 IRON CONDOR SPX 100 (Weeklys) 25 SEP 26 "
+         "7800/7850/7500/7450 CALL/PUT @3.00 CBOE",
+         [("2026-09-25", 7800, "C", 1), ("2026-09-25", 7850, "C", -1),
+          ("2026-09-25", 7500, "P", 1), ("2026-09-25", 7450, "P", -1)], -300.0),
     ]
 
     def test_statement_lines(self):
@@ -102,8 +112,12 @@ class TestParseFill(unittest.TestCase):
 
     def test_unknown_lines_are_refused_not_guessed(self):
         for line in (
+                # Iron condors laid out unlike the one proven example: puts
+                # first, or a wing's outer strike first.
                 "BOT +1 IRON CONDOR SPX 100 (Weeklys) 25 SEP 26 "
-                "7800/7850/7500/7450 CALL/PUT @3.00 CBOE",
+                "7500/7450/7800/7850 PUT/CALL @3.00 CBOE",
+                "BOT +1 IRON CONDOR SPX 100 (Weeklys) 25 SEP 26 "
+                "7850/7800/7500/7450 CALL/PUT @3.00 CBOE",
                 "BOT +2 BUTTERFLY /ESZ26 1/50 SEP 26 (Wk5) /EW5U26 "
                 "7750/7650/7550 PUT @21.25 CME",
                 "BOT -1 SPX 100 (Weeklys) 20 FEB 26 7040 CALL @.30 CBOE"):
@@ -125,6 +139,19 @@ class TestStatement(unittest.TestCase):
         body = st["orders"][3]
         self.assertEqual((body["symbol"], body["strategy"], body["legs"]),
                          ("SPX", "expiration", [("2026-04-10", 6600, "P", 2)]))
+
+    def test_an_assignment_closes_its_leg_like_an_expiration(self):
+        # #82: the 2026-11-22 row for a short NVDA put assigned in the money.
+        asg = ('11/21/26,00:19:06,RAD,="137036492194",Removed due to Assignment '
+               'PUT NVIDIA CORP $147 EXP 11/20/26: ASG: 1.0 .NVDA261120P147,,,,'
+               '"22,610.76"\n')
+        st = tstatement.parse(STATEMENT.replace(",,,,TOTAL", asg + ",,,,TOTAL"))
+        self.assertEqual(st["problems"], [])
+        last = st["orders"][-1]
+        self.assertEqual((last["symbol"], last["strategy"], last["amount"],
+                          last["legs"]),
+                         ("NVDA", "expiration", 0.0,
+                          [("2026-11-20", 147, "P", 1)]))
 
     def test_a_misread_total_refuses_the_import(self):
         st = tstatement.parse(STATEMENT.replace("($4.57)", "($4.00)"))
@@ -187,7 +214,7 @@ class TestTools(LogBase):
 
     def test_unparseable_alert_logs_nothing(self):
         reply = self.call("log_trade", email_date=ALERT_DATE, alert=(
-            "#1 BOT +1 IRON CONDOR SPX 100 25 SEP 26 1/2/3/4 CALL/PUT @3 , "
+            "#1 BOT +1 STRADDLE SPX 100 25 SEP 26 7500 CALL/PUT @3 , "
             "ACCOUNT *****868SCHW"))
         self.assertIn("nothing was logged", reply)
         self.assertEqual(trade_log.query(), [])

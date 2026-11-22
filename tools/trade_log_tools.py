@@ -319,8 +319,8 @@ def log_trade(ctx, args):
         if not fill:
             out.append(f"#{m['ref']}: can't read '{line[:100]}', so nothing "
                        "was logged for it (only single, vertical, calendar, "
-                       "diagonal, butterfly, condor and double-diagonal "
-                       "option lines are understood)")
+                       "diagonal, butterfly, condor, iron condor and "
+                       "double-diagonal option lines are understood)")
             continue
         trade = trade_log.order(
             fill, account=m["account"], ref=m["ref"], executed_at=when,
