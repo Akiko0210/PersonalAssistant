@@ -56,6 +56,16 @@ def time_prefix(ts):
     return f"({label}) " if label else ""
 
 
+def stamped(text):
+    """`text` with the time it happened, in the user-message prefix style.
+    For tool notes, stamped where the event happens: a note is folded into
+    whichever reply comes next and takes that exchange's time, so an unstamped
+    one let Tom date a 1:31 PM statement import "this morning" and order two
+    imports wrongly (2026-11-22, #87). A queued note keeps its real time
+    however late it is delivered."""
+    return time_prefix(now_iso()) + text
+
+
 def sanitize(history):
     """Make a history safe to send. Drops any tool_use whose tool_result never
     arrived (and any tool_result with no matching tool_use), then merges

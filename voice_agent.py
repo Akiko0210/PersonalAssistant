@@ -25,6 +25,7 @@ except ImportError:
 import anthropic
 
 from brain import agents
+from brain.history import stamped
 from stores import categories
 import config as cfg
 from web import server as dashboard
@@ -304,7 +305,7 @@ class Agent:
         delegate's result: delivered at the next gap, never over the user."""
         self.interjections.put({
             "agent": "tom",
-            "event": "The user dropped a statement on the dashboard: " + message,
+            "event": stamped("The user dropped a statement on the dashboard: " + message),
             "announce": ("your statement is in the trade log." if imported else
                          "the statement you dropped wasn't imported. Ask me why.")})
         self.interject.set()
