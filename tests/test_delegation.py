@@ -15,8 +15,10 @@ import queue
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 from brain import agents
+from brain import history as hist
 from brain.memory import Rows
 import config as cfg
 from voice_agent import Agent
@@ -96,6 +98,15 @@ class TestRunDelegatedTask(unittest.TestCase):
         self.assertNotIn("switch_agent", names)
         self.assertNotIn("ask_agent", names)
         self.assertNotIn("set_conversation_model", names)
+
+    def test_background_tasks_carry_the_source_rule(self):
+        # #87: a delegated report is read aloud too, so it may not guess
+        # a time or a number any more than the foreground persona may.
+        c = make_claude([text_reply("done")])
+        c.run_delegated_task("tom", "when was the last import?")
+        system = "".join(b["text"] for b in c.client.messages.calls[0]["system"])
+        self.assertIn(cfg.SOURCE_RULE, system)
+        self.assertIn(cfg.SOURCE_RULE, cfg.CONVO_SYSTEM_BASE)
 
     def test_delegate_memory_search_is_scoped_to_the_delegate(self):
         # "Tom asks Alice what we discussed" only works if the delegated
@@ -287,13 +298,18 @@ class TestInterjectionDelivery(unittest.TestCase):
         # #38: Tom's thread gets the import result, then one line in his
         # voice — even while the user is talking to Alice.
         shell = _Shell(active="alice")
-        Agent.report_statement_import(shell, True, "Imported IRA.csv: 7 orders.")
+        dropped, delivered = "2026-11-22T14:53:00-08:00", "2026-11-22T15:40:00-08:00"
+        with mock.patch.object(hist, "now_iso", return_value=dropped):
+            Agent.report_statement_import(shell, True, "Imported IRA.csv: 7 orders.")
         self.assertTrue(shell.interject.is_set())  # wakes an idle listen
-        Agent._deliver_interjections(shell)
+        with mock.patch.object(hist, "now_iso", return_value=delivered):
+            Agent._deliver_interjections(shell)
         self.assertEqual(len(shell.notes), 1)
         persona, text = shell.notes[0]
         self.assertEqual(persona, "tom")
         self.assertIn("Imported IRA.csv: 7 orders.", text)
+        # #87: the note carries the drop's time, not the later delivery's.
+        self.assertTrue(text.startswith(hist.time_prefix(dropped)), text)
         self.assertEqual(shell.spoken[0][0],
                          "Tom here — your statement is in the trade log.")
         self.assertEqual(shell.voices[0][0], agents.AGENTS["tom"]["tts_voice"])

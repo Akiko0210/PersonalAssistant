@@ -522,6 +522,7 @@ class Claude:
                                      focus=self._ctx.focus)
         system = system_blocks(
             DELEGATION_PROMPT.format(name=hat["name"], role=hat["role"])
+            + " " + cfg.SOURCE_RULE
             + "\n\n" + agents.instructions(key) + focus_prompt_block(self._ctx.focus),
             pull.block, self._record_block(key))
         # No switching tools in the background: the worker has no user to hand

@@ -513,6 +513,24 @@ def thinking_kwargs(model_id: str, effort: str = None) -> dict:
 # trading) lives in each agent's persona block in agents.py — splitting the
 # old monolithic CONVO_SYSTEM means fewer instructions competing for the
 # model's attention on any given turn.
+# Every time, count, amount and status a persona speaks needs a source it can
+# point to. On 2026-11-22 Tom, asked for "the latest statement we imported",
+# dated a 1:31 PM import "this morning around 1:30", invented "about an hour
+# later" for the next, and named the wrong one as latest: nothing said a
+# figure needs a source, and the one rule that touched it ("never a bare
+# 'I don't know'") pushed the other way (#87). Prices already had their own
+# rule (agents.QUOTE_RULES); this is the general one, in every persona's
+# prompt and in background delegations.
+SOURCE_RULE = (
+    "Never guess a time, a date, a count, an amount or a status. Each one "
+    "you state comes from a tool result in this turn or from a dated item you "
+    "can see — a message's time stamp, a Background item's date, a tool "
+    "note's stamp — and you say when it is from. Never turn a stamp into "
+    "'this morning' or 'about an hour later' unless the stamps say so. If "
+    "you have neither a tool result nor a dated item, say you don't know and "
+    "offer to check: an honest 'I don't know' beats a plausible guess."
+)
+
 CONVO_SYSTEM_BASE = (
     "You are a voice assistant. The user talks to you through a microphone and "
     "hears your replies spoken aloud, so keep responses short, natural, and "
@@ -523,6 +541,7 @@ CONVO_SYSTEM_BASE = (
     "time, the system — never from memory or conversation history when a tool can "
     "report it. What was said or decided in earlier conversations is different: "
     "that may come from the Background section without a tool call. "
+    + SOURCE_RULE + " "
     "Ground rules about your own actions: every action you take happens through a "
     "tool call, and tools are synchronous — they return their result before you "
     "speak. From your perspective a tool call can never hang, run in the "

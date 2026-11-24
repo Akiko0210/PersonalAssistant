@@ -17,6 +17,8 @@ they stay reviewable next to their handler.
 import logging
 from dataclasses import dataclass, field
 
+from brain.history import stamped
+
 log = logging.getLogger("tools")
 
 
@@ -88,10 +90,11 @@ class ToolContext:
     card: dict = field(default=None)
 
     def record_event(self, text):
-        """Record what a tool actually did, for the model to see next turn.
-        No-op on empty text so callers needn't guard."""
+        """Record what a tool actually did, for the model to see next turn,
+        with the time it did it (history.stamped). No-op on empty text so
+        callers needn't guard."""
         if text:
-            self.events.append(str(text))
+            self.events.append(stamped(str(text)))
 
 
 _REGISTRY = {}  # name -> (schema, handler); insertion-ordered

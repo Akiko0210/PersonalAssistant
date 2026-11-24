@@ -57,7 +57,10 @@ class TestRegistryIntegrity(unittest.TestCase):
         self.assertIn("OWN conversation", block)
         self.assertIn("ask_agent", block)
         self.assertIn("asks for them by name", block)
-        self.assertIn("bare 'I don't", block)
+        # #87: no longer "never a bare 'I don't know'", which pushed toward
+        # filling a gap; not knowing is said, with who would know.
+        self.assertIn("when you don't know, say so and say who would", block)
+        self.assertNotIn("bare 'I don't", block)
 
     def test_resolve_tolerates_aliases_and_case(self):
         self.assertEqual(agents.resolve("Thom"), "tom")

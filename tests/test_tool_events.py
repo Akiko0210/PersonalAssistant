@@ -21,14 +21,27 @@ from tools import ToolContext
 from tests.llm_fixtures import make_claude
 
 
+AT = "2026-11-22T14:53:00-08:00"
+
+
 class TestRecordEvent(unittest.TestCase):
     def test_record_and_empty(self):
         ctx = ToolContext()
         self.assertEqual(ctx.events, [])
-        ctx.record_event("did a thing")
+        with mock.patch.object(hist, "now_iso", return_value=AT):
+            ctx.record_event("did a thing")
         ctx.record_event("")        # empty is ignored
         ctx.record_event(None)      # None is ignored
-        self.assertEqual(ctx.events, ["did a thing"])
+        # #87: stamped when it happened, in the user-message prefix style.
+        self.assertEqual(ctx.events, [hist.time_prefix(AT) + "did a thing"])
+
+    def test_the_stamp_survives_into_the_self_note(self):
+        c = make_claude(history=[{"role": "user", "content": "hi"}])
+        with mock.patch.object(hist, "now_iso", return_value=AT):
+            c.record_tool_event("Order 1 submitted.")
+        c.flush_tool_events()
+        self.assertIn(f"({hist.time_label(AT)}) Order 1 submitted.",
+                      c.history[-1]["content"])
 
 
 class TestFlushToolEvents(unittest.TestCase):
