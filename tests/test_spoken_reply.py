@@ -1,8 +1,8 @@
 """Memory holds what the user heard, not what the model wrote (issue #26).
 
 A reply cut off by a barge-in, or held unspoken because the user was already
-talking, used to stay in history — and go to the exchange index and the
-fact store — in full; the agent then argued from words never said aloud
+talking, used to stay in history — and go to the exchange index — in
+full; the agent then argued from words never said aloud
 ("I just said you're welcome", 2026-10-09). Under test: say() records the
 spoken part on every exit, settle_reply keeps only that part (marked) and
 only then remembers the turn, and a "continue" resume extends it.

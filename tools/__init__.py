@@ -28,7 +28,6 @@ class ToolContext:
     discord: object = None    # DiscordData
     kb: object = None         # KnowledgeStore
     memory: object = None     # ConversationMemory
-    facts: object = None      # FactStore
     # Set by save_conversation_note; the agent picks it up after the reply and
     # runs the folder dialogue + save (see voice_agent._save_pending_note).
     pending_note: dict = field(default=None)

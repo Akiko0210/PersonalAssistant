@@ -10,10 +10,9 @@ time in metadata: LongMemEval found round-level values read best, and
 recency is a ranking signal here, not a filter.
 
 This is the EPISODIC store — what was said, verbatim, the source of truth.
-What is TRUE NOW (a list's current contents, a decision, a preference) is a
-different question that top-k over exchanges answers badly; brain/facts.py
-derives it from these records and can be rebuilt from them. Both stores read
-through HybridStore below.
+It records what was said, not what is true now: what a persona is in the
+middle of lives in its working record (stores/working_state.py), and current
+state comes from a tool. Reads go through HybridStore below.
 
 Isolation is structural: a caller reads its own collection plus registry
 `reads` grants, and nothing else. There is no parameter through which a
@@ -140,9 +139,8 @@ def in_window(meta, window) -> bool:
 class HybridStore:
     """A Chroma collection read two ways — dense through Chroma, lexical
     through a BM25 index over the same records — with the failure handling
-    both readers share. The exchange index below and the fact store
-    (brain/facts.py) are its two shapes; each says how a stored row reads
-    back (`_row`) and which rows BM25 indexes (`_indexable`)."""
+    both readers share. A subclass says how a stored row reads back
+    (`_row`) and which rows BM25 indexes (`_indexable`)."""
 
     def __init__(self):
         cfg.ensure_dirs()
@@ -362,8 +360,8 @@ class ConversationMemory(HybridStore):
 
     def exchanges_of(self, messages, owner) -> list:
         """The exchanges in `messages` as (id, document, metadata) — what the
-        index writes and what the fact extractor reads, from ONE derivation
-        so they can never disagree about what an exchange is. Tool traffic is
+        index writes, from ONE derivation, so every caller agrees on what
+        an exchange is. Tool traffic is
         skipped; tool NAMES go into metadata, not the text — identifiers
         would shift a short document's embedding. A turn with no assistant
         text (abandoned) is not an exchange."""
@@ -450,29 +448,6 @@ class ConversationMemory(HybridStore):
             self._touch(name)
         return len(add_ids), len(stamp_ids)
 
-    def unextracted(self, owner) -> list:
-        """(id, document, metadata) of every exchange the fact extractor has
-        not read yet, oldest first — the order facts must be learned in, since
-        "add item four" only reads as an update to a list the extractor has
-        already seen. The marker is `extracted` on the parent record
-        (mark_extracted), so a boot picks up exactly what the worker had not
-        reached when the process last exited."""
-        col = self._col_for(cfg.agent_memory_collection(owner))
-        got = col.get(include=["documents", "metadatas"])
-        rows = [(i, d, m or {})
-                for i, d, m in zip(got.get("ids") or [], got.get("documents") or [],
-                                   got.get("metadatas") or [])
-                if (m or {}).get("kind") == "exchange" and not (m or {}).get("part")
-                and not (m or {}).get("extracted")]
-        rows.sort(key=lambda r: r[2].get("epoch") or 0)
-        return rows
-
-    def mark_extracted(self, owner, xid):
-        """Metadata-only: chromadb merges an update into the stored metadata
-        (1.5.9, probed 2026-09-22), so the one key is all that is written."""
-        self._col_for(cfg.agent_memory_collection(owner)).update(
-            ids=[xid], metadatas=[{"extracted": True}])
-
     # --- retrieval ------------------------------------------------------------
     def query_rows(self, query: str, n: int = None, caller=None, *,
                    window=None) -> Rows:
@@ -550,30 +525,6 @@ class ConversationMemory(HybridStore):
         if window is not None:
             return f"Nothing{span} among exactly-timed exchanges."
         return "Nothing in past conversations matches that."
-
-    def fetch(self, ids, caller) -> str:
-        """The recall tool's read-by-id: the named exchanges, oldest first,
-        from the collections `caller` may read — how the model follows a
-        fact's `from` ids back to the words behind it."""
-        want = [i for i in ids if isinstance(i, str)]
-        found = {}
-        for k in agents.readable_owners(caller):
-            try:
-                got = self._col_for(cfg.agent_memory_collection(k)).get(
-                    ids=want, include=["documents", "metadatas"])
-            except Exception as e:  # noqa: BLE001
-                log.warning("could not fetch exchanges from %s's memory: %s", k, e)
-                continue
-            for i, d, m in zip(got.get("ids") or [], got.get("documents") or [],
-                               got.get("metadatas") or []):
-                found[i] = (d, m or {})
-        if not found:
-            return "None of those exchange ids are in your memory."
-        rows = sorted(found.values(), key=lambda dm: dm[1].get("epoch") or 0)
-        text = "Exchanges, oldest first:\n" + "\n\n".join(
-            f"[{context.when(m)}] {' '.join(d.split())[:1200]}" for d, m in rows)
-        missing = len([i for i in want if i not in found])
-        return text + (f"\n\n({missing} id(s) not found.)" if missing else "")
 
 
 def _clock(epoch) -> str:

@@ -1,5 +1,5 @@
 """Failover with automatic switch-back (brain/llm/failover.py): the query
-rewrite, fact extraction and the conversation each move to a standby when
+rewrite and the conversation each move to a standby when
 their provider fails, announce it once, and move back on their own once the
 provider answers again."""
 
@@ -100,16 +100,6 @@ class TestThroughClaude(unittest.TestCase):
         self.assertEqual(reply, "DeepSeek isn't responding, so memory lookups "
                                 "switched to Anthropic. answer")
         self.assertEqual(c.client.messages.calls[0]["model"], cfg.QUERY_FALLBACK_MODEL)
-
-    def test_an_extraction_failure_is_spoken_on_the_next_turn(self):
-        c = make_claude([text_reply("next answer")])
-        c.client = FakeClient([text_reply('{"ops": []}'), text_reply("next answer")])
-        c._deepseek = FakeClient([RuntimeError("'NoneType' object is not iterable")])
-        del c._extractor
-        self.assertEqual(c._extractor()("system", "prompt"), '{"ops": []}')
-        self.assertEqual(c.client.messages.calls[0]["model"], cfg.FACTS_FALLBACK_MODEL)
-        self.assertEqual(c.converse("hi"), "DeepSeek is failing, so memory saving "
-                                           "switched to Anthropic. next answer")
 
     def _claude(self, primary, secondary):
         c = make_claude(primary, convo_model=HAIKU)

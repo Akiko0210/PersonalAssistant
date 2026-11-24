@@ -4,7 +4,6 @@ touches a collection — it used to be a copy per test file, and the copies
 disagreed about what query() returned.
 """
 
-from brain.facts import FactStore
 from brain.memory import ConversationMemory
 from stores.knowledge import KnowledgeStore
 
@@ -35,8 +34,8 @@ def _match(meta, where):
 class FakeCol:
     """A Chroma collection double: records upserts, serves canned hits from
     query(), and answers get() from what was upserted — the exchange index's
-    skip-existing check, its BM25 corpus and the fact store's by-key reads
-    all read a collection back that way. Keeps the tests loading neither
+    skip-existing check and its BM25 corpus both read a collection back
+    that way. Keeps the tests loading neither
     Chroma nor the embedding model."""
 
     def __init__(self, hits=()):
@@ -99,10 +98,3 @@ def memory_over(cols):
     mem._col_for = lambda name: cols.setdefault(name, FakeCol())
     return mem
 
-
-def facts_over(cols):
-    """A FactStore over the same kind of `cols`."""
-    fs = FactStore.__new__(FactStore)
-    fs._cols, fs._lexical, fs._entities = {}, {}, {}
-    fs._col_for = lambda name: cols.setdefault(name, FakeCol())
-    return fs

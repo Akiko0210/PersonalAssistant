@@ -189,10 +189,6 @@ def agent_memory_collection(key):
     return f"conversations_{key}"
 
 
-def agent_facts_collection(key):
-    return f"facts_{key}"
-
-
 KB_CHUNK_CHARS = 1000                # target characters per embedded chunk
 KB_CHUNK_OVERLAP = 150               # characters shared between adjacent chunks
 KB_SEARCH_RESULTS = 5                # reference chunks the recall tool returns
@@ -241,27 +237,17 @@ CONTEXT_RECENCY_WEIGHT = 0.3      # Park-style additive recency term: reorders r
 CONTEXT_RECENCY_HALF_LIFE_H = 168 # a week-old exchange keeps half its recency credit (Park et al. use ~5.8 days)
 CONTEXT_DEBUG_LOG = True          # candidate table + full block at DEBUG on the "context" logger; turn off once tuned
 
-# --- Query understanding and fact extraction -------------------------------------
-# Two small model calls bracket every turn. BEFORE retrieval, one reads the last
-# few exchanges and turns the utterance into what the stores can act on
-# (brain/query.py): a self-contained query — embeddings cannot resolve "the
-# other one" — a time window when a time was named (a filter: "this morning at
-# 9:41" sits at cosine 0.02-0.09 against the exchanges it means), and which
-# tracked entities it is about (their facts are then included by key). AFTER
-# the reply, off the speaking path, another reads the finished exchange against
-# the facts already known and says what became true (brain/facts.py): six
-# to-do items arrived in six exchanges on 2026-09-18 and top-k retrieval could
-# reach one of them; a list is one fact, kept current.
+# --- Query understanding -------------------------------------------------------
+# One small model call before retrieval reads the last few exchanges and turns
+# the utterance into what the stores can act on (brain/query.py): a
+# self-contained query — embeddings cannot resolve "the other one" — and a time
+# window when a time was named (a filter: "this morning at 9:41" sits at cosine
+# 0.02-0.09 against the exchanges it means). There is no fact extraction after
+# the reply any more: it saved the personas' own guesses as current truth (#86).
 QUERY_MODEL = "deepseek-flash"       # on the turn's critical path; DeepSeek Flash by the user's choice (2026-09-22) — needs DEEPSEEK_API_KEY, else the turn falls back to the raw words
 QUERY_RECENT_EXCHANGES = 4           # exchanges the rewrite reads for pronouns and topic
 QUERY_TIMEOUT_S = 8.0                # past this the turn retrieves on the raw utterance
 QUERY_FALLBACK_MODEL = "claude-haiku-4-5"   # takes over while QUERY_MODEL's provider fails: the rewrite is on the turn's critical path, so the fast one
-FACTS_MODEL = "deepseek-flash"       # async; DeepSeek Flash by the user's choice (2026-09-22). Sonnet 5 was the measured baseline (harness, 7/7); re-measure after any change
-FACTS_FALLBACK_MODEL = "claude-sonnet-5-5"  # takes over while FACTS_MODEL's provider fails: off the speaking path, so the careful one (Sonnet was the 7/7 baseline)
-FACTS_TIMEOUT_S = 60.0               # one extraction; there was none, and a hung call held the single memory worker for 901 s (2026-10-01) — the 99th percentile is 8 s
-FACTS_CANDIDATES = 12                # current facts the extractor sees by hybrid search on the exchange, so an addition becomes an update, not a duplicate
-FACTS_RECENT = 8                     # ...plus the most recently established ones: the list being built now is what the next item updates, however unlike its words
-FACTS_KNOWN_ENTITIES = 80            # entity keys shown so the rewrite can name them and the extractor reuses them instead of inventing
 
 # --- Working record -------------------------------------------------------------
 # What each persona is in the middle of — Tom's campaigns, Linda's Coaches
@@ -543,10 +529,9 @@ CONVO_SYSTEM_BASE = (
     "bugs or system behaviour. "
     "Only your last few exchanges with the user appear verbatim; earlier "
     "conversations reach you through a Background section retrieved for each "
-    "turn: the past exchanges that bear on the message, and the facts you have "
-    "learned, each dated as of when it was established — use it naturally, as "
-    "your own memory, and call recall only when you need more than it shows or "
-    "the exact words behind a fact. "
+    "turn: the past exchanges that bear on the message, each dated — use it "
+    "naturally, as your own memory, and call recall only when you need more "
+    "than it shows. "
     "The system prefixes each user message with the local time it was spoken, "
     "like (1:47pm 8/20/2026). Use the stamps to notice time passing: when a "
     "message arrives hours or days after the previous one, earlier context may "
@@ -639,11 +624,9 @@ OVERRIDABLE = {
     "CONTEXT_MIN_SIMILARITY": float, "CONTEXT_MIN_LEXICAL": float,
     "CONTEXT_LEXICAL_WEIGHT": float, "CONTEXT_RECENCY_WEIGHT": float,
     "CONTEXT_MMR_LAMBDA": float, "CONTEXT_DEBUG_LOG": bool,
-    # query understanding / fact extraction
+    # query understanding
     "QUERY_MODEL": str, "QUERY_RECENT_EXCHANGES": int, "QUERY_TIMEOUT_S": float,
-    "FACTS_MODEL": str, "FACTS_CANDIDATES": int, "FACTS_RECENT": int,
-    "QUERY_FALLBACK_MODEL": str, "FACTS_FALLBACK_MODEL": str,
-    "FACTS_TIMEOUT_S": float, "FAILOVER_COOLDOWN_S": int,
+    "QUERY_FALLBACK_MODEL": str, "FAILOVER_COOLDOWN_S": int,
     # headset button
     "MEDIA_KEEPALIVE": bool, "MEDIA_CLICK_DEDUPE_S": float,
     # microphone

@@ -121,23 +121,22 @@ unit-tested without a microphone, speakers, or an API key.
 - **`brain/llm/`** — `Claude` (in `main.py`): the conversation loop (`converse`,
   with the tool-call loop), the folder-choice dialogue
   (`choose_folder_via_dialogue`), note summarisation (`summarize`), the
-  boot-time index backfill and extractor catch-up (`index_saved_threads`),
-  and the memory worker — one thread that indexes and learns each exchange
-  after the reply is already being spoken (`_remember`). Holds a
+  boot-time index backfill (`index_saved_threads`), and the memory worker —
+  one thread that indexes each exchange after the reply is already being
+  spoken (`_remember`). Holds a
   `ToolContext` and reads the active conversation model from it each call. Provider machinery is isolated in the variant files:
   `anthropic.py` and `deepseek.py` own their client construction, endpoint,
   and quirks — the engine itself never knows more than one provider exists.
 - **`brain/llm/failover.py`** — `Failover`: one per provider-bound call site
-  (the conversation, the query rewrite, fact extraction). A failure moves
+  (the conversation, the query rewrite). A failure moves
   the call to a standby on the other provider (`FAILOVER_MODELS`,
-  `QUERY_FALLBACK_MODEL`, `FACTS_FALLBACK_MODEL`) and retries it; for
+  `QUERY_FALLBACK_MODEL`) and retries it; for
   `FAILOVER_COOLDOWN_S` the default is skipped, then the next real call
   probes it and a success moves back. Only the switch and the return are
   announced — queued on `Claude._notices` from any thread and spoken ahead
   of the next reply. The conversation fails over on an empty balance only
-  (other errors are `explain_error`'s); the rewrite and the extractor on any
-  failure, the extractor now under `FACTS_TIMEOUT_S` (a hung call once held
-  the single memory worker for 901 s). The user's model choice is never
+  (other errors are `explain_error`'s); the rewrite on any failure. The
+  user's model choice is never
   overwritten — `model_for` reports the standby during an outage, and
   `set_conversation_model` clears it.
 - **`brain/history.py`** — pure functions over the message list: `sanitize` (drop any
@@ -150,19 +149,13 @@ unit-tested without a microphone, speakers, or an API key.
   BM25, with the shared failure handling) and `ConversationMemory`: the
   EPISODIC store, one exchange per record under two keys, embedded into the
   persona's `conversations_<key>` as its turn ends (`index_exchanges`, the
-  single write path; `exchanges_of` is the one derivation the index and the
-  extractor share). `search` / `fetch` back the `recall` tool with the same
-  ranking the Background uses.
-- **`brain/facts.py`** — `FactStore`: the SEMANTIC store, what is true now,
-  derived from the exchanges by an extractor with add / update / supersede
-  semantics (`learn`, `catch_up`), read by key (`current`) or by rank; every
-  fact names its source exchanges and the store is rebuildable from them.
+  single write path; `exchanges_of` is its one derivation of an exchange).
+  `search` backs the `recall` tool with the same ranking the Background uses.
 - **`brain/query.py`** — `understand`: the small model call before retrieval —
-  a self-contained query, a time window when a time was named, the tracked
-  entities the utterance is about; falls back to the raw utterance.
-- **`brain/context.py`** — the per-turn Background: facts about the named
-  entities by key first, then exchanges and facts fused (relative-score
-  fusion plus a recency term), gated on relevance, filled to a character
+  a self-contained query and a time window when a time was named; falls back
+  to the raw utterance.
+- **`brain/context.py`** — the per-turn Background: past exchanges ranked by
+  relative-score fusion plus a recency term, gated on relevance, filled to a character
   budget by marginal score (MMR), then knowledge; renders the block that goes
   after the frozen system prompt. Logs every pull.
 
@@ -404,9 +397,8 @@ unit-tested without a microphone, speakers, or an API key.
 4. `converse` sanitizes + trims the transcript, appends the user message,
    **reads the utterance** (`brain/query.py`: one small model call over the
    last few exchanges → a self-contained query, a time window if a time was
-   named, the tracked entities it is about), **pulls the Background**
-   (`brain/context.py`: the facts about those entities by key, then the most
-   relevant past exchanges, facts and knowledge chunks by rank), then loops: call the
+   named), **pulls the Background** (`brain/context.py`: the most relevant
+   past exchanges and knowledge chunks by rank), then loops: call the
    model with the frozen system prompt + Background + the last
    `CONTEXT_RECENT_EXCHANGES` exchanges verbatim → if it returned `tool_use`,
    dispatch each tool via the registry and feed results back → repeat until
@@ -432,8 +424,7 @@ unit-tested without a microphone, speakers, or an API key.
 7. The transcript is saved to `data/conversation_history/<key>.json` after the turn. The
    exchange is handed to the memory worker (`_remember`) once settled —
    so memory holds what the user heard — and the worker embeds it into the
-   persona's index and runs the fact extractor over it (`brain/facts.py`)
-   on its own thread; nothing blocks the next turn. A turn nobody settles
+   persona's index on its own thread; nothing blocks the next turn. A turn nobody settles
    (a script, a turn that raised) is remembered whole at the next one.
 
 ### Personas and background delegation
@@ -647,7 +638,7 @@ API — copies each message down to `role` and `content` on the way out.
 
 ---
 
-## 7. Memory: verbatim tail, retrieved exchanges, derived facts, notes/knowledge
+## 7. Memory: verbatim tail, retrieved exchanges, notes/knowledge, working record
 
 What the model sees about the past is chosen by relevance and recency — and
 by key when the question names a thing it tracks — never by a fixed window.
@@ -657,8 +648,7 @@ found one-exchange records read better than session summaries), hybrid
 dense + BM25 retrieval (the "minimum viable baseline" of every production
 RAG guide; embeddings miss exact tickers, names and numbers), an
 exponential-decay recency term (Park et al.'s Generative Agents memory
-stream), write-time fact extraction with update semantics for what is true
-NOW (the Mem0 pattern), a query rewrite before retrieval, and a frozen,
+stream), a query rewrite before retrieval, and a frozen,
 cached system prefix with the volatile Background after it (Anthropic's
 prompt-caching layout).
 
@@ -707,34 +697,26 @@ prompt-caching layout).
    satisfy a window. The pre-isolation `conversations` collection stays on
    disk, untouched, and no persona reads it, not even as a fallback (#74): a
    brand-new assistant once opened on July's summaries as its own past.
-3. **Fact store** (`brain/facts.py`, `facts_<key>`) — what is TRUE NOW,
-   derived from the exchanges. Retrieval over exchanges answers "what was
-   said"; it answers "what is the current state of X" badly by construction,
-   because the state is spread over every exchange that changed it and top-k
-   under a budget has to find all of them — six to-do items arrived in six
-   exchanges on 2026-09-18 and the persona could recall one. After each
-   reply, off the speaking path, the memory worker hands the finished
-   exchange and the current facts it may touch — by hybrid search on its
-   text, plus the most recently established ones (the list being built now,
-   whatever the new item's words) and every current fact of the entities
-   those name — to an extractor (`FACTS_MODEL`), which answers with add /
-   update / supersede
-   operations: a list is ONE fact whose value is its complete current
-   contents, so "add item four" updates it rather than adding a fourth loose
-   record. Nothing is deleted — a superseded fact leaves retrieval but keeps
-   its `superseded_by` / `superseded_epoch`. Every fact names its source
-   exchanges (`source_ids`, rendered as `from=` so the model can read the
-   words behind it with `recall`) and is labelled `source="fact"` with
-   `as_of` — derived, not a quote. Facts about an entity the query names are
-   pinned first in the Background and never cut to the per-hit cap; the rest
-   rank with the exchanges. The store is a DERIVED INDEX:
-   `scripts/rebuild_facts.py` drops it and re-reads every exchange, so an
-   extractor bug is fixed in the prompt, never in the data; a boot reads
-   whatever the worker had not reached (the `extracted` mark on the parent
-   record), oldest first, in the background.
+3. **No fact store (removed, #86).** From 2026-09-22 to 2026-11-24 a second
+   model read every finished exchange — the persona's reply included — and
+   kept "facts" about what was true now (the Mem0 pattern), pinned first in
+   the Background as "the current state" and never cut. It was built for one
+   failure: six to-do items dictated in six exchanges, and retrieval found
+   one (2026-09-18). That job moved to the working record (item 6), and
+   positions to the trade log (#36). What stayed was harm, measured on Tom on
+   2026-11-22: about 1 in 5 of his 515 current facts was a lasting rule or
+   preference, about half were expired snapshots still marked current, 74%
+   were mostly in his own words, and 64% of his turns carried a pinned fact.
+   A guess ("this morning around 1:30" for a 1:31 PM import) became a fact
+   ("1:30am") and led every related turn after it; the 2026-11-12 diagnosis
+   found the same loop with the account names. So nothing is derived from
+   the persona's words any more: what was said comes from the exchanges
+   (dated), what is in progress from the working record, and what is true
+   now from a tool. The `facts_<key>` collections stay on disk, unread.
+   Its full design is in git history (`brain/facts.py` before #86).
 4. **recall** — the one tool past the Background: a second question the model
-   only knows to ask after reading the first answer, the exact exchanges
-   behind a fact (`ids`), a stretch of time read in order (`period` /
+   only knows to ask after reading the first answer, a stretch of time read
+   in order (`period` /
    `since` / `until`, with or without a topic), or more depth than the budget
    holds (`MEMORY_SEARCH_RESULTS`, `KB_SEARCH_RESULTS`). It runs the same
    ranking as the Background, never returns the verbatim tail (a persona once
@@ -762,9 +744,7 @@ prompt-caching layout).
    record's last `WORKING_RECENT_ENTRIES` entries, then the newest of the
    rest — and declared authoritative over the Background. Bodies over
    `WORKING_BODY_CHARS` are refused, not truncated, so no rule is silently
-   cut. Overlap with facts is by design for now: facts are learned
-   automatically about everything, the record holds what is in progress, and
-   the record wins when they disagree. `record_rules` is code, not an
+   cut. `record_rules` is code, not an
    overlayable field — a dashboard persona once replaced Linda's coded one,
    check-in instruction included. Every write logs one `records` line, which
    `scripts/audit_sessions.py` counts per persona per day.
@@ -798,8 +778,8 @@ data/notes/index.json      ordered record of every note (title, date, category)
 data/notes/categories.json voice-created/renamed folders overlaid on the seed defaults
 data/conversation_history/<key>.json  each persona's transcript (sanitized on every save)
 data/memory/chroma/        Chroma index: notes, knowledge, per-agent knowledge_<key>,
-                           conversations_<key> (two key records per exchange) and
-                           facts_<key> (derived from them; rebuildable), plus the
+                           conversations_<key> (two key records per exchange), the
+                           retired facts_<key> (#86; kept, never read) and the
                            pre-isolation shared conversations archive (kept, never read)
 data/memory/working_state.db   each persona's working record (campaigns, notebook, list)
 data/settings/             dashboard edits: agents.json, config_overrides.json,
@@ -892,7 +872,7 @@ history never does.
 | Limit | Now | What happens past it |
 | --- | --- | --- |
 | Conversation transcript | **40 messages** (`HISTORY_MAX_MESSAGES`, adjustable 4–200 on the Config page) | oldest turns fall off the dashboard's transcript — they were indexed the moment they ended (§7), so the model can still retrieve them; the count stops growing |
-| Model context per turn | last **2 exchanges** verbatim + **4000 + 3000 chars** of retrieved Background (`CONTEXT_*`, Config page) | lower-ranked candidates are dropped (facts about an entity the question names come first and are never cut); the `context pull` log line shows what was kept |
+| Model context per turn | last **2 exchanges** verbatim + **4000 + 3000 chars** of retrieved Background (`CONTEXT_*`, Config page) | lower-ranked candidates are dropped; the `context pull` log line shows what was kept |
 | Dashboard note search | every note file opened per query (**291 notes** when this was written — check the Overview page for today's count) | linear; fine at hundreds, slow in the low thousands. Deliberately a substring scan — semantic search stays a voice feature (Chroma), so this path never loads the embedding model |
 | Turns | **one at a time** | the loop is blocking. A typed message waits for an utterance boundary; during note-taking it waits for the note to end. Background delegations (`ask_agent`) are the exception — they run on threads and speak their result at the next gap |
 | Tool rounds per turn | **15** conversation, **8** delegated | the loop bails with a spoken "I got stuck repeating tool calls" rather than billing forever |

@@ -260,31 +260,28 @@ is no delete yet.
 
 **What the model actually sees each turn is chosen by relevance, not by a
 window.** Every user/assistant exchange is embedded into that persona's own
-`conversations_<name>` collection in Chroma as the turn ends, and — after the
-reply is already being spoken — a second model reads the exchange and updates
-the persona's *facts*: what is true now (a list's current contents, a
-decision, a preference), each fact naming the exchanges it came from. Before
-each reply a small model first reads your words against the last few
-exchanges — so "what about the other one?" becomes a question memory can
-answer, "this morning around 9:40" becomes a time filter, and "my list"
-names the thing whose facts should come along. The agent then sends only the
-last couple of exchanges verbatim (`CONTEXT_RECENT_EXCHANGES`) and retrieves a
-*Background* block for the rest: the facts about what you named, then the
-most relevant past exchanges and facts — found by embedding similarity
+`conversations_<name>` collection in Chroma as the turn ends. Before each
+reply a small model first reads your words against the last few exchanges —
+so "what about the other one?" becomes a question memory can answer, and
+"this morning around 9:40" becomes a time filter. The agent then sends only
+the last couple of exchanges verbatim (`CONTEXT_RECENT_EXCHANGES`) and
+retrieves a *Background* block for the rest: the most relevant past
+exchanges, each dated — found by embedding similarity
 **and** a BM25 keyword index, so tickers, names and numbers match exactly,
 with recent ones weighted up — plus the best-matching knowledge chunks,
 fitted to a character budget (`CONTEXT_CONVO_CHARS`, `CONTEXT_KB_CHARS`). So
 "how did that butterfly do?" finds the exchange from three weeks ago without
-you saying "remember when", and "what's on my list?" gets the whole list,
-not whichever items happened to rank. The `recall` tool is there for digging
-deeper: a follow-up the Background raised, the exact exchanges behind a fact,
+you saying "remember when". What a persona is in the middle of (Tom's
+campaigns, Alice's list) is its working record, shown in full every turn;
+what is true now comes from a tool. There is no learned "facts" layer: it
+saved the personas' own guesses as current truth and was removed (#86). The
+`recall` tool is there for digging deeper: a follow-up the Background raised
 or a stretch of time ("what did we talk about this morning around 9:40?",
 "yesterday") read back in order. Conversations from before the per-persona
 split are kept in a shared archive on disk that no persona reads. Every turn is logged (`query`, `context pull` and `remembered exchange`
 lines in the session log, with the full candidate table when
 `CONTEXT_DEBUG_LOG` is on) so the thresholds can be tuned from what was
-actually retrieved; `scripts/rebuild_facts.py` regenerates a persona's facts
-from its exchanges whenever the extractor changes.
+actually retrieved.
 `scripts/seed_agent_memory.py` (run once, agent off) backfills each persona's
 index from the session logs.
 

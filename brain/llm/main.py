@@ -31,7 +31,6 @@ from stores.knowledge import KnowledgeStore
 from stores import working_state
 from brain import context
 from brain import query as understanding
-from brain.facts import FactStore, catch_up, extractor, learn
 from brain.memory import ConversationMemory, exchange_id
 from tools import ToolContext, api_tools, dispatch
 from tools.focus_tools import focus_prompt_block
@@ -186,18 +185,13 @@ class Claude:
         # ingestion) so the embedding model loads at most once per process; selftest
         # passes none, so fall back to a fresh instance.
         self.kb = kb if kb is not None else KnowledgeStore()
-        # The exchange index every turn retrieves from and writes to, and the
-        # facts derived from it (brain/facts.py).
+        # The exchange index every turn retrieves from and writes to.
         self.memory = ConversationMemory()
-        self.facts = FactStore()
-        # The memory worker: indexing and fact extraction run here, once the
-        # reply has been spoken (settle_reply). One thread, in order — "add item
-        # four" only reads as an update to a list the extractor has already
-        # seen. Live exchanges queue ahead of any boot backlog. Nothing here
-        # is precious: an exchange the process died on is still in history,
-        # and the next boot re-indexes and re-reads whatever went unmarked.
-        self._jobs = queue.PriorityQueue()
-        self._seq = 0
+        # The memory worker: an exchange is indexed here once the reply has
+        # been spoken (settle_reply), so embedding never delays speech. One
+        # thread, in order. Nothing here is precious: an exchange the process
+        # died on is still in history, and the next boot re-indexes it.
+        self._jobs = queue.SimpleQueue()
         threading.Thread(target=self._work, daemon=True, name="memory").start()
         # The last reply converse() returned, until the agent reports how much
         # of it was spoken (settle_reply) — only then does the turn go to the
@@ -220,7 +214,7 @@ class Claude:
         # set_conversation_model tool can switch mid-session). `show` puts the
         # conversation's trading answers on the display window (display/).
         self._ctx = ToolContext(store=self.store, discord=self.discord,
-                                kb=self.kb, memory=self.memory, facts=self.facts,
+                                kb=self.kb, memory=self.memory,
                                 convo_model=agents.registry_model(self.active),
                                 active_agent=self.active,
                                 failover=self._convo_failover, show=show)
@@ -246,21 +240,17 @@ class Claude:
         return self._deepseek
 
     def _setup_failover(self, clock=time.monotonic):
-        """The three failovers (brain/llm/failover.py) and the queue their
+        """The two failovers (brain/llm/failover.py) and the queue their
         notices wait in: the conversation's, shared with every delegation
-        through the ToolContext, and one each for the rewrite and the
-        extractor. Notices can be raised on any thread (extraction runs on
-        the memory worker), so they queue here and converse() speaks them
-        ahead of its next reply."""
+        through the ToolContext, and the query rewrite's. Notices can be
+        raised on any thread (a delegation runs on its own), so they queue
+        here and converse() speaks them ahead of its next reply."""
         self._notices = queue.SimpleQueue()
         notify = self._notices.put
         self._convo_failover = Failover("the conversation", other_provider,
                                         notify, clock=clock)
         self._query_failover = Failover("memory lookups",
                                         lambda m: cfg.QUERY_FALLBACK_MODEL,
-                                        notify, clock=clock)
-        self._facts_failover = Failover("memory saving",
-                                        lambda m: cfg.FACTS_FALLBACK_MODEL,
                                         notify, clock=clock)
 
     def _rewriter(self):
@@ -269,12 +259,6 @@ class Claude:
         return self._query_failover.wrap(
             lambda m: self._bound(lambda c: understanding.rewriter(c, m), m),
             cfg.QUERY_MODEL)
-
-    def _extractor(self):
-        """The fact extractor's model call, FACTS_MODEL with its failover."""
-        return self._facts_failover.wrap(
-            lambda m: self._bound(lambda c: extractor(c, m), m),
-            cfg.FACTS_MODEL)
 
     def _take_notices(self):
         """Failover announcements raised since the last reply, oldest first."""
@@ -504,7 +488,7 @@ class Claude:
         hat = agents.AGENTS[key]
         model = self.model_for(key)
         sub_ctx = ToolContext(store=self.store, discord=self.discord,
-                              kb=self.kb, memory=self.memory, facts=self.facts,
+                              kb=self.kb, memory=self.memory,
                               convo_model=model, active_agent=key,
                               # Focus is session state, not persona state: a
                               # delegated lookup honours the same narrowing
@@ -518,8 +502,7 @@ class Claude:
         # Alice what we discussed about X" reads Alice's exchanges without a
         # tool call.
         pull = context.build_context(task, owner=key, memory=self.memory,
-                                     facts=self.facts, kb=self.kb,
-                                     focus=self._ctx.focus)
+                                     kb=self.kb, focus=self._ctx.focus)
         system = system_blocks(
             DELEGATION_PROMPT.format(name=hat["name"], role=hat["role"])
             + "\n\n" + agents.instructions(key) + focus_prompt_block(self._ctx.focus),
@@ -685,11 +668,8 @@ class Claude:
         """Boot: bring the saved records up to the current shape (assistant
         companion keys, approximate-time stamps — memory.backfill_keys, a
         one-time cost), make sure every persona's saved thread is in its
-        exchange index (idempotent — records already present are skipped),
-        then queue every exchange the fact extractor has not read for the
-        memory worker, oldest first (the first boot after the fact store
-        arrived reads the whole history: one model call per exchange, in
-        the background, logged every 25). Also the embedding model's
+        exchange index (idempotent — records already present are skipped).
+        Also the embedding model's
         warm-up: without it the first turn paid the cold load (~26 s on
         2026-08-26). Failures are logged and retried next boot; a thread
         that isn't indexed is still on disk."""
@@ -708,23 +688,6 @@ class Claude:
                      "stamped approximate (one-time upgrade)", added, stamped)
         log.info("exchange index: %d new exchange(s) from saved threads (%.1fs)",
                  n, time.monotonic() - t0)
-        for k in agents.AGENTS:
-            self._enqueue(lambda k=k: self._catch_up(k), priority=1)
-
-    def _catch_up(self, owner):
-        """The extractor's boot pass for one persona, on the memory worker."""
-        pending = len(self.memory.unextracted(owner))
-        if not pending:
-            return
-        log.info("facts: %s has %d exchange(s) the extractor has not read; "
-                 "reading them in the background (%s)", owner, pending,
-                 cfg.FACTS_MODEL)
-        t0 = time.monotonic()
-        read, failed = catch_up(
-            self._extractor(), self.memory, self.facts, owner,
-            progress=lambda i, n: log.info("facts: %s %d/%d", owner, i, n))
-        log.info("facts: %s caught up — %d read, %d failed (%.0fs)", owner,
-                 read, failed, time.monotonic() - t0)
 
     # --- persistent conversation memory ---------------------------------------
     @staticmethod
@@ -751,12 +714,12 @@ class Claude:
     def _save_history(self):
         # Saved untrimmed: trimming happens on load / at each turn. This file
         # is the dashboard's transcript; the model's memory is the exchange
-        # index and the facts, written by the worker right after this save.
+        # index, written by the worker right after this save.
         hist.save(cfg.history_path(self.active), self.history)
 
     def converse(self, user_text: str) -> str:
         """One turn: the reply to `user_text`, written to history in full.
-        The turn reaches memory (the exchange index, the facts) only through
+        The turn reaches memory (the exchange index) only through
         settle_reply, once the caller knows how much of the reply was spoken;
         a caller that never reports is settled here at the next turn."""
         self._settle_pending()
@@ -847,16 +810,15 @@ class Claude:
                   if (t := ConversationMemory._message_text(m))]
         q = understanding.understand(
             self._rewriter(), user_text, recent,
-            now=self.history[-1].get("ts", ""),
-            known_entities=self.facts.entities(self.active))
+            now=self.history[-1].get("ts", ""))
         in_tail = {exchange_id(self.active, m) for m in self.history[wire_from:-1]
                    if m.get("role") == "user" and isinstance(m.get("content"), str)}
         # recall excludes the same tail, so it can never hand the model its
         # own current answers back as "past conversations".
         self._ctx.tail_ids = frozenset(in_tail)
         return context.build_context(q, owner=self.active, memory=self.memory,
-                                     facts=self.facts, kb=self.kb,
-                                     exclude_ids=in_tail, focus=self._ctx.focus)
+                                     kb=self.kb, exclude_ids=in_tail,
+                                     focus=self._ctx.focus)
 
     # --- what the user heard -------------------------------------------------
     def settle_reply(self, reply, heard):
@@ -918,8 +880,8 @@ class Claude:
 
     # --- the memory worker ----------------------------------------------------
     def _remember(self):
-        """Hand the exchange that just ended to the memory worker: index it,
-        then learn its facts. Re-derived from history rather than remembered,
+        """Hand the exchange that just ended to the memory worker to index.
+        Re-derived from history rather than remembered,
         so it is right after a persona switch too, and a deferred self-note
         (flush_tool_events(persist=True)) or a settle_reply rewrite overwrites
         the same record. Runs once the reply is settled — memory holds what
@@ -927,33 +889,20 @@ class Claude:
         before retrieval could need it."""
         owner = self.active
         msgs = list(self.history[hist.tail_start(self.history, 0):])
-        self._enqueue(lambda: self._learn_exchange(owner, msgs))
+        self._enqueue(lambda: self.memory.index_exchanges(
+            msgs, owner, skip_existing=False))
 
-    def _learn_exchange(self, owner, msgs):
-        t0 = time.monotonic()
-        if not self.memory.index_exchanges(msgs, owner, skip_existing=False):
-            return
-        ask = self._extractor()
-        counts = [learn(ask, self.memory, self.facts, owner, xid, doc, meta)
-                  for xid, doc, meta in self.memory.exchanges_of(msgs, owner)]
-        log.info("remembered exchange for %s: facts %s (%.0f ms)", owner,
-                 ", ".join("+%d ~%d -%d" % c if c else "extraction failed"
-                           for c in counts) or "none",
-                 (time.monotonic() - t0) * 1000)
-
-    def _enqueue(self, job, priority=0):
-        """Queue `job` for the memory worker — a live exchange (0) ahead of a
-        boot backlog (1) — or run it right here when there is no worker
-        (tests and scripts build the object without one)."""
+    def _enqueue(self, job):
+        """Queue `job` for the memory worker, or run it right here when
+        there is no worker (tests and scripts build the object without one)."""
         if self._jobs is None:
             self._run(job)
             return
-        self._seq += 1
-        self._jobs.put((priority, self._seq, job))
+        self._jobs.put(job)
 
     def _work(self):
         while True:
-            self._run(self._jobs.get()[2])
+            self._run(self._jobs.get())
 
     @staticmethod
     def _run(job):

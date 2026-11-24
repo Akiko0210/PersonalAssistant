@@ -144,9 +144,7 @@ class Agent:
         self.display = None
         self.llm = Claude(self.store, self.idle, self.kb, show=self.show_card)
         # Make sure every saved thread is in the exchange index (idempotent;
-        # a no-op after the first boot) and hand the fact extractor whatever it
-        # has not read yet (it runs on the memory worker, in the background).
-        # This also loads the embedding model here, at startup, rather than
+        # a no-op after the first boot). This also loads the embedding model here, at startup, rather than
         # on the first turn.
         self.llm.index_saved_threads()
         self.log.info("loading speech model...")

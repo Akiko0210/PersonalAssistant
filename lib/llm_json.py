@@ -1,6 +1,6 @@
 """The one JSON object in a model's reply. Models asked for "JSON only" still
-wrap it in prose or a code fence now and then; the two callers (query
-understanding, fact extraction) both need the object and nothing else, and a
+wrap it in prose or a code fence now and then; the caller (query
+understanding) needs the object and nothing else, and a
 parse failure must read as "no answer", never as an exception on the turn.
 Leaf: stdlib only.
 """

@@ -1,6 +1,6 @@
 """Tests for the exchange index (brain/memory.py): what gets written per
-turn, how it is read back (dense + lexical, per persona), the marks the fact
-extractor leaves, the recall tool's seams, and the honest failure paths — a
+turn, how it is read back (dense + lexical, per persona), the recall tool's
+seams, and the honest failure paths — a
 broken collection is reported as unsearchable, never as "nothing there"
 (2026-07-27 08:12, the hnsw segment reader fault).
 
@@ -84,26 +84,6 @@ class TestIndexing(unittest.TestCase):
                                                   skip_existing=False), 1)
 
 
-class TestExtractorMarks(unittest.TestCase):
-    def test_unread_exchanges_come_oldest_first_and_marks_stick(self):
-        cols = {}
-        mem = memory_over(cols)
-        later = user("second", ts="2026-09-18T09:25:00-07:00")
-        first = user("first", ts="2026-09-18T09:24:00-07:00")
-        mem.index_exchanges([later, assistant("b"), first, assistant("a")], "alice")
-        pending = mem.unextracted("alice")
-        self.assertEqual([x for x, _, _ in pending],
-                         [exchange_id("alice", first), exchange_id("alice", later)])
-        self.assertEqual(pending[0][1], "user: first\nassistant: a")
-        mem.mark_extracted("alice", exchange_id("alice", first))
-        self.assertEqual([x for x, _, _ in mem.unextracted("alice")],
-                         [exchange_id("alice", later)])
-        # A metadata-only merge: the record keeps everything else it had.
-        col = cols[cfg.agent_memory_collection("alice")]
-        meta = col.rows[exchange_id("alice", first)][1]
-        self.assertEqual((meta["extracted"], meta["kind"]), (True, "exchange"))
-
-
 class TestRetrieval(unittest.TestCase):
     def setUp(self):
         self.cols = {}
@@ -143,17 +123,6 @@ class TestRetrieval(unittest.TestCase):
         self.assertNotIn("SPX butterfly summary",
                          self.mem.search("SPX butterfly", caller="tom"))
         self.assertEqual(archive.queries, 0)
-
-    def test_fetch_reads_exchanges_by_id_oldest_first(self):
-        a = user("first thing", ts="2026-09-18T09:24:00-07:00")
-        b = user("second thing", ts="2026-09-18T09:25:00-07:00")
-        self.mem.index_exchanges([b, assistant("B"), a, assistant("A")], "alice")
-        out = self.mem.fetch([exchange_id("alice", b), exchange_id("alice", a), "xc_nope"],
-                             caller="alice")
-        self.assertLess(out.index("first thing"), out.index("second thing"))
-        self.assertIn(f"[{history.time_label(a['ts'])}]", out)
-        self.assertIn("(1 id(s) not found.)", out)
-        self.assertIn("None of those", self.mem.fetch(["xc_nope"], caller="alice"))
 
 
 class TestArchiveFailureIsHonest(unittest.TestCase):
@@ -347,9 +316,7 @@ class TestRecallTool(unittest.TestCase):
             return "From past conversations:\n[9:00am] user: x"
         self.kb_text = ""
         self.ctx = ToolContext(
-            memory=SimpleNamespace(search=search,
-                                   fetch=lambda ids, caller=None:
-                                   seen.update(ids=ids, fetch_caller=caller) or "fetched"),
+            memory=SimpleNamespace(search=search),
             kb=SimpleNamespace(search=lambda q, caller=None, focus=None: self.kb_text),
             active_agent="alice", tail_ids=frozenset({"xc_tail"}))
 
@@ -369,11 +336,6 @@ class TestRecallTool(unittest.TestCase):
         self.assertEqual(self.seen["query"], "")
         self.assertIsNotNone(self.seen["window"])
         self.assertIn("Give recall a topic", dispatch(self.ctx, "recall", {}))
-
-    def test_ids_read_the_exchanges_behind_a_fact(self):
-        self.assertEqual(dispatch(self.ctx, "recall", {"ids": ["xc_1", "xc_2"]}), "fetched")
-        self.assertEqual((self.seen["ids"], self.seen["fetch_caller"]),
-                         (["xc_1", "xc_2"], "alice"))
 
     def test_reference_passages_are_appended_only_when_there_are_any(self):
         self.assertNotIn("reference material", dispatch(self.ctx, "recall", {"query": "x"}))

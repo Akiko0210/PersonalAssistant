@@ -36,7 +36,7 @@ class TestCreateAgent(unittest.TestCase):
         self.assertIn("Created Noah", out)
         noah, tom = agents.AGENTS["noah"], agents.AGENTS["tom"]
         for field in ("role", "persona", "tools", "brokers", "record_rules",
-                      "fact_skip", "model", "tts_voice", "tts_rate"):
+                      "model", "tts_voice", "tts_rate"):
             self.assertEqual(noah[field], tom[field], field)
         self.assertEqual((noah["name"], noah["aliases"]), ("Noah", ("noah",)))
         self.assertEqual(agents.match_address("Noah, what's SPX at?"),
