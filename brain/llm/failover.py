@@ -1,10 +1,10 @@
 """Fail over to a standby model, say so once, and come back on our own.
 
-Three calls depend on one provider each — the conversation, the query
-rewrite before retrieval, and the fact extraction after the reply — and on
-2026-09-29 and 2026-10-01 the last two failed for hours in silence: 90
-rewrite failures (timeouts and an empty balance) and extraction hangs of up
-to 901 s, with no word to the user and no way back short of a restart. The
+Two calls depend on one provider each — the conversation and the query
+rewrite before retrieval — and on 2026-09-29 and 2026-10-01 the rewrite (and
+the since-removed fact extraction) failed for hours in silence: 90 rewrite
+failures (timeouts and an empty balance) and extraction hangs of up to 901 s,
+with no word to the user and no way back short of a restart. The
 conversation failed over, but stuck on the standby until restart.
 
 One Failover per call site. While the default's provider is cooling down

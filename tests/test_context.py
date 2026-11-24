@@ -47,25 +47,8 @@ def fake_memory(dense_hits=(), lexical_hits=(), error=None):
                            exchanges_of=lambda *a, **k: [])
 
 
-def fake_facts(current=(), dense_hits=(), known=()):
-    calls = []
-
-    def by_key(owner, entities):
-        calls.append(tuple(entities))
-        return list(current)
-    return SimpleNamespace(current=by_key, calls=calls,
-                           query_rows=lambda *a, **k: Rows(list(dense_hits), [], 1, None),
-                           entities=lambda owner: list(known))
-
-
 def fake_kb(hits=()):
     return SimpleNamespace(query_rows=lambda *a, **k: list(hits))
-
-
-def fact(id_, entity, value, ts="2026-09-18T09:34:37-07:00", age_h=2.0, sources="xc_1,xc_2"):
-    return Hit(0.0, f"{entity}: {value}",
-               {"entity": entity, "ts": ts, "epoch": NOW - age_h * H, "approx": False,
-                "source_ids": sources, "superseded_by": ""}, id_)
 
 
 class TestScoring(unittest.TestCase):
@@ -161,7 +144,6 @@ class TestBudget(unittest.TestCase):
         chunk = Hit(0.2, "reference text", {"title": "Book"}, "kb1")
         pull = context.build_context("q", owner="alice",
                                      memory=SimpleNamespace(query_rows=boom),
-                                     facts=SimpleNamespace(current=boom, query_rows=boom),
                                      kb=fake_kb([chunk]), now=NOW)
         self.assertIn("reference text", pull.block)
 
@@ -172,52 +154,12 @@ class TestBudget(unittest.TestCase):
         self.assertEqual([c.note for c in pull.candidates], ["gate"])
 
 
-class TestFacts(unittest.TestCase):
-    """Facts about a named entity come by key, first, uncapped; the rest
-    of the fact store is one more ranked source."""
-
-    def test_a_named_entitys_facts_are_pinned_first_and_labelled_derived(self):
-        facts = fake_facts(current=[fact("f_1", "todo:2026-09-18", "Items: one, two.")])
-        memory = fake_memory([dense("m1", "user: about the list\nassistant: sure", 0.8)])
-        pull = context.build_context(Query(text="the user's list", entities=("todo:2026-09-18",)),
-                                     owner="alice", memory=memory, facts=facts,
-                                     kb=fake_kb(), now=NOW)
-        self.assertEqual(facts.calls, [("todo:2026-09-18",)])
-        as_of = time_label("2026-09-18T09:34:37-07:00")
-        self.assertIn(f'<item source="fact" entity="todo:2026-09-18" as_of="{as_of}" '
-                      'age="2 hours ago" from="xc_1,xc_2">\nItems: one, two.',
-                      pull.block)
-        self.assertLess(pull.block.index('source="fact"'),
-                        pull.block.index('source="conversation"'))
-        self.assertIn("derived", pull.block)
-
-    def test_a_pinned_fact_is_not_cut_to_the_per_hit_cap_and_wins_the_budget(self):
-        long_fact = fact("f_1", "todo:2026-09-18", "Items: " + "x" * 120)
-        memory = fake_memory([dense("m1", "y" * 100, 0.9)])
-        with mock.patch.multiple(cfg, CONTEXT_HIT_CHARS=50, CONTEXT_CONVO_CHARS=150):
-            pull = context.build_context(Query(text="q", entities=("todo:2026-09-18",)),
-                                         owner="alice", memory=memory,
-                                         facts=fake_facts(current=[long_fact]),
-                                         kb=fake_kb(), now=NOW)
-        kept = {c.id: c.kept for c in pull.candidates}
-        self.assertEqual(kept, {"f_1": True, "m1": False})
-        self.assertIn("x" * 120, pull.block)
-
-    def test_unnamed_facts_are_ranked_with_the_exchanges(self):
-        f = fact("f_2", "preference:coffee", "Takes it black.")
-        pull = context.build_context("coffee", owner="alice", memory=fake_memory(),
-                                     facts=fake_facts(dense_hits=[Hit(0.2, f.doc, f.meta, f.id)]),
-                                     kb=fake_kb(), now=NOW)
-        (c,) = pull.candidates
-        self.assertEqual((c.source, c.kept), ("fact", True))
-        self.assertIn('entity="preference:coffee"', pull.block)
-
-    def test_a_window_filters_both_stores_and_turns_the_gate_off(self):
+class TestWindow(unittest.TestCase):
+    def test_a_window_filters_the_exchanges_and_turns_the_gate_off(self):
         memory = fake_memory([dense("m1", "user: morning\nassistant: hi", 0.05)])
-        facts = fake_facts()
         window = (NOW - 4 * H, NOW - 3 * H)
         pull = context.build_context(Query(text="this morning", window=window),
-                                     owner="alice", memory=memory, facts=facts,
+                                     owner="alice", memory=memory,
                                      kb=fake_kb(), now=NOW)
         self.assertEqual(memory.calls[0][3], {"window": window})
         self.assertTrue(pull.candidates[0].kept)  # cosine 0.05 would never clear the gate
@@ -264,29 +206,24 @@ class TestConverseSeams(unittest.TestCase):
             raise RuntimeError("index gone")
         c = make_claude([text_reply("still here")])
         c.memory = SimpleNamespace(query_rows=boom, index_exchanges=boom)
-        # FactStore.entities never raises (it answers [] on a broken store);
-        # the two readers under build_context's guards may.
-        c.facts = SimpleNamespace(entities=lambda o: [], current=boom, query_rows=boom)
         self.assertEqual(c.converse("hi"), "still here")
 
-    def test_the_understood_query_drives_retrieval_and_pins_its_entity(self):
+    def test_the_understood_query_drives_retrieval(self):
         c = make_claude(history=[
             {"role": "user", "content": "how did the SPX butterfly do", "ts": ""},
             {"role": "assistant", "content": [{"type": "text", "text": "fine"}]}])
-        c.memory = fake_memory()
-        c.facts = fake_facts(current=[fact("f_1", "trade:spx-butterfly", "Opened Tuesday.")],
-                             known=["trade:spx-butterfly"])
+        c.memory = fake_memory([dense("m1", "user: the butterfly\nassistant: Opened Tuesday.", 0.8)])
         prompts = []
 
         def ask(system, prompt):
             prompts.append(prompt)
-            return json.dumps({"query": "the SPX butterfly's other leg",
-                               "entities": ["trade:spx-butterfly"]})
+            return json.dumps({"query": "the SPX butterfly's other leg"})
         c._rewriter = lambda: ask
         c.converse("and the other one?")
         self.assertEqual(c.memory.calls[0][0], "the SPX butterfly's other leg")
-        self.assertEqual(c.facts.calls, [("trade:spx-butterfly",)])
-        self.assertIn("Opened Tuesday.", system_text(c.client.messages.calls[0]))
+        system = system_text(c.client.messages.calls[0])
+        self.assertIn("Opened Tuesday.", system)
+        self.assertNotIn('source="fact"', system)  # #86: no derived facts, ever
         # The rewrite saw the recent turns and the current stamp.
         self.assertIn("user: how did the SPX butterfly do", prompts[0])
         self.assertIn("and the other one?", prompts[0])
@@ -326,23 +263,18 @@ class TestConverseSeams(unittest.TestCase):
         c.converse("hello")
         self.assertEqual(c.memory.calls[0][2], "tom")
 
-    def test_the_exchange_is_indexed_and_learned_once_the_reply_is_spoken(self):
+    def test_the_exchange_is_indexed_once_the_reply_is_spoken(self):
         c = make_claude([text_reply("noted")])
-        written, learned = [], []
+        written = []
         c.memory = SimpleNamespace(
             query_rows=lambda *a, **k: Rows([], [], 0, None),
             index_exchanges=lambda msgs, owner, skip_existing=True:
-                written.append((msgs, owner, skip_existing)) or 1,
-            exchanges_of=lambda msgs, owner: [("xc_1", "user: remember this", {})])
-        with mock.patch("brain.llm.main.learn",
-                        lambda ask, mem, facts, owner, xid, doc, meta:
-                        learned.append((owner, xid)) or (0, 0, 0)):
-            c.converse("remember this")
-            self.assertEqual(written, [])  # not before the reply is spoken
-            c.settle_reply("noted", "noted")
+                written.append((msgs, owner, skip_existing)) or 1)
+        c.converse("remember this")
+        self.assertEqual(written, [])  # not before the reply is spoken
+        c.settle_reply("noted", "noted")
         (msgs, owner, skip), = written
         self.assertEqual((owner, skip, msgs[0]["content"]), ("alice", False, "remember this"))
-        self.assertEqual(learned, [("alice", "xc_1")])
 
 
 class TestRender(unittest.TestCase):

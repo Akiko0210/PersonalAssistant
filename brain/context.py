@@ -1,18 +1,17 @@
 """Per-turn Background: what the model gets to see about earlier
-conversations, the facts it has learned, and reference material — chosen by
-relevance and recency, plus by key when the question names a thing.
+conversations and reference material — chosen by relevance and recency.
 
 Every turn retrieves candidates from the persona's exchange index (dense +
-BM25, brain/memory.py), its fact store (same two ways, brain/facts.py) and
-the knowledge base (dense, stores/knowledge.py), fuses them into one
-ranking, and fills a character budget with the best. The scorer follows the
+BM25, brain/memory.py) and the knowledge base (dense, stores/knowledge.py),
+ranks them, and fills a character budget with the best. The scorer follows the
 field's baseline rather than inventing one: relative-score fusion of the
 dense and lexical lists (Weaviate's default), plus an additive recency term
 with exponential decay (Park et al. 2023, the Generative Agents memory
 stream). Round-level records with time labels are what LongMemEval found
-reads best. Facts about an entity the query names skip the ranking and are
-placed first: "what's on my list" has exactly one right record, and ranking
-it means gambling that it lands in the budget (2026-09-18).
+reads best. There is no derived "fact" layer: extracted facts once sat here,
+pinned first as "the current state", and fed the persona's own guesses back
+to it as truth (#86). What is in progress lives in the working record; what
+is true now comes from a tool.
 
 The block is the LAST system block: after the frozen system prompt, so the
 cached static prefix survives it, and before the conversation, so the user's
@@ -40,21 +39,15 @@ log = logging.getLogger("context")
 HEADER = (
     "Background retrieved for this turn — what you know that bears on the "
     "user's message, ranked by relevance and recency. It may not apply: "
-    "ignore what doesn't. Items marked source=\"fact\" are the current state "
-    "of something as you last learned it, distilled from the exchanges named "
-    "in `from` and dated as of the exchange that established it; they are "
-    "derived, so when one matters, say what you know as of that time. Items "
-    "marked source=\"conversation\" record what was said at the time, not "
-    "current fact. Call recall only when you need more than this shows, or "
-    "the exact words behind a fact (pass its `from` ids)."
+    "ignore what doesn't. Items marked source=\"conversation\" record what "
+    "was said at the time, not current fact. Call recall only when you need "
+    "more than this shows."
 )
-
-PINNED = 10.0  # score of a fact included by key: above any fused score
 
 
 @dataclass
 class Candidate:
-    source: str            # "conversation" | "fact" | "knowledge"
+    source: str            # "conversation" | "knowledge"
     id: str
     doc: str
     meta: dict
@@ -102,7 +95,7 @@ def recency(age_h) -> float:
 
 def age_hours(meta, now=None):
     """Hours between `now` (epoch seconds) and a record's time: `epoch` on
-    exchange and fact records; the `date` of a legacy summary as the END of
+    exchange records; the `date` of a legacy summary as the END of
     that local day (a summary covers the day; "A to B" ranges take B); None
     when neither parses."""
     now = time.time() if now is None else now
@@ -204,9 +197,8 @@ def _fill(cands, budget, cap=None):
     to-do list" nine exchanges *about* keeping a list (pairwise cosine 0.6)
     filled the budget while the list itself sat at rank 10 (2026-09-17).
     Candidates without a vector (knowledge chunks) carry no penalty, so
-    their fill is plain score order. `cap` truncates conversation text only:
-    a fact is already the distilled form, and cutting a list loses items. An
-    oversize document is skipped, not truncated, so the next one that fits
+    their fill is plain score order. `cap` truncates conversation text only.
+    An oversize document is skipped, not truncated, so the next one that fits
     still gets in. Returns the unused budget."""
     pool = []
     for c in cands:
@@ -235,8 +227,7 @@ def _fill(cands, budget, cap=None):
 def render(candidates) -> str:
     """The Background block, or "" when nothing was kept. Each item carries
     what the model needs to weigh it: when an exchange happened and how long
-    ago; which entity a fact is about, as of when, and which exchanges it
-    came from; or where a chunk came from."""
+    ago, or where a chunk came from."""
     kept = [c for c in candidates if c.kept]
     if not kept:
         return ""
@@ -246,39 +237,30 @@ def render(candidates) -> str:
         if c.source == "knowledge":
             attrs = f'source="knowledge" cite="{cite(c.meta)}"'
         else:
-            if c.source == "fact":
-                entity = c.meta.get("entity", "")
-                if text.startswith(entity + ": "):
-                    text = text[len(entity) + 2:]  # the key is an attribute, not the value
-                attrs = f'source="fact" entity="{entity}" as_of="{when(c.meta)}"'
-            else:
-                attrs = f'source="conversation" when="{when(c.meta)}"'
+            attrs = f'source="conversation" when="{when(c.meta)}"'
             # No age on an approximate stamp: "2 hours ago" is exactly the
             # false precision the "on or before" label exists to avoid.
             if (label := age_label(c.age_h)) and not c.meta.get("approx"):
                 attrs += f' age="{label}"'
-            if c.source == "fact" and c.meta.get("source_ids"):
-                attrs += f' from="{c.meta["source_ids"]}"'
             if c.meta.get("tools"):
                 attrs += f' tools="{c.meta["tools"]}"'
         items.append(f"<item {attrs}>\n{text}\n</item>")
     return HEADER + "\n\n" + "\n".join(items)
 
 
-def build_context(query, *, owner, memory, kb, facts=None, exclude_ids=(),
+def build_context(query, *, owner, memory, kb, exclude_ids=(),
                   focus=None, now=None) -> ContextPull:
     """The Background for one turn. `query` is a brain.query.Query (a plain
     string is taken as its text). Never raises and always logs: a turn must
     not die on its own memory, so each store is queried under its own guard
-    and a failure just means a smaller (or empty) block. Facts about the
-    entities the query names come first, by key; then exchanges and the
-    remaining facts, one fused ranking, fill CONTEXT_CONVO_CHARS; knowledge
-    takes CONTEXT_KB_CHARS plus whatever that left over. With a time window
-    both memory stores are filtered to it and the relevance gate is off."""
+    and a failure just means a smaller (or empty) block. Exchanges fill
+    CONTEXT_CONVO_CHARS; knowledge takes CONTEXT_KB_CHARS plus whatever that
+    left over. With a time window the exchanges are filtered to it and the
+    relevance gate is off."""
     q = query if isinstance(query, Query) else Query(text=str(query))
     t0 = time.monotonic()
     pull = ContextPull(query=q.text)
-    pinned, ranked, chunks = [], [], []
+    ranked, chunks = [], []
     try:
         rows = memory.query_rows(q.text, cfg.CONTEXT_CANDIDATES + len(exclude_ids),
                                  owner, window=q.window)
@@ -286,21 +268,6 @@ def build_context(query, *, owner, memory, kb, facts=None, exclude_ids=(),
                       gated=q.window is None, by_recency=q.window is None)
     except Exception as e:  # noqa: BLE001 - retrieval must never cost the turn
         log.warning("conversation retrieval failed: %s", e)
-    if facts is not None:
-        try:
-            for h in facts.current(owner, q.entities) if q.entities else []:
-                c = Candidate("fact", h.id, h.doc, h.meta, h.vec, sim=1.0,
-                              score=PINNED, gate=True)
-                c.age_h = age_hours(h.meta, now)
-                pinned.append(c)
-            rows = facts.query_rows(q.text, cfg.CONTEXT_CANDIDATES, owner,
-                                    window=q.window)
-            ranked += fuse(rows.dense, rows.lexical, now=now, source="fact",
-                           exclude_ids={c.id for c in pinned},
-                           gated=q.window is None, by_recency=q.window is None)
-            ranked.sort(key=lambda c: -c.score)
-        except Exception as e:  # noqa: BLE001
-            log.warning("fact retrieval failed: %s", e)
     try:
         for h in kb.query_rows(q.text, cfg.CONTEXT_CANDIDATES, owner, focus):
             c = Candidate("knowledge", h.id, h.doc, h.meta, sim=similarity(h.score))
@@ -310,30 +277,30 @@ def build_context(query, *, owner, memory, kb, facts=None, exclude_ids=(),
     except Exception as e:  # noqa: BLE001
         log.warning("knowledge retrieval failed: %s", e)
     try:
-        left = _fill(pinned + ranked, cfg.CONTEXT_CONVO_CHARS, cap=cfg.CONTEXT_HIT_CHARS)
+        left = _fill(ranked, cfg.CONTEXT_CONVO_CHARS, cap=cfg.CONTEXT_HIT_CHARS)
         _fill(chunks, cfg.CONTEXT_KB_CHARS + left)
         if q.window is not None:
             ranked.sort(key=lambda c: c.meta.get("epoch") or 0)  # a stretch reads in order
-        pull.candidates = pinned + ranked + chunks
+        pull.candidates = ranked + chunks
         pull.block = render(pull.candidates)
     except Exception as e:  # noqa: BLE001
         log.warning("context assembly failed; answering without Background: %s", e)
         pull.block = ""
     pull.ms = (time.monotonic() - t0) * 1000
-    log_pull(pull, len(pinned))
+    log_pull(pull)
     return pull
 
 
-def log_pull(pull, pinned=0):
+def log_pull(pull):
     """One INFO line per turn; at DEBUG, one row per candidate and the block
     itself. This is the evidence the thresholds get tuned from."""
     def part(source):
         cs = [c for c in pull.candidates if c.source == source]
         return sum(c.kept for c in cs), len(cs), sum(c.chars for c in cs if c.kept)
-    conv, fact, know = part("conversation"), part("fact"), part("knowledge")
-    log.info("context pull %r: conversation %d/%d kept (%d chars), facts %d/%d "
-             "kept (%d pinned), knowledge %d/%d kept (%d chars), %.0f ms",
-             pull.query[:80], *conv, fact[0], fact[1], pinned, *know, pull.ms)
+    conv, know = part("conversation"), part("knowledge")
+    log.info("context pull %r: conversation %d/%d kept (%d chars), "
+             "knowledge %d/%d kept (%d chars), %.0f ms",
+             pull.query[:80], *conv, *know, pull.ms)
     if not log.isEnabledFor(logging.DEBUG):
         return
     for c in pull.candidates:

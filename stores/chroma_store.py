@@ -15,8 +15,8 @@ import config as cfg
 
 log = logging.getLogger("chroma")
 # sentence-transformers prints a tqdm "Batches" bar for every encode whenever
-# logging is at INFO — one per retrieval, and a continuous stream during the
-# boot-time fact extraction (2026-09-22). The bars carry nothing the log lines
+# logging is at INFO — one per retrieval, and a continuous stream during a
+# boot-time backfill (2026-09-22). The bars carry nothing the log lines
 # don't.
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
@@ -90,14 +90,3 @@ def collection(name):
     return col
 
 
-def drop(name) -> bool:
-    """Delete a collection outright. Only the fact store's rebuild
-    (scripts/rebuild_facts.py) does this — facts are a derived index and are
-    regenerated from the exchanges; nothing in the agent deletes a
-    collection. False when there was none to delete."""
-    try:
-        chromadb.PersistentClient(path=str(cfg.CHROMA_DIR)).delete_collection(name)
-    except Exception:  # noqa: BLE001 - chromadb's not-found error class has moved between versions
-        return False
-    _spaces.pop(name, None)
-    return True

@@ -1,9 +1,8 @@
 """One plain model call, text in, text out.
 
-The seam behind query understanding (brain/query.py) and fact extraction
-(brain/facts.py): each binds its own model and limits here and hands the
-bound call down, so neither module knows a client, and the agent and the
-offline scripts (the eval harness, the fact rebuild) make the very same call.
+The seam behind query understanding (brain/query.py): it binds its own
+model and limits here and hands the bound call down, so it never knows a
+client, and the agent and the offline eval harness make the very same call.
 Lives beside the providers because the client is theirs; imports none of
 them — it is handed one.
 """

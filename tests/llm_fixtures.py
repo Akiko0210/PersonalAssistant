@@ -77,17 +77,12 @@ def make_claude(responses=None, *, active=None, convo_model=_UNSET,
     c.memory = SimpleNamespace(index_exchanges=lambda *a, **k: 0,
                                exchanges_of=lambda *a, **k: [],
                                query_rows=lambda *a, **k: Rows([], [], 0, None))
-    c.facts = SimpleNamespace(query_rows=lambda *a, **k: Rows([], [], 0, None),
-                              current=lambda *a, **k: [],
-                              entities=lambda *a, **k: [])
     # No memory worker: _remember runs inline, so a test sees the write when
-    # converse() returns. No small-model calls: the rewrite gets "" and falls
-    # back to the raw utterance, the extractor finds nothing durable; a test
-    # that wants either binds its own callable.
+    # converse() returns. No small-model call: the rewrite gets "" and falls
+    # back to the raw utterance; a test that wants one binds its own callable.
     c._jobs = None
     c._unsettled, c._reply = False, None  # settle_reply's bookkeeping
     c._rewriter = lambda: (lambda system, prompt: "")
-    c._extractor = lambda: (lambda system, prompt: '{"ops": []}')
     c._record_block = lambda owner: ""  # no working record unless a test installs one
     c._setup_failover()  # real failovers; a test wanting a clock calls it again
     c._ctx = ToolContext(

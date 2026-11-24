@@ -1,12 +1,12 @@
 """The recall tool: the one way past the Background.
 
-Every turn already retrieves the exchanges, facts and reference passages that
-bear on the message (brain/context.py). What that one shot cannot do is the
+Every turn already retrieves the exchanges and reference passages that bear
+on the message (brain/context.py). What that one shot cannot do is the
 second question the model only knows to ask after reading the first answer —
-"the list mentions a dentist; when did we last discuss the dentist?" — the
-exact words behind a fact (its `from` ids), a stretch of time read in order,
-or more depth than the budget holds. One tool covers all four, over the
-caller's own exchange index and the reference material it may read.
+"the list mentions a dentist; when did we last discuss the dentist?" — a
+stretch of time read in order, or more depth than the budget holds. One tool
+covers all three, over the caller's own exchange index and the reference
+material it may read.
 """
 
 from lib.dates import PERIODS, window_epochs
@@ -21,8 +21,7 @@ from tools import tool
         "ingested reference material (books, PDFs, course videos — cited by "
         "page or timestamp). Use it when the Background raises a second "
         "question, when the user asks for more ('what exactly did I say', "
-        "'everything we discussed about X'), to read the exact exchanges "
-        "behind a fact (pass its `from` ids), or when the user names a time "
+        "'everything we discussed about X'), or when the user names a time "
         "('this morning', 'yesterday around 9:20', 'last week'): time words "
         "carry no weight in a search, so pass period or since/until — the "
         "window then replaces topic relevance and the exchanges come back in "
@@ -36,7 +35,7 @@ from tools import tool
         "properties": {
             "query": {"type": "string",
                       "description": "Topic to look for. Optional when a time "
-                                     "window or ids are given."},
+                                     "window is given."},
             "period": {"type": "string", "enum": list(PERIODS),
                        "description": "Named day range, local time — for "
                                       "'yesterday', 'last week'."},
@@ -46,19 +45,14 @@ from tools import tool
             "until": {"type": "string",
                       "description": "ISO local date or datetime: end of the window. "
                                      "A bare date means the end of that day."},
-            "ids": {"type": "array", "items": {"type": "string"},
-                    "description": "Exchange ids to read in full — the `from` "
-                                   "attribute of a Background fact."},
         },
     },
 })
 def recall(ctx, args):
-    if args.get("ids"):
-        return ctx.memory.fetch(args["ids"], caller=ctx.active_agent)
     query = (args.get("query") or "").strip()
     window = window_epochs(args.get("period"), args.get("since"), args.get("until"))
     if not query and window is None:
-        return "Give recall a topic, a time window, or exchange ids."
+        return "Give recall a topic or a time window."
     parts = [ctx.memory.search(query, caller=ctx.active_agent, window=window,
                                exclude_ids=ctx.tail_ids)]
     if query and ctx.kb is not None:
