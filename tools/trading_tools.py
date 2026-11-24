@@ -1010,6 +1010,27 @@ def review_order(ctx, args):
     return ". ".join(parts)
 
 
+def _as_placed(eng, tk, order):
+    """The submitted order as the broker holds it, for the self-note. The
+    ticket's legs default to Open, and tastytrade rewrites an opening leg
+    against an existing position to a closing one *when routed* — so the
+    ticket said "Bear Put Spread: BTO 700 Put; STO 690 Put" while the broker
+    held Buy to Close / Sell to Close, and the agent remembered opening a
+    spread it had in fact closed (#84). Hence a re-read after the submit; the
+    ticket is the fallback only when the broker shows no legs at all."""
+    try:
+        order = eng.orders.get(tk.account, order.id)
+    except Exception:
+        pass  # the submit's own reply is the next-best record
+    legs = getattr(order, "legs", None)
+    if not legs:
+        return f"{tk.describe()} (the ticket's wording — the broker listed no legs)"
+    price = f" at {order.price:.2f} {order.price_effect}" if order.price else ""
+    tif = f", {order.time_in_force}" if order.time_in_force else ""
+    return ("; ".join(f"{l['action']} {l['quantity']} {blocks.symbol_name(l['symbol'])}"
+                      for l in legs) + f"{price}{tif}.")
+
+
 @tool({
     "name": "submit_order",
     "description": (
@@ -1048,7 +1069,7 @@ def submit_order(ctx, args):
         return reason
     where = eng.label(tk.account)
     ctx.record_event(f"Order {order.id} submitted on {tmain.label(eng.key)}, "
-                     f"{where}: {tk.describe()}")
+                     f"{where}: {_as_placed(eng, tk, order)}")
     env = eng.broker.env_label()
     return (f"Order {order.id} submitted for {where} on {tmain.label(eng.key)} "
             f"({env}): status {order.status}. Ask me for the order status any "

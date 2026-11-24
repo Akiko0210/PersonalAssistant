@@ -15,8 +15,9 @@ from tests.trading_fixtures import FakeEngine, spx_chain
 from tools import ToolContext, dispatch
 from trading import accounts as taccounts
 from trading import config as tcfg
+from trading import symbols as tsym
 from trading import ticket as tticket
-from trading.models import Leg
+from trading.models import BrokerError, Leg, PlacedOrder
 from trading.ticket import Ticket
 
 IRA, RED = "12345699", "87654868"
@@ -33,11 +34,11 @@ class AccountsBase(unittest.TestCase):
         taccounts.set_name("schwab", "868", "red")
         self.eng = FakeEngine("schwab", accounts={IRA: 100.0, RED: -30.0})
 
-    def run_tool(self, tool, args=None, persona="tom"):
+    def run_tool(self, tool, args=None, persona="tom", ctx=None):
         with mock.patch("tools.trading_tools._engine_for",
                         side_effect=lambda b: (self.eng, None) if b == "schwab"
                         else (None, "not configured")):
-            return dispatch(ToolContext(active_agent=persona), tool, args or {})
+            return dispatch(ctx or ToolContext(active_agent=persona), tool, args or {})
 
 
 class TestStore(AccountsBase):
@@ -157,6 +158,38 @@ class TestOrdersFollowTheAccount(AccountsBase):
         self.assertIn("Not placed", out)
         self.assertIn("reviewed for IRA (…699)", out)
         self.assertEqual(self.placed, [])
+
+    # --- the self-note says what the broker holds (#84) ---
+
+    def submit_note(self):
+        ctx = ToolContext(active_agent="tom")
+        self.run_tool("set_account", {"account": "IRA"})
+        self.run_tool("review_order")
+        self.run_tool("submit_order", {"confirmed": True}, ctx=ctx)
+        self.assertEqual(len(ctx.events), 1)
+        return ctx.events[0]
+
+    def test_note_uses_the_broker_legs_not_the_ticket(self):
+        # The ticket says Sell to Open; the broker rewrote it to Sell to
+        # Close when routing — the note must say what the broker holds.
+        occ = tsym.build_occ("SPXW", "2026-07-24", "P", 6350)
+        self.eng.orders.get = lambda account, oid: PlacedOrder(
+            id=oid, status="Live", underlying="SPX", price=2.0, price_effect="Credit",
+            time_in_force="GTC",
+            legs=[{"symbol": occ, "action": "Sell to Close", "quantity": 1}])
+        note = self.submit_note()
+        self.assertIn("Order 9 submitted", note)
+        self.assertIn("Sell to Close 1 SPX 6350 Put", note)
+        self.assertIn("at 2.00 Credit, GTC.", note)
+        self.assertNotIn("STO", note)
+
+    def test_note_falls_back_to_the_ticket_and_says_so(self):
+        def unreachable(account, oid):
+            raise BrokerError("GET failed (503)")
+        self.eng.orders.get = unreachable     # and the submit reply has no legs
+        note = self.submit_note()
+        self.assertIn("STO 1 2026-07-24 Fri 6350 Put", note)
+        self.assertIn("the ticket's wording", note)
 
     def test_the_fingerprint_covers_the_account(self):
         tk = tticket.load("schwab")
